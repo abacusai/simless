@@ -104,8 +104,12 @@ Hosts and the agent are already long-lived processes, so the CLI coordinates wit
 
 ## Limits
 
-- **Dynamic Type:** iOS apps on the Mac ignore content-size categories.
-- **Not covered:** gestures, the software keyboard, system UI (permissions, share sheets, StoreKit), and navigation flows across screens.
-- **Fidelity:** not pixel-identical to an iPhone (no notch, no home indicator). Use simless for structure and layout, and the simulator for final pixels.
-- **Project shape:** needs an `.xcodeproj` with an app-hosted unit-test target. Workspaces, Tuist and pure-SwiftPM apps aren't supported yet.
-- **Side effects:** the host runs the app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
+See [How far to trust results](../README.md#how-far-to-trust-results) for what a pass and a failure mean, the known ways a pass can be wrong (hot reload with nested views, device traits, safe areas, Dynamic Type), and how unit tests can differ. In brief:
+
+- **Hot reload replaces only the edited types.** Unedited views that embed an edited type still run the previously built code until the next full build.
+- **Traits aren't an iPhone's.** It's an iOS app on a Mac: no Dynamic Type, no safe-area insets, and the idiom and size class may differ from an iPhone (not yet verified).
+- **No capabilities.** Slots run without app capabilities.
+- **Not covered:** gestures, the software keyboard, system UI and navigation flows.
+- **Project shape:** needs an `.xcodeproj` with an app-hosted unit-test target.
+- **Side effects:** the host runs the app's real startup; guard side effects with `SimlessHost.isActive`.
+- **Private APIs:** the host uses private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime) that an OS update could change.

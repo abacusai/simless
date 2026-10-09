@@ -75,17 +75,24 @@ NoteList.empty · light · iphone 402×874 · 31 ms · patch 2
 
 `simless reload` hot-patches only the edited files plus the fixtures file. If a patch can't express a change (stored properties, function signatures, new types used elsewhere), it falls back to a full build automatically. Compiler errors point at your real `file:line`: fix them and re-run. `simless reload` with no arguments picks up every file edited since the last `simless up`.
 
-## 4. Limits: when the simulator is still needed
+## 4. How far to trust a result
 
-`simless` can't verify:
+A **failure** from simless (a test failure, an issue, a wrong label or frame) is almost always real; fix it. A **pass** is a strong signal, not proof:
+
+- **Nested-view edits.** Hot reload patches only the edited files. If you edited a subview defined in a different file from the view the fixture builds, the render may still show the **old** subview. After editing a subview, either run `simless up` before trusting the render, or render a fixture that builds that subview directly.
+- **Device traits and edges.** It's an iOS app on a Mac: the idiom and size class may not be an iPhone's, there are no safe-area insets (notch, home indicator), and Dynamic Type is ignored. Layouts that branch on traits or hug the screen edges need a simulator check.
+- **"issues: none"** only means the five automatic checks passed. Read the tree yourself.
+- **`simless test`** runs the last full build (not patches) without app capabilities (iCloud, app groups, keychain sharing, push). Tests that depend on those can differ from the simulator.
+
+simless can't verify:
 - Dynamic Type sizes,
 - gestures and swipe actions,
 - the software keyboard,
 - system UI (permissions, share sheets, StoreKit sheets),
 - navigation flows across screens,
-- pixel-exact iPhone rendering (no notch or home indicator).
+- pixel-exact iPhone rendering.
 
-Leave those for a final simulator or XCUITest pass, and say so in your summary. Don't claim `simless` verified them.
+Before you call a UI change done, say what you verified with simless and what still needs a simulator or XCUITest pass. Never claim simless verified any of the above.
 
 ## 5. Housekeeping
 
@@ -94,3 +101,5 @@ Leave those for a final simulator or XCUITest pass, and say so in your summary. 
 - Live reload uses SimlessAgent, which needs Full Disk Access granted once by the user. Without it, reloads still work in about 10 s. Mention it to the user if `simless status` shows live reload off; don't try to grant it yourself.
 
 In your summary, report what you verified with `simless` (which fixtures, devices and modes) and what still needs a simulator.
+
+<!-- SPDX-License-Identifier: MIT-0 · Copyright 2026 Abacus.AI, Inc. -->

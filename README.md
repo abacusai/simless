@@ -137,6 +137,8 @@ simless skill install             install the Claude Code skill
 - Logic: `simless test <Target>/<Class>`. Use the simulator only for gestures, the real keyboard,
   system UI and Dynamic Type, which simless can't check.
 - Compile errors from `simless reload` point at your file:line.
+- A pass is strong evidence, not proof. After editing a subview that lives in another file than the
+  fixture's view, run `simless up` before trusting the render. Say what still needs a simulator.
 ```
 
 ## Cleanup is automatic
@@ -147,12 +149,41 @@ simless skill install             install the Claude Code skill
 - **Compile cache:** the shared Xcode compilation cache is capped at 12 GB.
 - **Generated files** next to your project are git-excluded and removed by `simless clean`.
 
-## Limits
+## How far to trust results
 
-- **Dynamic Type:** not supported (iOS apps on the Mac ignore content-size categories).
-- **Not covered:** gestures, the software keyboard, system UI (permissions, share sheets, StoreKit sheets), and navigation flows across screens.
-- **Fidelity:** not pixel-identical to an iPhone (no notch or home indicator). Use simless for structure and layout, and the simulator for final pixels.
-- **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet.
+**In short: a failure from simless is almost always real, but a pass is a strong signal, not proof.** Use simless for the fast inner loop. Before calling a UI change done, check it once in the simulator, especially anything below that simless can't see.
+
+### What a result means
+
+| Check | When it fails | When it passes |
+|---|---|---|
+| `simless test` (unit tests) | Real failure in your logic, unless the test depends on something listed below | Your logic works, running in your real app process against Apple's iOS frameworks |
+| `simless render` (tree) | A listed issue, or a wrong element, label or frame, is real | The elements, text, labels, identifiers and relative layout are right **on this canvas** |
+| Automatic issue checks | Every flag we've seen was real | Only means none of the five checks fired: unlabeled controls, text read twice by VoiceOver, off-screen or zero-size elements, tap targets under 44 pt, overlapping controls. Not that the screen is correct |
+
+### Known ways a pass can be wrong
+
+- **Hot reload and nested views.** A patch contains only the edited files and the fixtures file. If you edit a subview that's defined in a different file from the view your fixture builds, that parent is still the previously built code, so it may render the **old** subview. To be sure after editing a subview, run `simless up` (a full build) or register a fixture that builds the subview directly. This is a known issue to be fixed.
+- **Device traits.** The app runs as an iOS app on a Mac, so the system may report an iPad idiom or a regular size class even on the `iphone` canvas. Views that branch on `userInterfaceIdiom` or `horizontalSizeClass` can take a different layout branch than on a phone. This is not yet verified, so treat layouts that depend on traits with care.
+- **Safe areas.** There's no notch, Dynamic Island or home indicator, so content pinned to the top or bottom edge can sit differently than on an iPhone.
+- **Text size.** Dynamic Type is ignored, so text that fits at the default size can still truncate at larger sizes.
+- **Pixels.** Rendering is close to, but not pixel-identical with, an iPhone. Use simless for structure and layout, and the simulator for final pixels.
+
+### Unit tests that can behave differently
+
+- **Stripped capabilities.** Hosts run without app capabilities (iCloud/CloudKit, app groups, keychain sharing, push), so tests that need them can fail or take other code paths.
+- **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice` model and idiom, file-system locations, the sandbox.
+- **Last full build.** Tests run against the last full build (`simless up`), not against hot-reload patches. `simless test` warns when sources changed since then.
+
+### Not checked at all
+
+Gestures and swipe actions, the software keyboard, navigation flows across screens, system UI (permissions, share sheets, StoreKit sheets) and Dynamic Type sizes.
+
+### Other limits
+
+- **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` with an app-hosted unit-test target.
+- **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
+- **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app). An OS update could break them; they never ship in release builds.
 
 ## How it works
 
@@ -160,4 +191,4 @@ See [docs/architecture.md](docs/architecture.md) for the design and [docs/findin
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0 ([LICENSE](LICENSE)), copyright 2026 Abacus.AI, Inc. The files in `Templates/` (the render-host kit, the fixtures template and the agent skill), which `simless init` and `simless skill install` copy into your app or machine, are licensed under [MIT No Attribution](LICENSES/MIT-0.txt), so you can ship them without notices. See [NOTICE](NOTICE).

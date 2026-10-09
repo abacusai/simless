@@ -40,7 +40,9 @@ All times are per cycle (or per agent) medians unless noted.
 
 ### Caveats
 
-- **The legacy loop is a lower bound.** It waits a fixed 3 s and takes a screenshot. Real agents usually drive the UI with XCUITest or Maestro, which costs more per check.
+- **The legacy loop has biases in both directions.** It waits a fixed 3 s and takes a screenshot; real agents usually drive the UI with XCUITest or Maestro, which costs more per check. But it rebuilds with `build-for-testing`, which also compiles the test bundles; an agent only checking a screen could use a plain `build`, which is somewhat faster.
+- **One trial per scenario.** Each scenario ran once (3 edit cycles per agent), and the cold starts came from separate runs, so expect run-to-run variance. The scaling trend and the memory gap are far larger than that variance; individual ratios less so.
+- **Only one kind of edit.** Every cycle changed code inside one view's body, the best case for hot reload. Edits a patch can't express (stored properties, signatures) fall back to a full build (~20–110 s on this app).
 - **The first reload in a new worktree is slower** (~7 s) while that worktree's module cache is built. Every later reload took ~2 s.
 - **One machine, one app.** Absolute numbers depend on app size and hardware; the scaling behaviour is the point.
 - **Memory "in use" is noisy.** The system-wide increase over the idle baseline varied between runs (legacy 2.7–6.8 GB, simless 0.9–2.3 GB) because it includes shared and file-backed pages. The summed per-process footprint above is the stable measure.
