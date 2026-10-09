@@ -46,7 +46,9 @@ enum Cleanup {
             let work = "\(Paths.cache)/work"
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
                 let owner = try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)
-                if owner.map({ !exists("\($0)/\(Workspace.configName)") }) ?? true {
+                // Unmarked and recent: possibly being created right now.
+                let recent = Date().timeIntervalSinceReferenceDate - mtime("\(work)/\(dir)") < 1800
+                if owner.map({ !exists("\($0)/\(Workspace.configName)") }) ?? !recent {
                     try? FileManager.default.removeItem(atPath: "\(work)/\(dir)")
                 }
             }

@@ -179,6 +179,10 @@ func cmdUp(_ args: Args) throws {
     Cleanup.capCompileCache()
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
+    // Mark the build cache as ours before creating anything in it, so another
+    // agent's garbage collection never mistakes it for an orphan.
+    try mkdirp(ws.work)
+    try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
     try ws.snapshotSources()
     do { try ws.build() } catch {

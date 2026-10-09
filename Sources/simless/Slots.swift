@@ -81,10 +81,21 @@ enum Slots {
         try withLock("install") {
             let t = now()
             stop(slot)
-            try Shell.check(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
-                             "-destination", Workspace.dfiDestination,
-                             "-only-testing:\(ws.config.testTarget)/SimlessInstallOnly"],
-                            cwd: ws.root, logPath: "\(slot.dir)/install.log", what: "install \(slot.slotID)")
+            let log = "\(slot.dir)/install.log"
+            let r = try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
+                                   "-destination", Workspace.dfiDestination,
+                                   "-only-testing:\(ws.config.testTarget)/SimlessInstallOnly"],
+                                  cwd: ws.root, logPath: log)
+            // The zero-test run only exists to install. Under heavy load the app can
+            // be slower to start than xcodebuild's test-bootstrap timeout, which then
+            // kills it ("never finished bootstrapping"); the install itself succeeded.
+            let installed = (try? FileManager.default.contentsOfDirectory(atPath: "\(slot.dir)/Debug-iphoneos/.XCInstall"))?
+                .contains { $0.hasSuffix(".app") } ?? false
+            guard r.code == 0 || (installed && r.out.contains("never finished bootstrapping")) else {
+                throw SimlessError("install \(slot.slotID) failed (exit \(r.code)); log: \(log)\n"
+                                   + r.out.split(separator: "\n").suffix(8).joined(separator: "\n"))
+            }
+            terminateAll(slot)
             Log.step("installed \(slot.slotID) in \(secs(t))")
         }
     }
@@ -98,26 +109,37 @@ enum Slots {
         guard let wrapper = (try? FileManager.default.contentsOfDirectory(atPath: installed))?.first(where: { $0.hasSuffix(".app") }) else {
             throw SimlessError("\(slot.slotID) is not installed; run `simless up`")
         }
-        // An instance still exiting (the install or test run's app) would swallow
-        // the launch; macOS runs one instance per bundle id.
-        let deadline = now() + 15
-        while now() < deadline, !NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID).isEmpty {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        for attempt in 1...3 {
-            _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "\(installed)/\(wrapper)", "--args",
-                                "--simless-port", String(slot.port),
-                                "--simless-idle", String(idleMinutes * 60)])
-            let deadline = now() + 8
-            while now() < deadline {
-                if let stats = slot.stats() {
-                    Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
-                    try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
-                    return
-                }
-                Thread.sleep(forTimeInterval: 0.1)
+        // Any instance not started by this launch (the install or test run's app,
+        // which isn't a host) would swallow `open`: macOS runs one instance per
+        // bundle id.
+        if slot.stats() == nil { terminateAll(slot) }
+        // The app's own startup can take a while on a busy machine: wait as long
+        // as the process is alive, and reopen only when it isn't running.
+        let startDeadline = now() + 60
+        var opened = 0.0
+        while now() < startDeadline {
+            let instances = NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID)
+            // An instance that predates our open is not the host we asked for.
+            let launchedAt = Date(timeIntervalSinceReferenceDate: opened - 1)
+            if opened > 0, instances.contains(where: { ($0.launchDate ?? .distantPast) < launchedAt }) {
+                terminateAll(slot)
+                opened = 0
             }
-            Log.debug("launch attempt \(attempt) timed out")
+            let running = !NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID).isEmpty
+            if !running && now() - opened > 3 {
+                // Timestamp before `open`: on a busy machine it can take seconds to
+                // return, and the new instance must not look older than the launch.
+                opened = now()
+                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "\(installed)/\(wrapper)", "--args",
+                                    "--simless-port", String(slot.port),
+                                    "--simless-idle", String(idleMinutes * 60)])
+            }
+            if let stats = slot.stats() {
+                Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
         }
         throw SimlessError("host \(slot.slotID) did not start; see \(slot.dir)/install.log")
     }
@@ -131,6 +153,21 @@ enum Slots {
         } else {
             Log.step("re-applied patch \(slot.patch)")
         }
+    }
+
+    /// Terminates every instance of the slot's bundle id, escalating to SIGKILL.
+    static func terminateAll(_ slot: SlotRecord) {
+        var apps = NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID)
+        guard !apps.isEmpty else { return }
+        apps.forEach { $0.forceTerminate() }
+        let deadline = now() + 5
+        while now() < deadline {
+            apps = NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID)
+            if apps.isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        apps.forEach { kill($0.processIdentifier, SIGKILL) }
+        Thread.sleep(forTimeInterval: 0.5)
     }
 
     static func stop(_ slot: SlotRecord) {
