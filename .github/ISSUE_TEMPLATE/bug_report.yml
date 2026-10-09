@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a problem with simless
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before opening a new report. Report vulnerabilities
+        [privately](https://github.com/abacusai/simless/security/advisories/new).
+        Remove signing material, credentials and proprietary code from logs.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran and their output.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: simless version
+      description: Output of `simless version` (includes Xcode and macOS). For a source build, include the commit.
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac
+      placeholder: e.g. MacBook Pro M2 Pro, 32 GB
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional details
+      description: Project shape (targets, Swift packages, UIKit or SwiftUI), `simless status` output, and for render differences the `simless calibrate` output for the fixture.

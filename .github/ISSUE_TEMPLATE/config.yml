@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation and support
+    url: https://github.com/abacusai/simless/blob/main/SUPPORT.md
+    about: Setup help, common problems, and how far to trust results.
+  - name: Security vulnerability
+    url: https://github.com/abacusai/simless/security/advisories/new
+    about: Report privately. Please do not open a public issue.

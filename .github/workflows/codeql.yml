@@ -1,0 +1,53 @@
+name: CodeQL
+
+# Static analysis for the bugs a reviewer is worst at spotting by eye: a path
+# built from untrusted input, an unchecked file operation, a command assembled
+# from user data. simless runs processes, writes into sandbox containers through
+# a Full Disk Access helper, and loads code, which is the surface this covers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, because the query packs update: a scan that only runs on pushes
+    # stops finding new bug classes when the repository goes quiet.
+    - cron: "30 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # Code scanning is free for public repositories; gated so it switches on by
+    # itself when the repository is public.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ${{ matrix.language == 'swift' && 'macos-15' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [swift, python]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.language == 'swift' && 'manual' || 'none' }}
+
+      - name: Build (Swift)
+        if: matrix.language == 'swift'
+        run: |
+          swift build -c release
+          swiftc -O Agent/main.swift -o "$RUNNER_TEMP/SimlessAgent"
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: "/language:${{ matrix.language }}"

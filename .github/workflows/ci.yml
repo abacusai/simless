@@ -1,0 +1,46 @@
+name: CI
+
+# Builds and checks; it does not release. Nothing here needs a secret, so a
+# pull request from a fork runs the same checks as a push to main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and check
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the CLI
+        run: swift build -c release
+
+      - name: Build SimlessAgent
+        run: swiftc -O Agent/main.swift -o "$RUNNER_TEMP/SimlessAgent"
+
+      # The templates are copied into users' iOS apps; type-check them together
+      # against the iOS SDK in the configuration they ship in (DEBUG).
+      - name: Type-check the app templates (iOS)
+        run: |
+          xcrun swiftc -typecheck -D DEBUG \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" -target arm64-apple-ios17.0 \
+            Templates/SimlessKit.swift Templates/SimlessFixtures.swift
+
+      - name: Check benchmark scripts
+        run: python3 -m py_compile bench/bench.py bench/memory.py
+
+      - name: CLI smoke test
+        run: |
+          .build/release/simless --help >/dev/null
+          .build/release/simless version
