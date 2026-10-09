@@ -14,6 +14,7 @@ enum Patch {
     struct Result {
         let mode: Mode
         let files: [String]
+        let extra: [String]     // unedited files patched because they embed an edited view
         let compile: Double
         let apply: Double
     }
@@ -21,7 +22,8 @@ enum Patch {
     static func apply(ws: Workspace, slot: inout SlotRecord, files: [String]) throws -> Result {
         let settings = try ws.settings()
         let t0 = now()
-        let dylib = try compile(ws: ws, slot: slot, settings: settings, files: files)
+        let scope = try PatchScope.files(ws: ws, edited: files)
+        let dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all)
         Cleanup.prunePatches(ws: ws)
         let tCompile = now() - t0
 
@@ -36,7 +38,7 @@ enum Patch {
         slot.patch += 1
         slot.lastPatch = dylib
         try GlobalState.update(slot)
-        return Result(mode: mode, files: files, compile: tCompile, apply: now() - t1)
+        return Result(mode: mode, files: files, extra: scope.extra, compile: tCompile, apply: now() - t1)
     }
 
     // MARK: - Compile

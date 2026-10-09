@@ -215,7 +215,7 @@ struct Workspace {
 
     var snapshotPath: String { "\(work)/sources.json" }
 
-    private func swiftSources() -> [String] {
+    func swiftSources() -> [String] {
         var out: [String] = []
         for dir in config.sourceDirs {
             let base = "\(root)/\(dir)"

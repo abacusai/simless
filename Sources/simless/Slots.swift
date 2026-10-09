@@ -31,6 +31,10 @@ enum Slots {
         try Shell.check(["/usr/libexec/PlistBuddy", "-c", "Set :CFBundleIdentifier \(slot.slotID)", info])
         _ = try? Shell.run(["/usr/libexec/PlistBuddy", "-c", "Delete :LSUIElement", info])
         try Shell.check(["/usr/libexec/PlistBuddy", "-c", "Add :LSUIElement bool true", info])
+        // Background-only: macOS never shows its windows, including in the install
+        // and unit-test runs that launch the app without simless's arguments.
+        _ = try? Shell.run(["/usr/libexec/PlistBuddy", "-c", "Delete :LSBackgroundOnly", info])
+        try Shell.check(["/usr/libexec/PlistBuddy", "-c", "Add :LSBackgroundOnly bool true", info])
         try fm.copyItem(atPath: signing.profilePath, toPath: "\(app)/embedded.mobileprovision")
 
         let entitlements = "\(slot.dir)/entitlements.plist"
@@ -58,6 +62,12 @@ enum Slots {
         let n = Int(try Shell.check(["/usr/bin/plutil", "-extract", "TestConfigurations.0.TestTargets", "raw", xctestrun])
             .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         for i in 0..<n {
+            // Install and test runs launch the app too; keep them headless.
+            let env = "TestConfigurations.0.TestTargets.\(i).EnvironmentVariables"
+            if (try? Shell.check(["/usr/bin/plutil", "-extract", env, "raw", xctestrun])) == nil {
+                _ = try? Shell.run(["/usr/bin/plutil", "-insert", env, "-dictionary", xctestrun])
+            }
+            try Shell.check(["/usr/bin/plutil", "-replace", "\(env).SIMLESS_HEADLESS", "-string", "1", xctestrun])
             let key = "TestConfigurations.0.TestTargets.\(i).TestHostBundleIdentifier"
             if (try? Shell.check(["/usr/bin/plutil", "-extract", key, "raw", xctestrun]))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) == settings.bundleID {
@@ -122,16 +132,29 @@ enum Slots {
         // as the process is alive, and reopen only when it isn't running.
         let startDeadline = now() + 60
         var opened = 0.0
+        var restarts = 0
+        let patience: [Double] = [10, 20, 30]
         while now() < startDeadline {
             let instances = NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID)
             // An instance that predates our open is not the host we asked for.
             let launchedAt = Date(timeIntervalSinceReferenceDate: opened - 1)
             if opened > 0, instances.contains(where: { ($0.launchDate ?? .distantPast) < launchedAt }) {
+                Log.debug("stale instance: launchDates \(instances.map { $0.launchDate.map { "\($0.timeIntervalSinceReferenceDate - opened)" } ?? "nil" })")
                 terminateAll(slot)
                 opened = 0
             }
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID).isEmpty
+            // Running but not serving: occasionally a launch never finishes starting
+            // (seen right after test runs). Restart it, with growing patience so a
+            // slow start on a loaded machine still gets time.
+            if running, opened > 0, now() - opened > patience[min(restarts, patience.count - 1)] {
+                Log.debug("host process not serving after \(Int(now() - opened))s; restarting it")
+                terminateAll(slot)
+                restarts += 1
+                opened = 0
+            }
             if !running && now() - opened > 3 {
+                Log.debug("not running; opening (\(String(format: "%.1f", now() - t))s)")
                 // Timestamp before `open`: on a busy machine it can take seconds to
                 // return, and the new instance must not look older than the launch.
                 opened = now()

@@ -11,21 +11,49 @@ enum Render {
         var json = false
     }
 
-    static let canvases: [String: (Double, Double)] = [
-        "iphone": (402, 874),        // iPhone 17 Pro
-        "iphone-small": (375, 667),  // iPhone SE
-        "iphone-max": (440, 956),    // iPhone 17 Pro Max
-        "ipad": (820, 1180),         // iPad Air 11"
+    struct Canvas {
+        let width: Double, height: Double
+        let safeTop: Double, safeBottom: Double   // portrait safe-area insets of the real device
+    }
+
+    static let canvases: [String: Canvas] = [
+        "iphone": Canvas(width: 402, height: 874, safeTop: 62, safeBottom: 34),        // iPhone 17 Pro
+        "iphone-small": Canvas(width: 375, height: 667, safeTop: 20, safeBottom: 0),   // iPhone SE
+        "iphone-max": Canvas(width: 440, height: 956, safeTop: 62, safeBottom: 34),    // iPhone 17 Pro Max
+        "ipad": Canvas(width: 820, height: 1180, safeTop: 24, safeBottom: 20),         // iPad Air 11"
     ]
+
+    static func canvas(_ device: String) throws -> Canvas {
+        guard let c = canvases[device] else {
+            throw SimlessError("unknown device '\(device)'; one of \(canvases.keys.sorted().joined(separator: ", "))")
+        }
+        return c
+    }
+
+    static func request(fixture: String, dark: Bool, canvas c: Canvas, image: Bool) -> [String: Any] {
+        ["cmd": "render", "fixture": fixture, "style": dark ? "dark" : "light", "width": c.width, "height": c.height,
+         "safeTop": c.safeTop, "safeBottom": c.safeBottom, "image": image]
+    }
+
+    /// One-line summary of the traits the view saw, plus warnings where they
+    /// can't match the requested device.
+    static func traitsText(_ r: [String: Any], device: String) -> [String] {
+        guard let t = r["traits"] as? [String: Any] else { return [] }
+        let safe = (t["safeArea"] as? [Double]) ?? []
+        var lines = ["  traits: \(t["horizontalSizeClass"] ?? "?")/\(t["verticalSizeClass"] ?? "?") size class, idiom \(t["idiom"] ?? "?"), safe area top \(Int(safe.first ?? 0)) bottom \(Int(safe.count > 2 ? safe[2] : 0))"]
+        let wantPhone = device != "ipad"
+        if wantPhone, t["deviceIdiom"] as? String != "phone" {
+            lines.append("  note: UIDevice.current.userInterfaceIdiom reports \(t["deviceIdiom"] ?? "?") here; views that read it directly (not the trait collection) may take their iPad branch")
+        }
+        return lines
+    }
 
     /// Renders one fixture and returns the text an agent reads (or JSON).
     static func run(slot: SlotRecord, fixture: String, options: Options) throws -> (text: String, issues: Int) {
-        guard let (w, h) = canvases[options.device] else {
-            throw SimlessError("unknown device '\(options.device)'; one of \(canvases.keys.sorted().joined(separator: ", "))")
-        }
+        let c = try canvas(options.device)
+        let (w, h) = (c.width, c.height)
         let client = try slot.client(timeout: 30)
-        let r = try client.call(["cmd": "render", "fixture": fixture, "style": options.dark ? "dark" : "light",
-                                 "width": w, "height": h, "image": options.pngPath != nil])
+        let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil))
         guard r["ok"] as? Bool == true else {
             let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
             throw SimlessError("\(r["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))
@@ -47,6 +75,7 @@ enum Render {
         let ms = (r["renderMs"] as? Double).map { String(format: "%.0f ms", $0) } ?? ""
         let patch = (r["patch"] as? Int).map { $0 > 0 ? " · patch \($0)" : "" } ?? ""
         lines.append("\(fixture) · \(options.dark ? "dark" : "light") · \(options.device) \(Int(w))×\(Int(h)) · \(ms)\(patch)")
+        lines += traitsText(r, device: options.device)
         for n in nodes {
             let role = (n["role"] as? String ?? "element").padding(toLength: 7, withPad: " ", startingAt: 0)
             var label = (n["label"] as? String).map { "\"\($0)\"" } ?? "(no label)"

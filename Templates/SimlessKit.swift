@@ -51,8 +51,20 @@ enum SimlessHost {
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
         let args = ProcessInfo.processInfo.arguments
-        guard let i = args.firstIndex(of: "--simless-port"), i + 1 < args.count,
-              let port = UInt16(args[i + 1]) else { return }
+        let port = args.firstIndex(of: "--simless-port").flatMap { i in i + 1 < args.count ? UInt16(args[i + 1]) : nil }
+        // simless also launches the app to install it and to run unit tests;
+        // those runs set SIMLESS_HEADLESS so they never show a window either.
+        let launchedBySimless = port != nil || ProcessInfo.processInfo.environment["SIMLESS_HEADLESS"] == "1"
+        guard launchedBySimless else { return }
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            // No window may reach the screen: suppress ordering before the first
+            // window exists, hide, and hide again whenever one appears.
+            suppressWindowOrdering()
+            goHeadless()
+            NotificationCenter.default.addObserver(forName: UIWindow.didBecomeVisibleNotification, object: nil,
+                                                   queue: .main) { _ in MainActor.assumeIsolated { goHeadless() } }
+        }
+        guard let port else { return }
         if let j = args.firstIndex(of: "--simless-idle"), j + 1 < args.count, let s = TimeInterval(args[j + 1]) {
             idleLimit = s
         }
@@ -69,9 +81,20 @@ enum SimlessHost {
         enableAccessibilityAutomation()
         simlessFixtures(registry)
         loadBundledPatch()
-        let w = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
-        w.isHidden = false
-        window = w
+        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            let w = UIWindow(frame: frame)
+            w.isHidden = false
+            window = w
+        } else if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            // In a simulator (`simless calibrate`): a real scene window, so the
+            // device's own safe areas and traits apply.
+            let w = UIWindow(windowScene: scene)
+            w.frame = frame
+            w.windowLevel = .alert + 1
+            w.makeKeyAndVisible()
+            window = w
+        }
         do {
             let params = NWParameters.tcp
             params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
@@ -93,6 +116,8 @@ enum SimlessHost {
         var style: String?
         var width: Double?
         var height: Double?
+        var safeTop: Double?       // emulated safe area (Mac only; a simulator has real ones)
+        var safeBottom: Double?
         var image: Bool?
         var file: String?
     }
@@ -103,6 +128,15 @@ enum SimlessHost {
         let value: String?
         let id: String?
         let frame: [Double]
+    }
+
+    private struct Traits: Encodable {
+        let horizontalSizeClass: String
+        let verticalSizeClass: String
+        let idiom: String          // what the view's trait collection reports
+        let deviceIdiom: String    // UIDevice.current.userInterfaceIdiom (can't be overridden)
+        let safeArea: [Double]     // top, left, bottom, right
+        let onMac: Bool
     }
 
     private struct Response: Encodable {
@@ -119,6 +153,7 @@ enum SimlessHost {
         var nodes: [Node]?
         var png: String?
         var loadMs: Double?
+        var traits: Traits?
     }
 
     private static func serve(_ conn: NWConnection) {
@@ -179,6 +214,16 @@ enum SimlessHost {
         // The hidden window lands on whichever display macOS picks; pin the
         // scale so layout rounding (and PNGs) don't depend on that display.
         host.traitOverrides.displayScale = 2
+        // An iOS app on a Mac reports iPad-like traits; give phone canvases a
+        // phone's traits and, on the Mac, the device's safe areas (notch, home
+        // indicator). A simulator already has the real ones.
+        let phone = rect.width < 600
+        host.traitOverrides.horizontalSizeClass = phone ? .compact : .regular
+        host.traitOverrides.verticalSizeClass = .regular
+        host.traitOverrides.userInterfaceIdiom = phone ? .phone : .pad
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            host.additionalSafeAreaInsets = UIEdgeInsets(top: req.safeTop ?? 0, left: 0, bottom: req.safeBottom ?? 0, right: 0)
+        }
         window.rootViewController = host
         host.view.frame = rect
         host.view.layoutIfNeeded()
@@ -198,8 +243,18 @@ enum SimlessHost {
         }
         renders += 1
         goHeadless()
-        return Response(patch: patchGeneration, fixture: name,
-                        renderMs: (CFAbsoluteTimeGetCurrent() - start) * 1000, nodes: nodes, png: png)
+        let tc = host.traitCollection, insets = host.view.safeAreaInsets
+        func sizeClass(_ s: UIUserInterfaceSizeClass) -> String { s == .compact ? "compact" : s == .regular ? "regular" : "unspecified" }
+        func idiom(_ i: UIUserInterfaceIdiom) -> String {
+            switch i { case .phone: "phone"; case .pad: "pad"; case .mac: "mac"; default: "other" }
+        }
+        var r = Response(patch: patchGeneration, fixture: name,
+                         renderMs: (CFAbsoluteTimeGetCurrent() - start) * 1000, nodes: nodes, png: png)
+        r.traits = Traits(horizontalSizeClass: sizeClass(tc.horizontalSizeClass), verticalSizeClass: sizeClass(tc.verticalSizeClass),
+                          idiom: idiom(tc.userInterfaceIdiom), deviceIdiom: idiom(UIDevice.current.userInterfaceIdiom),
+                          safeArea: [insets.top, insets.left, insets.bottom, insets.right].map { Double($0) },
+                          onMac: ProcessInfo.processInfo.isiOSAppOnMac)
+        return r
     }
 
     // MARK: - Accessibility tree
@@ -321,6 +376,38 @@ enum SimlessHost {
         typealias PolicyFn = @convention(c) (AnyObject, Selector, Int) -> Bool
         _ = unsafeBitCast(app.method(for: setPolicy), to: PolicyFn.self)(app, setPolicy, 2)  // .prohibited
         app.perform(NSSelectorFromString("hide:"), with: nil)
+        // Belt and braces: a window ordered in before `hide:` takes effect stays
+        // fully transparent and click-through. Rendering doesn't depend on it.
+        typealias FloatFn = @convention(c) (AnyObject, Selector, CGFloat) -> Void
+        typealias BoolFn = @convention(c) (AnyObject, Selector, Bool) -> Void
+        let alpha = NSSelectorFromString("setAlphaValue:"), ignore = NSSelectorFromString("setIgnoresMouseEvents:")
+        for w in (app.value(forKey: "windows") as? [NSObject]) ?? [] {
+            unsafeBitCast(w.method(for: alpha), to: FloatFn.self)(w, alpha, 0)
+            unsafeBitCast(w.method(for: ignore), to: BoolFn.self)(w, ignore, true)
+        }
+    }
+
+    /// Makes AppKit's window-ordering calls no-ops for this process, so the
+    /// app's own windows never appear on screen. Rendering draws off-screen and
+    /// doesn't need them.
+    private static func suppressWindowOrdering() {
+        let noOp1: @convention(block) (AnyObject) -> Void = { _ in }
+        let noOpSender: @convention(block) (AnyObject, AnyObject?) -> Void = { _, _ in }
+        let noOpOrder: @convention(block) (AnyObject, Int, Int) -> Void = { _, _, _ in }
+        let replacements: [(String, AnyObject)] = [
+            ("orderWindow:relativeTo:", unsafeBitCast(noOpOrder, to: AnyObject.self)),
+            ("orderFront:", unsafeBitCast(noOpSender, to: AnyObject.self)),
+            ("makeKeyAndOrderFront:", unsafeBitCast(noOpSender, to: AnyObject.self)),
+            ("orderFrontRegardless", unsafeBitCast(noOp1, to: AnyObject.self)),
+        ]
+        for name in ["NSWindow", "UINSWindow"] {
+            guard let cls = NSClassFromString(name) else { continue }
+            for (sel, block) in replacements {
+                if let m = class_getInstanceMethod(cls, NSSelectorFromString(sel)) {
+                    method_setImplementation(m, imp_implementationWithBlock(block))
+                }
+            }
+        }
     }
 
     private static func footprintMB() -> Double {

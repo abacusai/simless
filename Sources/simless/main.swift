@@ -3,6 +3,8 @@
 
 import Foundation
 
+let version = "0.1.0"
+
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
@@ -14,12 +16,14 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless reload [files...]        hot-reload edited view files (default: all edited since `simless up`)
         [--render <fixture|all>] [--no-fallback]
   simless test [Target[/Class[/method]]...]   unit tests on the Mac, no simulator
+  simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
   simless status                   slots, hosts, live-reload availability
   simless down [--all]             stop this worktree's host (or every host); relaunches on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
   simless skill install            install the Claude Code skill so agents know how to use simless
   simless agent install            build + start SimlessAgent (enables ~1.5 s live reload; needs Full Disk Access)
 
+  simless version             version, Xcode and macOS (include in bug reports)
   -v, --verbose               show every command simless runs
 
 AI agents: `simless skill install` gives Claude Code a skill describing the whole workflow.
@@ -274,7 +278,12 @@ func cmdReload(_ args: Args) throws {
             let names = r.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
             print(String(format: "reloaded (%@) in %.1fs: compile %.1fs + apply %.1fs; files edited since `simless up`: %@",
                          r.mode.rawValue, now() - t, r.compile, r.apply, names))
-        } catch let error as SimlessError where error.description.hasPrefix("patch compile failed") {
+            if !r.extra.isEmpty {
+                print("  also patched (they embed an edited view on the way to a fixture): "
+                      + r.extra.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+            }
+        } catch let error as SimlessError where error.description.hasPrefix("patch compile failed")
+                    || error.description.hasPrefix("patch can't cover") {
             print(error.description)
             if args.flags.contains("--no-fallback") { exit(1) }
             // Either a real compile error or an edit a patch can't express (stored
@@ -368,7 +377,7 @@ guard let command = raw.first else { print(usage); exit(0) }
 let args = Args(Array(raw.dropFirst()))
 
 do {
-    if !["help", "-h", "--help", "init", "skill"].contains(command) { Cleanup.collectGarbage() }
+    if !["help", "-h", "--help", "init", "skill", "version", "--version"].contains(command) { Cleanup.collectGarbage() }
     switch command {
     case "init": try cmdInit(args)
     case "up": try cmdUp(args)
@@ -379,8 +388,14 @@ do {
     case "down": try cmdDown(args)
     case "agent": try cmdAgent(args)
     case "clean": try Cleanup.clean(all: args.flags.contains("--all"))
+    case "calibrate":
+        let ws = try Workspace.load()
+        try Calibrate.run(ws: ws, slot: try currentSlot(ws), only: args.positional.first)
     case "skill": try cmdSkill(args)
     case "help", "-h", "--help": print(usage)
+    case "version", "--version":
+        let xcode = (try? Shell.run(["xcodebuild", "-version"]).out.split(separator: "\n").first.map(String.init)) ?? nil
+        print("simless \(version) · \(xcode ?? "Xcode not found") · macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
     default: print(usage); exit(2)
     }
 } catch {
