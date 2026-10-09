@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abacus.AI, Inc.
 """Steady-state memory for N agents: N booted simulators running the app (legacy)
 vs N simless hosts. Run after bench.py, which leaves the legacy builds and the
 simless slots in place.

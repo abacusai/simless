@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abacus.AI, Inc.
+
 // SimlessAgent: the only Simless process with Full Disk Access.
 //
 // Its single job is copying a patch dylib that `simless` compiled into a render-host

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abacus.AI, Inc.
 """Benchmark simless against the legacy simulator workflow on your own app.
 
 The legacy loop is what coding agents do today to check a SwiftUI change: an

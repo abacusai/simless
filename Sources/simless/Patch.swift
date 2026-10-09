@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abacus.AI, Inc.
+
 import Foundation
 
 /// Hot reload. Edited view files are compiled, together with the fixtures

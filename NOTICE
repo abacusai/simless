@@ -1,4 +1,8 @@
 simless
-Copyright 2026 Abacus.AI
+Copyright 2026 Abacus.AI, Inc.
 
-Licensed under the Apache License, Version 2.0 (see LICENSE).
+Licensed under the Apache License, Version 2.0 (see LICENSE), except the files
+in Templates/, which are licensed under MIT No Attribution (see
+LICENSES/MIT-0.txt). `simless init` and `simless skill install` copy those files
+into your app or your machine; you may use, modify and ship them without
+attribution or notice requirements.

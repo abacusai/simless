@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abacus.AI, Inc.
+
 import Foundation
 
 /// SimlessAgent lifecycle. The agent is optional: without it (or without
