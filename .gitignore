@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+.DS_Store
+bench/results-*.json
+bench/config.json
