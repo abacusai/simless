@@ -23,4 +23,4 @@ The legacy loop is a **lower bound**: it waits a fixed settle time and takes a s
 python3 -I bench/bench.py bench/config.json --agents 1,3,5 --cycles 3
 ```
 
-Results print as they finish and are written to `bench/results-<timestamp>.json`. Close other simulator or Xcode workloads first, and expect the legacy part to load the machine heavily. That load is what's being measured.
+Results print as they finish and are written to `bench/results-<timestamp>.json`. After that, `python3 -I bench/memory.py bench/config.json --agents 5` measures steady-state memory (N booted simulators running the app vs N simless hosts). Close other simulator or Xcode workloads first, and expect the legacy part to load the machine heavily. That load is what's being measured.

@@ -4,7 +4,7 @@ These are the platform facts behind simless's design, found by building it again
 
 ## Why not the simulator
 
-- **Memory:** a stock iOS 26/27 simulator uses about **4 GB and ~250 processes** once booted. One `xcodebuild` UI-test run with parallel testing clones and boots several of them. During development we observed **one agent's single UI-test run with 3 cloned simulators running**, and 556 simulator processes on the machine in total.
+- **Memory:** a booted iOS 27 simulator running a real app holds about **2.2 GB of private memory across ~210 processes** (5 simulators: 11.2 GB, 1,071 processes; see [benchmarks](benchmarks.md)). One `xcodebuild` UI-test run with parallel testing clones and boots several of them. During development we observed **one agent's single UI-test run with 3 cloned simulators running**, and 556 simulator processes on the machine in total.
 - **Compilation:** each agent also runs its own full `xcodebuild`, and each one wants every core.
 - **Why it breaks down:** with 4–5 agents, a 32 GB Mac starts swapping. The bottleneck is "N × (build + simulator)", not any single tool.
 

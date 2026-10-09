@@ -17,7 +17,7 @@ EmptyState.all · light · iphone 402×874 · 43 ms · patch 1
 
 ## Why
 
-Coding agents check UI changes by building for the iOS Simulator, installing, launching and taking screenshots. Each agent pays for a full simulator (about 4 GB and ~250 processes) plus its own `xcodebuild`. With 4–5 agents in parallel, a 32 GB Mac swaps and everything slows to a crawl.
+Coding agents check UI changes by building for the iOS Simulator, installing, launching and taking screenshots. Each agent pays for its own booted simulator (we measured ~2.2 GB of private memory and ~210 processes per simulator running a real app) plus its own `xcodebuild`. With 4–5 agents in parallel, a 32 GB Mac swaps and everything slows to a crawl.
 
 simless replaces that loop:
 - **No simulator:** the app's iOS slice runs natively on Apple Silicon ("Designed for iPad"). It's your real app target, views and dependencies, at ~30 MB per host.
@@ -28,7 +28,18 @@ simless replaces that loop:
 
 ## Results
 
-<!-- BENCHMARKS -->
+Measured on a production SwiftUI app (~280 Swift files, several large Swift packages) on an M2 Pro MacBook Pro with 32 GB of RAM. Legacy means one iOS Simulator per agent, with an incremental `xcodebuild`, install, launch and screenshot for every check.
+
+| | Legacy (simulator) | simless | |
+|---|---|---|---|
+| Edit → verified screen, 1 agent | 21.9 s | **2.2 s** | **10×** |
+| Edit → verified screen, 5 agents in parallel | 37.4 s | **2.2 s** | **17×** |
+| 5 agents start cold at once (per agent) | 732 s | **344 s** | 2.1× |
+| Memory held by 5 agents (steady state) | 11.2 GB, 1,071 processes | **0.15 GB, 6 processes** | **~75×** |
+| Peak load average, 5 agents starting cold | ~1,010 | **~82** | 12× |
+| Unit tests (2 classes) | 13.1 s | **5.6 s** | 2.3× |
+
+Legacy gets slower with every agent you add; simless stays at ~2 s per edit. Full method, caveats and reproduction steps: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Requirements
 
