@@ -82,7 +82,9 @@ enum Slots {
             let t = now()
             stop(slot)
             let log = "\(slot.dir)/install.log"
+            // -derivedDataPath keeps xcodebuild's logs out of ~/Library/Developer/Xcode/DerivedData.
             let r = try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
+                                   "-derivedDataPath", ws.derivedData,
                                    "-destination", Workspace.dfiDestination,
                                    "-only-testing:\(ws.config.testTarget)/SimlessInstallOnly"],
                                   cwd: ws.root, logPath: log)

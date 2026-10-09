@@ -51,7 +51,15 @@ func cmdInit(_ args: Args) throws {
         .filter { $0.hasSuffix(".xcodeproj") && !$0.hasSuffix(".simless.xcodeproj") }.sorted().first
     guard let project else { throw SimlessError("no .xcodeproj in \(root) (workspaces are not supported yet)") }
 
-    let listing = try Shell.check(["xcodebuild", "-list", "-json", "-project", project], cwd: root)
+    // `-list` can't take -derivedDataPath and may create a folder in the default
+    // DerivedData; remove one only if this call created it.
+    let defaultDD = "\(Paths.home)/Library/Developer/Xcode/DerivedData"
+    let existing = Set((try? fm.contentsOfDirectory(atPath: defaultDD)) ?? [])
+    let listing = try Shell.check(["xcodebuild", "-list", "-json", "-project", project], cwd: root, stdoutOnly: true)
+    let projectName = (project as NSString).deletingPathExtension
+    for dir in (try? fm.contentsOfDirectory(atPath: defaultDD)) ?? [] where !existing.contains(dir) && dir.hasPrefix("\(projectName)-") {
+        try? fm.removeItem(atPath: "\(defaultDD)/\(dir)")
+    }
     guard let start = listing.firstIndex(of: "{"),
           let json = try JSONSerialization.jsonObject(with: Data(listing[start...].utf8)) as? [String: Any],
           let p = json["project"] as? [String: Any] else { throw SimlessError("could not list \(project)") }
@@ -288,6 +296,7 @@ func cmdTest(_ args: Args) throws {
     defer { try? Slots.launch(slot, idleMinutes: ws.idleMinutes) }
     let r = try withLock("install") {
         try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
+                       "-derivedDataPath", ws.derivedData,
                        "-destination", Workspace.dfiDestination] + filters.map { "-only-testing:\($0)" },
                       cwd: ws.root, logPath: "\(slot.dir)/test.log")
     }

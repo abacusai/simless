@@ -168,12 +168,14 @@ struct Workspace {
     }
 
     private func captureSettings(project: String) throws {
+        // Without -derivedDataPath this resolves packages into the default DerivedData.
         let out = try Shell.check(["xcodebuild", "-showBuildSettings", "-json", "-project", project,
-                                   "-target", config.appTarget, "-configuration", "Debug", "-sdk", "iphoneos"],
-                                  cwd: root, what: "xcodebuild -showBuildSettings")
+                                   "-scheme", config.scheme, "-derivedDataPath", derivedData,
+                                   "-configuration", "Debug", "-sdk", "iphoneos"],
+                                  cwd: root, what: "xcodebuild -showBuildSettings", stdoutOnly: true)
         guard let start = out.firstIndex(of: "["),
               let arr = try JSONSerialization.jsonObject(with: Data(out[start...].utf8)) as? [[String: Any]],
-              let bs = arr.first?["buildSettings"] as? [String: String] else {
+              let bs = (arr.first { $0["target"] as? String == config.appTarget } ?? arr.first)?["buildSettings"] as? [String: String] else {
             throw SimlessError("could not read build settings for \(config.appTarget)")
         }
         var features: [String] = []

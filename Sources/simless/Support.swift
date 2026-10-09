@@ -78,8 +78,9 @@ struct Shell {
 
     /// Runs a command, capturing stdout+stderr (into `logPath` too, if given).
     @discardableResult
+    /// `stdoutOnly`: discard stderr (for commands whose stdout is JSON).
     static func run(_ args: [String], cwd: String? = nil, env: [String: String] = [:],
-                    logPath: String? = nil, useXcode: Bool = true) throws -> Result {
+                    logPath: String? = nil, useXcode: Bool = true, stdoutOnly: Bool = false) throws -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: args[0].hasPrefix("/") ? args[0] : "/usr/bin/env")
         p.arguments = args[0].hasPrefix("/") ? Array(args.dropFirst()) : args
@@ -93,7 +94,7 @@ struct Shell {
         FileManager.default.createFile(atPath: out, contents: nil)
         let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
         p.standardOutput = handle
-        p.standardError = handle
+        p.standardError = stdoutOnly ? FileHandle.nullDevice : handle
         try p.run()
         p.waitUntilExit()
         try handle.close()
@@ -105,8 +106,8 @@ struct Shell {
 
     @discardableResult
     static func check(_ args: [String], cwd: String? = nil, logPath: String? = nil,
-                      what: String? = nil) throws -> String {
-        let r = try run(args, cwd: cwd, logPath: logPath)
+                      what: String? = nil, stdoutOnly: Bool = false) throws -> String {
+        let r = try run(args, cwd: cwd, logPath: logPath, stdoutOnly: stdoutOnly)
         guard r.code == 0 else {
             let tail = r.out.split(separator: "\n").suffix(15).joined(separator: "\n")
             throw SimlessError("\(what ?? args.first ?? "command") failed (exit \(r.code))"
