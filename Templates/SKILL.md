@@ -54,6 +54,7 @@ simless reload --render <Fixture>            # after editing views: hot reload (
 simless render all                           # every fixture
 simless render <Fixture> --dark --device ipad          # devices: iphone, iphone-small, iphone-max, ipad
 simless render all --matrix                  # every fixture × light/dark × iphone, iphone-small, ipad
+simless calibrate                            # once per app: compare every fixture with an iOS Simulator
 simless render <Fixture> --png /tmp/shots/   # only when you need to see pixels
 simless test MyAppTests/SomeTests            # unit tests on the Mac, no simulator
 ```
@@ -79,8 +80,10 @@ NoteList.empty · light · iphone 402×874 · 31 ms · patch 2
 
 A **failure** from simless (a test failure, an issue, a wrong label or frame) is almost always real; fix it. A **pass** is a strong signal, not proof:
 
-- **Nested-view edits.** Hot reload patches only the edited files. If you edited a subview defined in a different file from the view the fixture builds, the render may still show the **old** subview. After editing a subview, either run `simless up` before trusting the render, or render a fixture that builds that subview directly.
-- **Device traits and edges.** It's an iOS app on a Mac: the idiom and size class may not be an iPhone's, there are no safe-area insets (notch, home indicator), and Dynamic Type is ignored. Layouts that branch on traits or hug the screen edges need a simulator check.
+- **Calibrate once per app.** Run `simless calibrate` once per app, and again after large UI changes. It renders every fixture in one iOS Simulator too and lists what differs. Trust renders of the matching fixtures; check the others in a simulator.
+- **Hot reload.** Hot reload also patches the views that embed what you edited. When it says "patch can't cover this edit", it does a full build; that's expected.
+- **Device traits.** Phone canvases get phone traits and safe areas, and every render prints them. If a render notes that `UIDevice.current.userInterfaceIdiom` reports `pad`, code that reads it directly takes its iPad branch in simless.
+- **Mac differences.** Text can wrap differently than on iOS, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. Dynamic Type is ignored.
 - **"issues: none"** only means the five automatic checks passed. Read the tree yourself.
 - **`simless test`** runs the last full build (not patches) without app capabilities (iCloud, app groups, keychain sharing, push). Tests that depend on those can differ from the simulator.
 

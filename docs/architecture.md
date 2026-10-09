@@ -41,7 +41,11 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 `SimlessKit.swift` is a single `#if DEBUG` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
 
-- **Hides the app:** sets the underlying `NSApplication` activation policy to *prohibited*, plus `hide:`, reached through the ObjC runtime. No window, no Dock icon, no focus change.
+- **Hides the app** whenever simless launched it, including the install and unit-test runs, which carry `SIMLESS_HEADLESS=1` in their `.xctestrun`:
+  - during `App.init`, before any window exists, it makes AppKit's window-ordering calls no-ops;
+  - it sets the underlying `NSApplication` activation policy to *prohibited* and calls `hide:`, both through the ObjC runtime.
+
+  Slots are also `LSUIElement` and `LSBackgroundOnly`. Measured result: no window, Dock icon or focus change, sampled every 10 ms.
 - **Turns on accessibility automation** in-process (`_AXSSetAutomationEnabled`, the approach KIF uses), so SwiftUI vends its accessibility tree.
 - **Calls `simlessFixtures(_:)`**, which the app owns, to register screens.
 - **Serves newline-delimited JSON on `127.0.0.1:<port>`**: `stats`, `render`, `load`, `stop`.
@@ -49,6 +53,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode;
+- phone canvases get compact width, the phone idiom and, on the Mac, the device's safe-area insets; iPad canvases get regular width and the iPad idiom. The traits the view actually saw are returned with every render. `UIDevice.current.userInterfaceIdiom` can't be overridden, and reports `.pad`;
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display;
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
 
@@ -74,9 +79,14 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 - **Getting the patch into the host:**
   - **Live (default when available):** SimlessAgent copies the patch into the host's sandbox `tmp` directory, and the host loads it from there.
   - **Warm (no permissions):** the patch is bundled into the slot app, which is re-signed, reinstalled and relaunched; the host loads it at startup. Takes ~10 s.
-- **Fallback:** if a patch can't compile (stored properties, signatures, a type used elsewhere, or a real error), reload falls back to a full build. Errors are mapped back to the user's `file:line`.
+- **Scope:** a patch's copy of a type only takes effect where the patch itself constructs it, so an unedited parent would still embed the old subview. Before compiling, simless builds a type-name graph of the app's sources and also patches every file on a path from the fixtures file to an edited file. Edits that other code can observe without naming an edited type can't be traced this way: extensions of other types, and non-private top-level functions or variables. They, and patches reaching more than 40 files, fall back to a full build. The analysis over-approximates on purpose: an extra file costs compile time, a missing one costs a wrong render.
+- **Fallback:** if a patch can't compile (stored properties, signatures, or a real error) or can't be scoped, reload falls back to a full build. Errors are mapped back to the user's `file:line`.
 - **Which files count as edited:** content hashes against a snapshot taken when the build started. Git checkouts that only touch mtimes don't count.
 - **Relaunches:** the newest patch is re-applied whenever the host relaunches.
+
+## Calibration
+
+`simless calibrate` builds the app for the iOS Simulator, boots one dedicated simulator and launches the app there with the same `--simless-port` argument. The same SimlessKit then serves renders from real iOS, with the device's own safe areas and traits. For every fixture it renders on both, aligns the two accessibility trees by role, label and identifier (longest common subsequence), and reports elements present on only one side, and frames that differ by more than 2 pt. It's the only command that boots a simulator, and it deletes the device afterwards.
 
 ## 5. SimlessAgent and its security model
 

@@ -36,6 +36,12 @@ These are the platform facts behind simless's design, found by building it again
 - **Dynamic Type is ignored.** Five strategies all had no effect: `.environment(\.dynamicTypeSize)`, the legacy `\.sizeCategory`, a parent trait override, window `traitOverrides`, and swizzling `preferredContentSizeCategory` on `UIApplication`/`UITraitCollection`. Text styles resolve to fixed sizes.
 - **Display scale follows the hidden window's display.** On a 1× external display, layout rounds differently (whole points instead of half points). Pin `traitOverrides.displayScale = 2`.
 - **Headless:** without `LSUIElement` in the Info.plist, a Dock icon flashes for ~1.5–3 s at launch. `INFOPLIST_KEY_LSUIElement` doesn't reach Designed-for-iPad builds, so set it in the built Info.plist and re-sign.
+- **Windows still flash in install and test runs.** Launches by `xcodebuild test` don't carry simless's arguments. In those runs the app's main window was on screen for ~290 ms. Hiding the app early in `App.init` cut that to ~40 ms, and `LSBackgroundOnly` to ~20 ms. Only making `NSWindow` ordering (`orderWindow:relativeTo:`, `orderFront:`, `makeKeyAndOrderFront:`, `orderFrontRegardless`) a no-op removed it completely; rendering is unaffected.
+- **Device idiom:** `UIDevice.current.userInterfaceIdiom` reports `.pad` for an iOS app on the Mac, and trait overrides don't change it. `traitOverrides.horizontalSizeClass` and `userInterfaceIdiom` do change what views see through the trait collection.
+- **Calibration against the iOS 27 simulator,** on a production app:
+  - Simple layouts matched within 1.5 pt.
+  - A two-line label wrapped differently: 334 pt wide in simless, 320 pt in the simulator, because of font metrics.
+  - A `Menu` with a custom label had no accessibility label on the Mac but did on iOS.
 
 ## Hot reload
 
@@ -43,5 +49,6 @@ These are the platform facts behind simless's design, found by building it again
 - **Package checkouts contain symlink cycles.** A recursive glob loops forever; use `find`.
 - **Quarantine:** files a sandboxed app writes are quarantined. `dlopen` of quarantined code makes `syspolicyd` show a **user prompt and block** the loading thread. The sandbox forbids `removexattr` of `com.apple.quarantine` (EPERM).
 - **Containers:** sandbox containers are **UUID-named**; the owner is in `.com.apple.containermanagerd.metadata.plist`. They're protected as App Data. Access from another process is denied silently, with no prompt, even when it's signed by the same team. Full Disk Access is needed.
+- **Occasional slow launch:** a host occasionally took ~30 s to start serving right after a unit-test run, and the cause isn't known. Restarting an instance that runs but doesn't serve (after 10 s, then 20 s, then 30 s) bounds the cost.
 - **Writing to a non-existent `~/Library/Containers/<bundle id>/` path** creates a directory that containermanagerd then adopts as a protected stub, and you can't delete it from a shell afterwards.
 - **InjectionNext** reports xcodebuild-only workflows broken on recent Xcode, and it targets function-body swaps. simless's approach compiles a separate module whose types shadow the app's, rebuilds fixtures from it, and needs no interposing.
