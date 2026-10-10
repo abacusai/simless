@@ -49,24 +49,55 @@ enum Patch {
         let module = "SimlessPatch\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
         let fixtures = "\(ws.root)/\(ws.config.fixturesFile)"
 
-        // Each source gets the app module in scope; its own types shadow the app's.
+        // Which module each file comes from: the app target, or a local package
+        // module. The patch is one module, so all non-fixture files must share
+        // compiler settings; the fixtures file only constructs views and compiles
+        // under theirs.
+        let packageModules = Packages.modules(ws: ws)
+        let appSettings = ModuleSettings(swiftVersion: settings.swiftVersion, isolation: settings.defaultIsolation,
+                                         features: settings.upcomingFeatures.sorted())
+        var modulesInvolved = [settings.moduleName]
+        var settingsByModule: [String: ModuleSettings] = [:]
+        for file in files where file != fixtures {
+            if let m = Packages.module(of: file, in: packageModules) {
+                settingsByModule[m.name] = ModuleSettings(swiftVersion: m.swiftVersion, isolation: m.defaultIsolation,
+                                                          features: m.upcomingFeatures)
+                if !modulesInvolved.contains(m.name) { modulesInvolved.append(m.name) }
+            } else {
+                settingsByModule[settings.moduleName] = appSettings
+            }
+        }
+        let distinct = Set(settingsByModule.values)
+        if distinct.count > 1 {
+            let detail = settingsByModule.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "; ")
+            throw SimlessError("patch can't cover this edit: it spans modules with different compiler settings (\(detail))")
+        }
+        let effective = distinct.first ?? appSettings
+
+        // Each source gets every involved module in scope (@testable, for internal
+        // declarations); its own types shadow theirs.
+        let imports = modulesInvolved.map { "@testable import \($0)\n" }.joined()
         var sources: [String] = []
         var originals: [String: String] = [:]   // patch copy -> edited file, for error messages
         for file in [fixtures] + files.filter({ $0 != fixtures }) {
-            let dst = "\(dir)/\(module)_\((file as NSString).lastPathComponent)"
+            let dst = "\(dir)/\(module)_\(sources.count)_\((file as NSString).lastPathComponent)"
             originals[dst] = file
             let body = try String(contentsOfFile: file, encoding: .utf8)
-            try ("@testable import \(settings.moduleName)\n" + body).write(toFile: dst, atomically: true, encoding: .utf8)
+            try (imports + body).write(toFile: dst, atomically: true, encoding: .utf8)
             sources.append(dst)
         }
         let entry = "\(dir)/\(module)_entry.swift"
         try """
             @testable import \(settings.moduleName)
 
+            // The address crosses into the main actor as an Int (Sendable), so this
+            // compiles under Swift 6 whatever the module's default isolation.
             @_cdecl("simless_patch_entry")
             nonisolated public func simless_patch_entry(_ registry: UnsafeMutableRawPointer) {
+                let address = Int(bitPattern: registry)
                 MainActor.assumeIsolated {
-                    simlessFixtures(Unmanaged<SimlessRegistry>.fromOpaque(registry).takeUnretainedValue())
+                    let pointer = UnsafeRawPointer(bitPattern: address)!
+                    simlessFixtures(Unmanaged<SimlessRegistry>.fromOpaque(pointer).takeUnretainedValue())
                 }
             }
             """.write(toFile: entry, atomically: true, encoding: .utf8)
@@ -76,19 +107,19 @@ enum Patch {
         let out = "\(dir)/\(module).dylib"
         var args = ["xcrun", "swiftc", "-module-name", module, "-emit-library", "-o", out,
                     "-target", "arm64-apple-ios\(settings.deploymentTarget)", "-sdk", sdk, "-Onone",
-                    "-swift-version", settings.swiftVersion,
+                    "-swift-version", effective.swiftVersion,
                     "-I", ws.productsIphoneos, "-F", ws.productsIphoneos,
                     "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
                     "-suppress-warnings", "-module-cache-path", "\(ws.work)/ModuleCache"]
-        if let iso = settings.defaultIsolation { args += ["-default-isolation", iso] }
-        for f in settings.upcomingFeatures { args += ["-enable-upcoming-feature", f] }
+        if let iso = effective.isolation { args += ["-default-isolation", iso] }
+        for f in effective.features { args += ["-enable-upcoming-feature", f] }
         for c in settings.conditions { args += ["-D", c] }
         for map in moduleMaps(ws: ws) { args += ["-Xcc", "-fmodule-map-file=\(map)", "-Xcc", "-I\((map as NSString).deletingLastPathComponent)"] }
         let tc = now()
         let r = try Shell.run(args + sources)
         Log.debug("swiftc \(secs(tc))")
         guard r.code == 0 else {
-            throw SimlessError("patch compile failed:\n" + compilerErrors(r.out, originals: originals))
+            throw SimlessError("patch compile failed:\n" + compilerErrors(r.out, originals: originals, lineOffset: modulesInvolved.count))
         }
         let ts = now()
         let (identity, _) = try Signing.identity(team: settings.team)
@@ -97,9 +128,19 @@ enum Patch {
         return out
     }
 
+    struct ModuleSettings: Hashable, CustomStringConvertible {
+        let swiftVersion: String
+        let isolation: String?
+        let features: [String]
+        var description: String {
+            "Swift \(swiftVersion), \(isolation ?? "nonisolated") default isolation"
+                + (features.isEmpty ? "" : ", " + features.joined(separator: "+"))
+        }
+    }
+
     /// `path:line:col: error: ...` lines, pointed back at the edited files
-    /// (patch copies have one extra import line at the top).
-    static func compilerErrors(_ log: String, originals: [String: String] = [:]) -> String {
+    /// (patch copies have `lineOffset` extra import lines at the top).
+    static func compilerErrors(_ log: String, originals: [String: String] = [:], lineOffset: Int = 1) -> String {
         var seen = Set<String>()
         var out: [String] = []
         for raw in log.split(separator: "\n") {
@@ -108,7 +149,7 @@ enum Patch {
             for (copy, original) in originals where line.hasPrefix(copy + ":") {
                 let rest = line.dropFirst(copy.count + 1)
                 let parts = rest.split(separator: ":", maxSplits: 1)
-                if let n = Int(parts[0]), parts.count == 2 { line = "\(original):\(n - 1):\(parts[1])" }
+                if let n = Int(parts[0]), parts.count == 2 { line = "\(original):\(n - lineOffset):\(parts[1])" }
             }
             if seen.insert(line).inserted { out.append("  " + line) }
             if out.count == 20 { break }

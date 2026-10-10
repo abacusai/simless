@@ -81,7 +81,8 @@ NoteList.empty · light · iphone 402×874 · 31 ms · patch 2
 A **failure** from simless (a test failure, an issue, a wrong label or frame) is almost always real; fix it. A **pass** is a strong signal, not proof:
 
 - **Calibrate once per app.** Run `simless calibrate` once per app, and again after large UI changes. It renders every fixture in one iOS Simulator too and lists what differs. Trust renders of the matching fixtures; check the others in a simulator.
-- **Hot reload.** Hot reload also patches the views that embed what you edited. When it says "patch can't cover this edit", it does a full build; that's expected.
+- **Hot reload.** Hot reload works for views in the app target and in local Swift packages, and also patches the views that embed what you edited. When it says "patch can't cover this edit", it does a full build; that's expected.
+- **Scroll content.** "below the fold: N element(s)" is information, not an issue: it counts scroll content listed in the tree.
 - **Device traits.** Phone canvases get phone traits and safe areas, and every render prints them. If a render notes that `UIDevice.current.userInterfaceIdiom` reports `pad`, code that reads it directly takes its iPad branch in simless.
 - **Mac differences.** Text can wrap differently than on iOS, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. Dynamic Type is ignored.
 - **"issues: none"** only means the five automatic checks passed. Read the tree yourself.

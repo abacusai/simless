@@ -120,6 +120,24 @@ struct Shell {
     }
 }
 
+// MARK: - Default DerivedData
+
+/// Runs an xcodebuild call that can't take -derivedDataPath and removes any
+/// folder it newly created in ~/Library/Developer/Xcode/DerivedData for these
+/// projects. Folders that existed before (e.g. Xcode's own) are left alone.
+func withDefaultDerivedDataGuard<T>(projectNames: [String], _ body: () throws -> T) rethrows -> T {
+    let dd = "\(Paths.home)/Library/Developer/Xcode/DerivedData"
+    let before = Set((try? FileManager.default.contentsOfDirectory(atPath: dd)) ?? [])
+    defer {
+        for dir in (try? FileManager.default.contentsOfDirectory(atPath: dd)) ?? [] where !before.contains(dir) {
+            if projectNames.contains(where: { dir.hasPrefix("\($0)-") }) {
+                try? FileManager.default.removeItem(atPath: "\(dd)/\(dir)")
+            }
+        }
+    }
+    return try body()
+}
+
 // MARK: - Locks
 
 /// flock-based mutual exclusion across every simless process (all agents, all projects).

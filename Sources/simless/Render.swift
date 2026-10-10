@@ -83,6 +83,8 @@ enum Render {
             let id = (n["id"] as? String).map { " #\($0)" } ?? ""
             lines.append("  \(role) \(label)\(id)  \(frameText(n))")
         }
+        let below = nodes.filter { frame($0).1 + frame($0).3 > h + 0.5 }.count
+        if below > 0 { lines.append("  below the fold: \(below) element(s) (scroll content, listed above)") }
         if let png = options.pngPath { lines.append("  png: \(png)") }
         lines.append(issues.isEmpty ? "  issues: none" : "  issues (\(issues.count)):")
         lines += issues.map { "    ⚠ " + $0 }
@@ -107,17 +109,19 @@ enum Render {
         for n in nodes {
             let role = n["role"] as? String ?? ""
             let label = (n["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-            let (x, y, w, h) = frame(n)
+            let (x, _, w, h) = frame(n)
             let name = label.isEmpty ? role : "\(role) \"\(label)\""
             if interactive.contains(role), label.isEmpty {
                 issues.append("\(role) without accessibility label \(frameText(n))")
             }
             if w <= 0 || h <= 0 {
                 issues.append("\(name) has zero size")
-            } else if x < -0.5 || y < -0.5 || x + w > width + 0.5 || y + h > height + 0.5 {
-                issues.append("\(name) extends outside the \(Int(width))×\(Int(height)) screen \(frameText(n))")
+            } else if (x < -0.5 && x + w > 0.5) || (x < width - 0.5 && x + w > width + 0.5) {
+                // Cut off at a side edge. Elements wholly beyond an edge are scroll
+                // content (below the fold, or later pages of a horizontal list), not a
+                // layout problem, so only partial clipping is flagged.
+                issues.append("\(name) is cut off at the \(x < 0 ? "left" : "right") edge \(frameText(n))")
             }
-            // HIG minimum hit target is 44×44 pt: flag either dimension.
             if interactive.contains(role), w > 0, h > 0, w < 44 || h < 44 {
                 issues.append("\(name) tap target \(Int(w))×\(Int(h)) is smaller than 44×44")
             }

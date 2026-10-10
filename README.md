@@ -45,7 +45,7 @@ Legacy gets slower with every agent you add; simless stays at ~2 s per edit. Ful
 ## Requirements
 
 - An Apple Silicon Mac with Xcode 26 or later.
-- A SwiftUI iOS app in an `.xcodeproj`, with an app-hosted unit-test target (simless installs hosts through it).
+- A SwiftUI iOS app in an `.xcodeproj` (at the repository root or in a subfolder such as `ios/`), with an app-hosted unit-test target (simless installs hosts through it). Views can live in the app target or in local Swift packages; both hot-reload. Swift 5 and Swift 6 language modes, with or without MainActor default isolation, are supported.
 - An **Apple Development** certificate, and the team's wildcard development profile ("iOS Team Provisioning Profile: \*") that includes this Mac. Xcode creates it the first time you run any app on "My Mac (Designed for iPad)". simless never registers anything in your developer account.
 
 ## Install
@@ -166,7 +166,7 @@ simless version                   version, Xcode and macOS
 
 ### What simless does to stay accurate
 
-- **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, so a parent view never renders a stale subview. Edits it can't trace safely, such as an extension of another type or a top-level function, fall back to a full build automatically.
+- **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
 - **Phone canvases get phone traits.** That means compact width, the phone idiom, and the device's safe areas (notch, home indicator). Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 
@@ -190,7 +190,7 @@ Gestures and swipe actions, the software keyboard, navigation flows across scree
 
 ### Other limits
 
-- **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` with an app-hosted unit-test target.
+- **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an app-hosted unit-test target.
 - **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
 - **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app, suppressing its windows). An OS update could break them; they never ship in release builds.
 

@@ -22,7 +22,7 @@ Apple Silicon Macs run iOS arm64 apps natively. simless builds the app's normal 
 - **Third-party SDKs keep working**, because they use the iOS slice they already ship.
 - **Your real views, real dependencies, and the real app target.** No porting and no separately written copies of your screens.
 
-Xcode hides the Designed-for-iPad destination for targets that also ship native macOS. In that case simless builds from a generated sibling copy of the project (`<Name>.simless.xcodeproj`) with `macosx` removed from `SUPPORTED_PLATFORMS`. Shared schemes and test plans are copied and rewritten to point at the copy. The original project is never modified, and the generated files are added to `.git/info/exclude`.
+Xcode hides the Designed-for-iPad destination for targets that also ship native macOS or opt out of it. In that case simless builds from a generated sibling copy of the project (`<Name>.simless.xcodeproj`, next to the original, wherever it is in the repository) with `macosx` removed from `SUPPORTED_PLATFORMS` and Designed for iPad enabled. Shared schemes and test plans are copied and rewritten to point at the copy. The original project is never modified, and the generated files are added to `.git/info/exclude`.
 
 Builds run with `CODE_SIGNING_ALLOWED=NO`. All signing happens when a slot is created (below), so builds never need provisioning and never touch the developer account.
 
@@ -60,7 +60,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 Renders take ~20–60 ms. The CLI turns the tree into compact text and runs deterministic checks:
 - controls without labels,
 - text exposed twice,
-- off-screen or zero-size elements,
+- elements cut off at the screen's side edges, or of zero size (content wholly below the fold is scroll content, reported as a count, not an issue),
 - tap targets under 44 pt,
 - overlapping controls.
 
@@ -79,7 +79,8 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 - **Getting the patch into the host:**
   - **Live (default when available):** SimlessAgent copies the patch into the host's sandbox `tmp` directory, and the host loads it from there.
   - **Warm (no permissions):** the patch is bundled into the slot app, which is re-signed, reinstalled and relaunched; the host loads it at startup. Takes ~10 s.
-- **Scope:** a patch's copy of a type only takes effect where the patch itself constructs it, so an unedited parent would still embed the old subview. Before compiling, simless builds a type-name graph of the app's sources and also patches every file on a path from the fixtures file to an edited file. Edits that other code can observe without naming an edited type can't be traced this way: extensions of other types, and non-private top-level functions or variables. They, and patches reaching more than 40 files, fall back to a full build. The analysis over-approximates on purpose: an extra file costs compile time, a missing one costs a wrong render.
+- **Scope:** a patch's copy of a type only takes effect where the patch itself constructs it, so an unedited parent would still embed the old subview. Before compiling, simless builds a type-reference graph of the app's sources and every local package module, and also patches every file on a path from the fixtures file to an edited file. The graph uses top-level type declarations and identifiers in code (not comments or strings). Across modules it only follows `public`/`open` types along declared package dependencies. Edits that other code can observe without naming an edited type can't be traced this way: extensions of other types, and non-private top-level functions or variables. They, and patches reaching more than 40 files, fall back to a full build. The analysis over-approximates on purpose: an extra file costs compile time, a missing one costs a wrong render.
+- **Package modules:** `simless init` records the local Swift packages the project references. Each source file is mapped to its module, and each module's language mode, default isolation and upcoming features are read from `swift package dump-package`. The patch `@testable import`s every module involved and compiles with their settings. A patch mixing modules with different settings can't be one module, so it falls back to a full build.
 - **Fallback:** if a patch can't compile (stored properties, signatures, or a real error) or can't be scoped, reload falls back to a full build. Errors are mapped back to the user's `file:line`.
 - **Which files count as edited:** content hashes against a snapshot taken when the build started. Git checkouts that only touch mtimes don't count.
 - **Relaunches:** the newest patch is re-applied whenever the host relaunches.
@@ -120,6 +121,6 @@ See [How far to trust results](../README.md#how-far-to-trust-results) for what a
 - **Traits aren't an iPhone's.** It's an iOS app on a Mac: no Dynamic Type, no safe-area insets, and the idiom and size class may differ from an iPhone (not yet verified).
 - **No capabilities.** Slots run without app capabilities.
 - **Not covered:** gestures, the software keyboard, system UI and navigation flows.
-- **Project shape:** needs an `.xcodeproj` with an app-hosted unit-test target.
+- **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
 - **Side effects:** the host runs the app's real startup; guard side effects with `SimlessHost.isActive`.
 - **Private APIs:** the host uses private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime) that an OS update could change.

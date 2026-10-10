@@ -100,7 +100,8 @@ enum SimlessHost {
             params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
             params.allowLocalEndpointReuse = true
             let l = try NWListener(using: params)
-            l.newConnectionHandler = { conn in Task { @MainActor in serve(conn) } }
+            // The listener runs on the main queue, so its handler is already on the main actor.
+            l.newConnectionHandler = { conn in MainActor.assumeIsolated { Client(conn).start() } }
             l.start(queue: .main)
             listener = l
         } catch {
@@ -156,29 +157,45 @@ enum SimlessHost {
         var traits: Traits?
     }
 
-    private static func serve(_ conn: NWConnection) {
-        conn.start(queue: .main)
-        var buffer = Data()
-        func receive() {
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, done, err in
-                if let data { buffer.append(data) }
-                Task { @MainActor in
-                    while let nl = buffer.firstIndex(of: 0x0A) {
-                        let line = buffer[buffer.startIndex..<nl]
-                        buffer.removeSubrange(buffer.startIndex...nl)
-                        let (response, after) = handle(Data(line))
-                        var out = (try? JSONEncoder().encode(response)) ?? Data("{\"ok\":false}".utf8)
-                        out.append(0x0A)
-                        conn.send(content: out, completion: .contentProcessed { _ in after?() })
-                    }
+    /// One client connection. Network delivers its callbacks on the main queue,
+    /// so the connection's state lives on the main actor: each callback enters it
+    /// synchronously, and nothing mutable is shared across isolation domains
+    /// (this compiles under Swift 6 with any default isolation).
+    @MainActor
+    private final class Client {
+        private let conn: NWConnection
+        private var buffer = Data()
+
+        init(_ conn: NWConnection) { self.conn = conn }
+
+        func start() {
+            conn.start(queue: .main)
+            receive()
+        }
+
+        private func receive() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, done, err in
+                MainActor.assumeIsolated {
+                    if let data { buffer.append(data) }
+                    drain()
                     if done || err != nil { conn.cancel() } else { receive() }
                 }
             }
         }
-        receive()
+
+        private func drain() {
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = Data(buffer[buffer.startIndex..<nl])
+                buffer.removeSubrange(buffer.startIndex...nl)
+                let (response, after) = SimlessHost.handle(line)
+                var out = (try? JSONEncoder().encode(response)) ?? Data("{\"ok\":false}".utf8)
+                out.append(0x0A)
+                conn.send(content: out, completion: .contentProcessed { _ in after?() })
+            }
+        }
     }
 
-    private static func handle(_ line: Data) -> (Response, (() -> Void)?) {
+    private static func handle(_ line: Data) -> (Response, (@Sendable () -> Void)?) {
         lastRequest = Date()
         guard let req = try? JSONDecoder().decode(Request.self, from: line) else {
             return (Response(ok: false, error: "bad request"), nil)

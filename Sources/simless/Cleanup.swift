@@ -87,9 +87,11 @@ enum Cleanup {
     /// Generated build-variant files next to the user's project.
     static func removeGenerated(ws: Workspace) {
         let fm = FileManager.default
-        for f in (try? fm.contentsOfDirectory(atPath: ws.root)) ?? []
-        where f.hasSuffix(".simless.xcodeproj") || f.hasSuffix(".simless.xctestplan") {
-            try? fm.removeItem(atPath: "\(ws.root)/\(f)")
+        for dir in Set([ws.root, ws.projectDir]) {
+            for f in (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+            where f.hasSuffix(".simless.xcodeproj") || f.hasSuffix(".simless.xctestplan") {
+                try? fm.removeItem(atPath: "\(dir)/\(f)")
+            }
         }
     }
 

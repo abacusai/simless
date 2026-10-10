@@ -29,13 +29,25 @@ jobs:
       - name: Build SimlessAgent
         run: swiftc -O Agent/main.swift -o "$RUNNER_TEMP/SimlessAgent"
 
-      # The templates are copied into users' iOS apps; type-check them together
-      # against the iOS SDK in the configuration they ship in (DEBUG).
-      - name: Type-check the app templates (iOS)
+      # The templates are copied into users' iOS apps, whose language mode and
+      # default isolation vary. Compile them fully (Swift 6's data-race checks
+      # only run past -typecheck) in each configuration they must support.
+      - name: Compile the app templates (iOS, every language configuration)
         run: |
-          xcrun swiftc -typecheck -D DEBUG \
-            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" -target arm64-apple-ios17.0 \
-            Templates/SimlessKit.swift Templates/SimlessFixtures.swift
+          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for mode in \
+            "-swift-version 5" \
+            "-swift-version 5 -default-isolation MainActor" \
+            "-swift-version 6" \
+            "-swift-version 6 -default-isolation MainActor -enable-upcoming-feature NonisolatedNonsendingByDefault -enable-upcoming-feature InferIsolatedConformances"
+          do
+            echo "::group::$mode"
+            # shellcheck disable=SC2086
+            xcrun swiftc -emit-library -module-name SimlessKitCheck -o "$RUNNER_TEMP/kit.dylib" -D DEBUG $mode \
+              -sdk "$sdk" -target arm64-apple-ios17.0 -Xlinker -undefined -Xlinker dynamic_lookup \
+              Templates/SimlessKit.swift Templates/SimlessFixtures.swift
+            echo "::endgroup::"
+          done
 
       - name: Check benchmark scripts
         run: python3 -m py_compile bench/bench.py bench/memory.py

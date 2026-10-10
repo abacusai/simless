@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.1.0"
+let version = "0.1.1"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -54,25 +54,22 @@ func cmdInit(_ args: Args) throws {
     let root = (try? Shell.check(["git", "-C", cwd, "rev-parse", "--show-toplevel"]))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? cwd
     let fm = FileManager.default
-    let project = args.values["--project"] ?? ((try? fm.contentsOfDirectory(atPath: root)) ?? [])
-        .filter { $0.hasSuffix(".xcodeproj") && !$0.hasSuffix(".simless.xcodeproj") }.sorted().first
-    guard let project else { throw SimlessError("no .xcodeproj in \(root) (workspaces are not supported yet)") }
+    let project = try args.values["--project"] ?? findProject(in: root)
+    guard exists("\(root)/\(project)/project.pbxproj") else { throw SimlessError("\(project) is not an Xcode project") }
+    let projectDir = (project as NSString).deletingLastPathComponent        // "" or e.g. "ios"
+    let base = ((project as NSString).lastPathComponent as NSString).deletingPathExtension
+    func inProjectDir(_ p: String) -> String { projectDir.isEmpty ? p : "\(projectDir)/\(p)" }
 
     // `-list` can't take -derivedDataPath and may create a folder in the default
-    // DerivedData; remove one only if this call created it.
-    let defaultDD = "\(Paths.home)/Library/Developer/Xcode/DerivedData"
-    let existing = Set((try? fm.contentsOfDirectory(atPath: defaultDD)) ?? [])
-    let listing = try Shell.check(["xcodebuild", "-list", "-json", "-project", project], cwd: root, stdoutOnly: true)
-    let projectName = (project as NSString).deletingPathExtension
-    for dir in (try? fm.contentsOfDirectory(atPath: defaultDD)) ?? [] where !existing.contains(dir) && dir.hasPrefix("\(projectName)-") {
-        try? fm.removeItem(atPath: "\(defaultDD)/\(dir)")
+    // DerivedData; the guard removes one only if this call created it.
+    let listing = try withDefaultDerivedDataGuard(projectNames: [base]) {
+        try Shell.check(["xcodebuild", "-list", "-json", "-project", project], cwd: root, stdoutOnly: true)
     }
     guard let start = listing.firstIndex(of: "{"),
           let json = try JSONSerialization.jsonObject(with: Data(listing[start...].utf8)) as? [String: Any],
           let p = json["project"] as? [String: Any] else { throw SimlessError("could not list \(project)") }
     let schemes = p["schemes"] as? [String] ?? []
     let targets = p["targets"] as? [String] ?? []
-    let base = (project as NSString).deletingPathExtension
     let scheme = args.values["--scheme"] ?? (schemes.contains(base) ? base : schemes.first ?? base)
     let appTarget = targets.contains(scheme) ? scheme : base
     let testTarget = args.values["--test-target"]
@@ -81,11 +78,19 @@ func cmdInit(_ args: Args) throws {
     guard let testTarget else {
         throw SimlessError("no unit-test target found; simless installs hosts through an app-hosted unit-test target (pass --test-target)")
     }
-    let sourceDir = fm.fileExists(atPath: "\(root)/\(appTarget)") ? appTarget : "."
+    // The app's sources usually sit next to the project, in a folder named like the target.
+    let sourceDir = fm.fileExists(atPath: "\(root)/\(inProjectDir(appTarget))") ? inProjectDir(appTarget)
+        : (projectDir.isEmpty ? "." : projectDir)
     let kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
 
+    // Local Swift packages the project references: their views can be hot-reloaded too.
+    let pbxText = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
+    let packages = localPackages(pbx: pbxText).map { inProjectDir($0) }
+        .map { (URL(fileURLWithPath: "\(root)/\($0)").standardizedFileURL.path).replacingOccurrences(of: root + "/", with: "") }
+        .filter { exists("\(root)/\($0)/Package.swift") }
+
     let config = Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
-                        kitDir: kitDir, sourceDirs: [sourceDir])
+                        kitDir: kitDir, sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages)
     let enc = JSONEncoder()
     enc.outputFormatting = [.prettyPrinted, .sortedKeys]
     try enc.encode(config).write(to: URL(fileURLWithPath: "\(root)/\(Workspace.configName)"))
@@ -117,7 +122,7 @@ func cmdInit(_ args: Args) throws {
     let synced = pbx.contains("PBXFileSystemSynchronizedRootGroup")
     let hook = args.flags.contains("--no-hook") ? nil : try insertHook(in: "\(root)/\(sourceDir)")
     print("""
-        wrote \(Workspace.configName): scheme \(scheme), app \(appTarget), tests \(testTarget)
+        wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))
         wrote \(config.kitFile) and \(config.fixturesFile)
 
         Next:
@@ -131,6 +136,41 @@ func cmdInit(_ args: Args) throws {
           3. Register screens in \((config.fixturesFile as NSString).lastPathComponent), then run `simless up`.
           4. Agents: `simless skill install` (once per machine) teaches Claude Code the workflow.
         """)
+}
+
+/// The .xcodeproj at the repository root, or in a subdirectory (e.g. ios/).
+func findProject(in root: String) throws -> String {
+    let skip: Set<String> = ["Pods", "node_modules", "Carthage", "DerivedData", "build", ".build", "vendor"]
+    var found: [(path: String, depth: Int)] = []
+    func scan(_ rel: String, _ depth: Int) {
+        let dir = rel.isEmpty ? root : "\(root)/\(rel)"
+        for name in ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted() {
+            let path = rel.isEmpty ? name : "\(rel)/\(name)"
+            if name.hasSuffix(".xcodeproj") {
+                if !name.hasSuffix(".simless.xcodeproj") { found.append((path, depth)) }
+            } else if depth < 3, !name.hasPrefix("."), !skip.contains(name), !name.hasSuffix(".xcworkspace"),
+                      (try? FileManager.default.attributesOfItem(atPath: "\(dir)/\(name)")[.type] as? FileAttributeType) == .typeDirectory {
+                scan(path, depth + 1)
+            }
+        }
+    }
+    scan("", 0)
+    guard let shallowest = found.map(\.depth).min() else {
+        throw SimlessError("no .xcodeproj found in \(root) or its subdirectories (workspaces are not supported yet)")
+    }
+    let candidates = found.filter { $0.depth == shallowest }.map(\.path)
+    guard candidates.count == 1 else {
+        throw SimlessError("several projects found (\(candidates.joined(separator: ", "))); pass --project <path>")
+    }
+    return candidates[0]
+}
+
+/// `relativePath` of XCLocalSwiftPackageReference entries, relative to the project's directory.
+func localPackages(pbx: String) -> [String] {
+    guard let re = try? NSRegularExpression(pattern: #"isa = XCLocalSwiftPackageReference;\s*relativePath = "?([^";]+)"?;"#) else { return [] }
+    return re.matches(in: pbx, range: NSRange(pbx.startIndex..., in: pbx)).compactMap {
+        Range($0.range(at: 1), in: pbx).map { String(pbx[$0]) }
+    }
 }
 
 /// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
@@ -313,9 +353,21 @@ func cmdTest(_ args: Args) throws {
                       cwd: ws.root, logPath: "\(slot.dir)/test.log")
     }
     let lines = r.out.split(separator: "\n")
-    // XCTest failures ("<file>:<line>: error: -[Class test] : ...") and xcodebuild errors only.
-    for l in lines where l.contains(": error: -[") || l.hasPrefix("xcodebuild: error:") || l.contains("' failed (") { print(l) }
-    if let summary = lines.last(where: { $0.contains("Executed") }) { print(summary.trimmingCharacters(in: .whitespaces)) }
+    // Swift Testing lines start with an SF Symbols glyph; drop it.
+    func clean(_ l: Substring) -> String {
+        String(l.drop { !$0.isASCII || $0 == " " }).trimmingCharacters(in: .whitespaces)
+    }
+    // Failures only: XCTest ("<file>:<line>: error: -[Class test] : ..."), Swift
+    // Testing ("Test x() recorded an issue at ..." / "... failed after"), and xcodebuild errors.
+    for l in lines where l.contains(": error: -[") || l.hasPrefix("xcodebuild: error:") || l.contains("' failed (")
+        || l.contains(") recorded an issue") || (l.contains("Test ") && l.contains(" failed after") && !l.contains("Test run with")) {
+        print("  " + clean(l))
+    }
+    // Summaries: XCTest's "Executed N tests" (when it ran any) and Swift Testing's "Test run with N tests".
+    if let xctest = lines.last(where: { $0.contains("Executed") && !$0.contains("Executed 0 tests") }) {
+        print(xctest.trimmingCharacters(in: .whitespaces))
+    }
+    if let swiftTesting = lines.last(where: { $0.contains("Test run with") }) { print(clean(swiftTesting)) }
     print("\(r.code == 0 ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/test.log)")
     if r.code != 0 { exit(1) }
 }

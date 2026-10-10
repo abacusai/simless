@@ -18,8 +18,17 @@ import Foundation
 enum PatchScope {
     static let maxFiles = 40
 
+    /// Top-level type declarations only. Nested helper types (`Kind`, `Style`,
+    /// `State`, ...) share generic names across files and would connect almost
+    /// everything; code outside their file names them through the outer type
+    /// (`Outer.Kind`), which already creates an edge to the outer type's file.
     private static let typeDecl = try! NSRegularExpression(
-        pattern: #"\b(?:struct|class|enum|actor|protocol|typealias)\s+([A-Za-z_][A-Za-z0-9_]*)"#)
+        pattern: #"^(?:@[\w.]+(?:\([^\n]*?\))?\s+)*((?:(?:public|internal|private|fileprivate|open|final|nonisolated|indirect)\s+)*)(?:struct|class|enum|actor|protocol|typealias)\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+        options: .anchorsMatchLines)
+    /// Comments and string literals, removed before collecting identifiers so a
+    /// word in a doc comment or a label doesn't look like a type reference.
+    private static let nonCode = try! NSRegularExpression(
+        pattern: ##"//[^\n]*|/\*[\s\S]*?\*/|#?"""[\s\S]*?"""#?|"(?:\\.|[^"\\\n])*""##)
     private static let identifier = try! NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*"#)
     /// Declarations at column 0 (file scope), with their modifiers.
     private static let topLevel = try! NSRegularExpression(
@@ -29,9 +38,11 @@ enum PatchScope {
 
     struct Source {
         let path: String
-        let declared: Set<String>
-        let tokens: Set<String>
+        let declared: Set<String>         // top-level types
+        let publicDeclared: Set<String>   // top-level public/open types, visible to other modules
+        let tokens: Set<String>           // identifiers in code (not comments or strings)
         let text: String
+        var module = ""                   // owning module: the app target or a package module
     }
 
     private static func matches(_ re: NSRegularExpression, _ s: String, group: Int) -> [String] {
@@ -42,8 +53,17 @@ enum PatchScope {
 
     static func load(_ path: String) -> Source? {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let declared = Set(matches(typeDecl, text, group: 1)).subtracting(keywords)
-        return Source(path: path, declared: declared, tokens: Set(matches(identifier, text, group: 0)), text: text)
+        var declared = Set<String>(), publicDeclared = Set<String>()
+        for m in typeDecl.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let modsR = Range(m.range(at: 1), in: text), let nameR = Range(m.range(at: 2), in: text) else { continue }
+            let name = String(text[nameR]), mods = String(text[modsR])
+            guard !keywords.contains(name) else { continue }
+            declared.insert(name)
+            if mods.contains("public") || mods.contains("open") { publicDeclared.insert(name) }
+        }
+        let code = nonCode.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        return Source(path: path, declared: declared, publicDeclared: publicDeclared,
+                      tokens: Set(matches(identifier, code, group: 0)), text: text)
     }
 
     /// Throws when an edited file declares something the type graph can't track.
@@ -79,18 +99,37 @@ enum PatchScope {
     static func files(ws: Workspace, edited: [String]) throws -> (all: [String], extra: [String]) {
         let fixturesPath = "\(ws.root)/\(ws.config.fixturesFile)"
         let kitPath = "\(ws.root)/\(ws.config.kitFile)"
-        let sources = ws.swiftSources().filter { $0 != kitPath }.compactMap(load)
+        let packageModules = Packages.modules(ws: ws)
+        let appModule = (try? ws.settings().moduleName) ?? ws.config.appTarget
+        var sources = ws.swiftSources().filter { $0 != kitPath }.compactMap(load)
+        for i in sources.indices { sources[i].module = Packages.module(of: sources[i].path, in: packageModules)?.name ?? appModule }
+        // Which modules each module can import: a package module its declared
+        // dependencies (transitively); the app target any package module.
+        let directDeps = Dictionary(packageModules.map { ($0.name, Set($0.dependencies)) }, uniquingKeysWith: { $0.union($1) })
+        var visible: [String: Set<String>] = [appModule: Set(packageModules.map(\.name))]
+        for m in packageModules {
+            var seen = Set<String>(), queue = Array(directDeps[m.name] ?? [])
+            while let next = queue.popLast() {
+                if seen.insert(next).inserted { queue += Array(directDeps[next] ?? []) }
+            }
+            visible[m.name] = seen
+        }
         let byPath = Dictionary(uniqueKeysWithValues: sources.map { ($0.path, $0) })
         let editedSet = Set(edited)
         try checkTraceable(edited.compactMap { byPath[$0] })
 
-        // deps[f]: files whose declared types f mentions.
+        // deps[f]: files whose types f can see and mentions. Within a module any
+        // top-level type; across modules only public ones, along import edges.
         var deps: [String: Set<String>] = [:]
         var rdeps: [String: Set<String>] = [:]
         for f in sources {
-            for g in sources where g.path != f.path && !g.declared.isDisjoint(with: f.tokens) {
-                deps[f.path, default: []].insert(g.path)
-                rdeps[g.path, default: []].insert(f.path)
+            let canImport = visible[f.module] ?? []
+            for g in sources where g.path != f.path {
+                let names = g.module == f.module ? g.declared : (canImport.contains(g.module) ? g.publicDeclared : [])
+                if !names.isDisjoint(with: f.tokens) {
+                    deps[f.path, default: []].insert(g.path)
+                    rdeps[g.path, default: []].insert(f.path)
+                }
             }
         }
         func closure(from start: Set<String>, _ edges: [String: Set<String>]) -> Set<String> {

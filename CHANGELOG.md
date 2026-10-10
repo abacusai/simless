@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+## 0.1.1 (2026-10-10)
+
+Fixes found by using simless on a project laid out differently from the one it was built on.
+
+- **Projects in a subfolder.** `simless init` finds an `.xcodeproj` in a subfolder (e.g. `ios/App.xcodeproj`). The generated build variant now retargets the project's schemes and test plans correctly; before, the copied scheme silently dropped the app target.
+- **Reading build settings.** Build settings are read with the build's own destination, falling back to `-target` for schemes that report "Found no destinations". Nothing is left in the default DerivedData.
+- **Swift 6.** The render host kit and the hot-reload entry point compile under Swift 6, with or without MainActor default isolation; they had data races in the socket loop and the patch entry. CI now compiles the kit in every language configuration.
+- **Views in local Swift packages.** These now hot-reload instead of forcing a full build each time. Patches import every involved module with the right compiler settings. Patch scope is module-aware and ignores comments and strings, so it stays small in large codebases.
+- **Scroll views.** Only elements cut off at the screen's side edges are flagged. Content below the fold is reported as a count rather than as issues.
+- **Swift Testing.** `simless test` reports Swift Testing results and failures alongside XCTest's.
+- **Upgrades.** The generated build variant is regenerated after a simless upgrade, so a variant made by an older version isn't reused.
+
 ## 0.1.0 (2026-10-09)
 
 First public release.

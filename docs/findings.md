@@ -27,6 +27,9 @@ These are the platform facts behind simless's design, found by building it again
 - **One instance per bundle id:** launching a second host of the same app kills the first. Concurrent installs of the same bundle id fail ("Coordinator found for …"). Hence one bundle id per slot, and serialized installs.
 - **Signing without the developer account:** the team's wildcard development profile (`TEAM.*`), which already lists the Mac's provisioning UDID, is enough once capabilities are stripped. Nothing gets registered.
 - **Supervisor cost:** a host running *inside* an XCTest (the first prototype) keeps an `xcodebuild` alive at about **500 MB RSS**, and killing it kills the host. Moving the server into the app and launching with `open` removed it. The host's own footprint is **~30–35 MB**.
+- **Scheme containers are relative to the project's directory.** A scheme in `ios/App.xcodeproj` says `container:App.xcodeproj`, not `container:ios/App.xcodeproj`. If a copied scheme isn't rewritten to match, it silently builds the original project's targets.
+- **Reading build settings:** `xcodebuild -showBuildSettings -scheme X -sdk iphoneos` fails for some schemes ("Found no destinations"). Querying with the actual destination (`-destination 'platform=macOS,arch=arm64,variant=Designed for iPad'`) works, and `-target` works as a fallback, but `-target` can't take `-derivedDataPath`.
+- **Swift 6 data-race errors don't appear with `-typecheck`.** Region-based isolation is checked later in compilation, so code that typechecks can still fail to build in Swift 6. Check templates by compiling them, in every language mode they must support.
 - **Test plans** reference targets as `container:<Project>.xcodeproj`. Building from a renamed project copy yields an empty `.xctestrun` unless the plan is copied and rewritten too.
 
 ## Rendering on the Mac

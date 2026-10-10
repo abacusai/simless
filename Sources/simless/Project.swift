@@ -6,7 +6,7 @@ import CryptoKit
 
 /// .simless.json at the repository root, written by `simless init`.
 struct Config: Codable {
-    var project: String           // App.xcodeproj (relative to root)
+    var project: String           // App.xcodeproj or ios/App.xcodeproj (relative to the repo root)
     var scheme: String
     var appTarget: String
     var testTarget: String        // an app-hosted unit-test bundle; used to install slots
@@ -15,6 +15,7 @@ struct Config: Codable {
     var device: String = "iphone" // default canvas: iphone | ipad
     var buildConcurrency: Int?    // max simultaneous full builds across all agents
     var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30)
+    var packages: [String]?       // local Swift packages whose views hot reload can patch (relative to root)
 
     var kitFile: String { "\(kitDir)/SimlessKit.swift" }
     var fixturesFile: String { "\(kitDir)/SimlessFixtures.swift" }
@@ -62,16 +63,26 @@ struct Workspace {
     /// macOS dropped from SUPPORTED_PLATFORMS and DfI enabled. The original
     /// project is never modified. The copy must sit next to the original
     /// because the project's file references are relative to its directory.
+    /// The directory containing the .xcodeproj. Scheme containers and test-plan
+    /// references are relative to it, not to the repository root.
+    var projectDir: String {
+        let dir = (config.project as NSString).deletingLastPathComponent
+        return dir.isEmpty ? root : "\(root)/\(dir)"
+    }
+    var projectBase: String { ((config.project as NSString).lastPathComponent as NSString).deletingPathExtension }
+
     func buildProject() throws -> String {
         let original = "\(root)/\(config.project)"
-        let name = (config.project as NSString).deletingPathExtension
-        let variant = "\(root)/\(name).simless.xcodeproj"
+        let name = projectBase
+        let variant = "\(projectDir)/\(name).simless.xcodeproj"
         let pbx = try String(contentsOfFile: "\(original)/project.pbxproj", encoding: .utf8)
         let needsVariant = pbx.contains("macosx") || pbx.contains("SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO")
         guard needsVariant else { return original }
 
         let stamp = "\(variant)/.simless-source-mtime"
-        let sourceMtime = String(max(mtime("\(original)/project.pbxproj"), newestSchemeMtime(original)))
+        // Regenerate when the project or its schemes change, or simless itself
+        // changes (a variant made by an older version may be wrong).
+        let sourceMtime = "\(version) \(max(mtime("\(original)/project.pbxproj"), newestSchemeMtime(original)))"
         if exists(variant), (try? String(contentsOfFile: stamp, encoding: .utf8)) == sourceMtime { return variant }
 
         Log.step("generating \((variant as NSString).lastPathComponent) (Designed-for-iPad build variant)")
@@ -89,21 +100,26 @@ struct Workspace {
         patched = patched.replacingOccurrences(of: "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO", with: "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES")
         try patched.write(toFile: "\(variant)/project.pbxproj", atomically: true, encoding: .utf8)
 
-        // Shared schemes and test plans reference targets by project name; point
-        // them at the variant, or the plan resolves no test targets.
+        // Shared schemes and test plans reference targets by project file name,
+        // relative to the project's directory; point them at the variant, or the
+        // scheme builds the original project and the plan resolves no test targets.
+        let originalContainer = "container:\(name).xcodeproj"
         let variantContainer = "container:\(name).simless.xcodeproj"
         let schemes = "\(variant)/xcshareddata/xcschemes"
         for file in (try? FileManager.default.contentsOfDirectory(atPath: schemes)) ?? [] where file.hasSuffix(".xcscheme") {
             let path = "\(schemes)/\(file)"
             var s = try String(contentsOfFile: path, encoding: .utf8)
-                .replacingOccurrences(of: "container:\(config.project)", with: variantContainer)
+                .replacingOccurrences(of: originalContainer + "\"", with: variantContainer + "\"")
+            guard s.contains(variantContainer) || !s.contains(originalContainer) else {
+                throw SimlessError("could not retarget scheme \(file) to the build variant")
+            }
             for plan in Self.testPlanReferences(in: s) {
-                let planPath = "\(root)/\(plan)"
+                let planPath = "\(projectDir)/\(plan)"
                 guard exists(planPath) else { continue }
                 let variantPlan = (plan as NSString).deletingPathExtension + ".simless.xctestplan"
                 let body = try String(contentsOfFile: planPath, encoding: .utf8)
-                    .replacingOccurrences(of: "container:\(config.project)", with: variantContainer)
-                try body.write(toFile: "\(root)/\(variantPlan)", atomically: true, encoding: .utf8)
+                    .replacingOccurrences(of: originalContainer + "\"", with: variantContainer + "\"")
+                try body.write(toFile: "\(projectDir)/\(variantPlan)", atomically: true, encoding: .utf8)
                 s = s.replacingOccurrences(of: "container:\(plan)\"", with: "container:\(variantPlan)\"")
             }
             try s.write(toFile: path, atomically: true, encoding: .utf8)
@@ -171,16 +187,30 @@ struct Workspace {
     }
 
     private func captureSettings(project: String) throws {
-        // Without -derivedDataPath this resolves packages into the default DerivedData.
-        let out = try Shell.check(["xcodebuild", "-showBuildSettings", "-json", "-project", project,
-                                   "-scheme", config.scheme, "-derivedDataPath", derivedData,
-                                   "-configuration", "Debug", "-sdk", "iphoneos"],
-                                  cwd: root, what: "xcodebuild -showBuildSettings", stdoutOnly: true)
-        guard let start = out.firstIndex(of: "["),
-              let arr = try JSONSerialization.jsonObject(with: Data(out[start...].utf8)) as? [[String: Any]],
-              let bs = (arr.first { $0["target"] as? String == config.appTarget } ?? arr.first)?["buildSettings"] as? [String: String] else {
-            throw SimlessError("could not read build settings for \(config.appTarget)")
+        // By scheme with the build's own destination and derived-data path (so it
+        // never touches the default DerivedData). Some schemes resolve no
+        // destination this way ("Found no destinations"); then query the target
+        // directly, which can't take -derivedDataPath, and clean up after it.
+        let attempts: [[String]] = [
+            ["-scheme", config.scheme, "-destination", Self.dfiDestination, "-derivedDataPath", derivedData],
+            ["-target", config.appTarget, "-sdk", "iphoneos"],
+        ]
+        var bs: [String: String]?
+        var lastError = ""
+        for extra in attempts where bs == nil {
+            let r = try withDefaultDerivedDataGuard(projectNames: [projectBase, "\(projectBase).simless"]) {
+                try Shell.run(["xcodebuild", "-showBuildSettings", "-json", "-project", project,
+                               "-configuration", "Debug"] + extra, cwd: root, stdoutOnly: true)
+            }
+            guard r.code == 0, let start = r.out.firstIndex(of: "["),
+                  let arr = try? JSONSerialization.jsonObject(with: Data(r.out[start...].utf8)) as? [[String: Any]] else {
+                lastError = "xcodebuild -showBuildSettings \(extra.joined(separator: " ")) failed (exit \(r.code))"
+                continue
+            }
+            bs = arr.first { $0["target"] as? String == config.appTarget }?["buildSettings"] as? [String: String]
+            if bs == nil { lastError = "no build settings for target \(config.appTarget)" }
         }
+        guard let bs else { throw SimlessError("could not read build settings for \(config.appTarget): \(lastError)") }
         var features: [String] = []
         for (k, v) in bs where k.hasPrefix("SWIFT_UPCOMING_FEATURE_") && v == "YES" {
             // SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY -> MemberImportVisibility
@@ -215,16 +245,18 @@ struct Workspace {
 
     var snapshotPath: String { "\(work)/sources.json" }
 
+    /// The app's sources plus every local package module's: edits anywhere in
+    /// them are detected, and the patch-scope graph spans all of them.
     func swiftSources() -> [String] {
         var out: [String] = []
-        for dir in config.sourceDirs {
-            let base = "\(root)/\(dir)"
+        let dirs = config.sourceDirs.map { $0 == "." ? root : "\(root)/\($0)" } + Packages.modules(ws: self).map(\.dir)
+        for base in Array(Set(dirs)) {
             guard let e = FileManager.default.enumerator(atPath: base) else { continue }
             while let rel = e.nextObject() as? String {
                 if rel.hasSuffix(".swift") { out.append("\(base)/\(rel)") }
             }
         }
-        return out.sorted()
+        return Array(Set(out)).sorted()
     }
 
     private static func digest(_ path: String) -> String? {
