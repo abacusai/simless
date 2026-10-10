@@ -42,8 +42,8 @@ enum Render {
         let safe = (t["safeArea"] as? [Double]) ?? []
         var lines = ["  traits: \(t["horizontalSizeClass"] ?? "?")/\(t["verticalSizeClass"] ?? "?") size class, idiom \(t["idiom"] ?? "?"), safe area top \(Int(safe.first ?? 0)) bottom \(Int(safe.count > 2 ? safe[2] : 0))"]
         let wantPhone = device != "ipad"
-        if wantPhone, t["deviceIdiom"] as? String != "phone" {
-            lines.append("  note: UIDevice.current.userInterfaceIdiom reports \(t["deviceIdiom"] ?? "?") here; views that read it directly (not the trait collection) may take their iPad branch")
+        if wantPhone, t["idiom"] as? String != "phone" || t["deviceIdiom"] as? String != "phone" {
+            lines.append("  note: the idiom is \(t["idiom"] ?? "?") on the Mac; layouts that branch on size class look like a phone's, but code that checks userInterfaceIdiom takes its iPad branch")
         }
         return lines
     }

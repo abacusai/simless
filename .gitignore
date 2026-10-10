@@ -4,3 +4,5 @@
 .DS_Store
 bench/results-*.json
 bench/config.json
+*.simless.xcodeproj/
+*.simless.xctestplan

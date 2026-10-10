@@ -81,20 +81,7 @@ enum SimlessHost {
         enableAccessibilityAutomation()
         simlessFixtures(registry)
         loadBundledPatch()
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
-        if ProcessInfo.processInfo.isiOSAppOnMac {
-            let w = UIWindow(frame: frame)
-            w.isHidden = false
-            window = w
-        } else if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
-            // In a simulator (`simless calibrate`): a real scene window, so the
-            // device's own safe areas and traits apply.
-            let w = UIWindow(windowScene: scene)
-            w.frame = frame
-            w.windowLevel = .alert + 1
-            w.makeKeyAndVisible()
-            window = w
-        }
+        _ = renderWindow()
         do {
             let params = NWParameters.tcp
             params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
@@ -219,9 +206,33 @@ enum SimlessHost {
 
     // MARK: - Rendering
 
+    /// The window fixtures render into, created on first use. On the Mac it's a
+    /// standalone hidden window. In a simulator (`simless calibrate`) it belongs
+    /// to the app's scene so the device's own safe areas and traits apply; the
+    /// scene may connect after the host starts, hence the lazy creation.
+    private static func renderWindow() -> UIWindow? {
+        if let window { return window }
+        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            let w = UIWindow(frame: frame)
+            w.isHidden = false
+            window = w
+        } else if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            let w = UIWindow(windowScene: scene)
+            w.frame = frame
+            w.windowLevel = .alert + 1
+            w.makeKeyAndVisible()
+            window = w
+        }
+        return window
+    }
+
     private static func render(_ req: Request) -> Response {
-        guard let name = req.fixture, let view = registry.make(name), let window else {
+        guard let name = req.fixture, let view = registry.make(name) else {
             return Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names)
+        }
+        guard let window = renderWindow() else {
+            return Response(ok: false, error: "no window to render into yet (the app's scene hasn't connected)")
         }
         let start = CFAbsoluteTimeGetCurrent()
         let rect = CGRect(x: 0, y: 0, width: req.width ?? 402, height: req.height ?? 874)
@@ -232,12 +243,13 @@ enum SimlessHost {
         // scale so layout rounding (and PNGs) don't depend on that display.
         host.traitOverrides.displayScale = 2
         // An iOS app on a Mac reports iPad-like traits; give phone canvases a
-        // phone's traits and, on the Mac, the device's safe areas (notch, home
-        // indicator). A simulator already has the real ones.
+        // phone's size classes and, on the Mac, the device's safe areas (notch,
+        // home indicator). A simulator already has the real ones. The idiom is
+        // left alone: overriding it to .phone on the Mac makes SwiftUI's control
+        // styles (Form, Toggle, Picker) recurse until the stack overflows.
         let phone = rect.width < 600
         host.traitOverrides.horizontalSizeClass = phone ? .compact : .regular
         host.traitOverrides.verticalSizeClass = .regular
-        host.traitOverrides.userInterfaceIdiom = phone ? .phone : .pad
         if ProcessInfo.processInfo.isiOSAppOnMac {
             host.additionalSafeAreaInsets = UIEdgeInsets(top: req.safeTop ?? 0, left: 0, bottom: req.safeBottom ?? 0, right: 0)
         }
@@ -300,17 +312,22 @@ enum SimlessHost {
                                 value: obj.accessibilityValue, id: (id?.isEmpty ?? true) ? nil : id,
                                 frame: [a.minX - origin.x, a.minY - origin.y, a.width, a.height]
                                     .map { (Double($0) * 10).rounded() / 10 }))
+                // VoiceOver treats an element as one unit and doesn't descend into it
+                // (a Toggle row's switch, a Picker's value text). Neither do we.
+                return
             }
+            // A container that lists its accessibility elements replaces its
+            // subviews for VoiceOver; only fall back to subviews when it lists none.
             var children: [NSObject] = []
-            if let elements = obj.accessibilityElements as? [NSObject] {
-                children += elements
+            if let elements = obj.accessibilityElements as? [NSObject], !elements.isEmpty {
+                children = elements
             } else {
                 let n = obj.accessibilityElementCount()
                 if n != NSNotFound && n > 0 {
                     for i in 0..<n { if let e = obj.accessibilityElement(at: i) as? NSObject { children.append(e) } }
                 }
             }
-            if let view = obj as? UIView { children += view.subviews }
+            if children.isEmpty, let view = obj as? UIView { children = view.subviews }
             for c in children { visit(c, depth: depth + 1) }
         }
         visit(root, depth: 0)

@@ -58,23 +58,41 @@ enum Slots {
         }
         let xctestrun = "\(slot.dir)/slot.xctestrun"
         try? fm.removeItem(atPath: xctestrun)
-        try fm.copyItem(atPath: "\(ws.products)/\(src)", toPath: xctestrun)
-        let n = Int(try Shell.check(["/usr/bin/plutil", "-extract", "TestConfigurations.0.TestTargets", "raw", xctestrun])
-            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-        for i in 0..<n {
-            // Install and test runs launch the app too; keep them headless.
-            let env = "TestConfigurations.0.TestTargets.\(i).EnvironmentVariables"
-            if (try? Shell.check(["/usr/bin/plutil", "-extract", env, "raw", xctestrun])) == nil {
-                _ = try? Shell.run(["/usr/bin/plutil", "-insert", env, "-dictionary", xctestrun])
+        try retargetXCTestRun(from: "\(ws.products)/\(src)", to: xctestrun,
+                              hostBundleID: settings.bundleID, slotID: slot.slotID)
+        Log.step("slot \(slot.slotID) prepared in \(secs(t))")
+    }
+
+    /// Copies the build's .xctestrun with the test host's bundle id swapped for
+    /// the slot's, and SIMLESS_HEADLESS set so install and test runs never show a
+    /// window. Handles both formats: v2 (`TestConfigurations[].TestTargets[]`,
+    /// schemes with a test plan) and v1 (test targets as top-level keys).
+    private static func retargetXCTestRun(from src: String, to dst: String, hostBundleID: String, slotID: String) throws {
+        guard let data = FileManager.default.contents(atPath: src),
+              var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            throw SimlessError("could not read \(src)")
+        }
+        func retarget(_ target: [String: Any]) -> [String: Any] {
+            var t = target
+            var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
+            env["SIMLESS_HEADLESS"] = "1"
+            t["EnvironmentVariables"] = env
+            if t["TestHostBundleIdentifier"] as? String == hostBundleID { t["TestHostBundleIdentifier"] = slotID }
+            return t
+        }
+        if let configs = plist["TestConfigurations"] as? [[String: Any]] {
+            plist["TestConfigurations"] = configs.map { config in
+                var c = config
+                c["TestTargets"] = (config["TestTargets"] as? [[String: Any]] ?? []).map(retarget)
+                return c
             }
-            try Shell.check(["/usr/bin/plutil", "-replace", "\(env).SIMLESS_HEADLESS", "-string", "1", xctestrun])
-            let key = "TestConfigurations.0.TestTargets.\(i).TestHostBundleIdentifier"
-            if (try? Shell.check(["/usr/bin/plutil", "-extract", key, "raw", xctestrun]))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) == settings.bundleID {
-                try Shell.check(["/usr/bin/plutil", "-replace", key, "-string", slot.slotID, xctestrun])
+        } else {
+            for (key, value) in plist where !key.hasPrefix("__") {
+                if let target = value as? [String: Any] { plist[key] = retarget(target) }
             }
         }
-        Log.step("slot \(slot.slotID) prepared in \(secs(t))")
+        let out = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try out.write(to: URL(fileURLWithPath: dst))
     }
 
     /// Frameworks, dylibs and test bundles inside the app, deepest first.

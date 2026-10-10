@@ -34,6 +34,17 @@ enum Signing {
         return found
     }
 
+    /// Teams of the valid Apple Development identities in the keychain.
+    static func developmentTeams() throws -> Set<String> {
+        let out = try Shell.check(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"])
+        var teams = Set<String>()
+        for line in out.split(separator: "\n") where line.contains("Apple Development") {
+            let parts = line.split(separator: "\"")
+            if parts.count >= 2, let team = try certificateTeam(name: String(parts[1])) { teams.insert(team) }
+        }
+        return teams
+    }
+
     private static func lookupIdentity(team: String, validIdentities out: String) throws -> (String, String) {
         // `  1) <SHA1> "Apple Development: Name (XXXXXXXXXX)"`
         for line in out.split(separator: "\n") where line.contains("Apple Development") {

@@ -83,8 +83,8 @@ A **failure** from simless (a test failure, an issue, a wrong label or frame) is
 - **Calibrate once per app.** Run `simless calibrate` once per app, and again after large UI changes. It renders every fixture in one iOS Simulator too and lists what differs. Trust renders of the matching fixtures; check the others in a simulator.
 - **Hot reload.** Hot reload works for views in the app target and in local Swift packages, and also patches the views that embed what you edited. When it says "patch can't cover this edit", it does a full build; that's expected.
 - **Scroll content.** "below the fold: N element(s)" is information, not an issue: it counts scroll content listed in the tree.
-- **Device traits.** Phone canvases get phone traits and safe areas, and every render prints them. If a render notes that `UIDevice.current.userInterfaceIdiom` reports `pad`, code that reads it directly takes its iPad branch in simless.
-- **Mac differences.** Text can wrap differently than on iOS, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. Dynamic Type is ignored.
+- **Device traits.** Phone canvases get phone size classes and safe areas, and every render prints its traits. The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch in simless.
+- **Mac differences.** Text renders 2–4% wider than on iOS (long or centered text can wrap differently), `List`/`Form` rows are a few points taller, system accent colors follow the Mac, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. Dynamic Type is ignored.
 - **"issues: none"** only means the five automatic checks passed. Read the tree yourself.
 - **`simless test`** runs the last full build (not patches) without app capabilities (iCloud, app groups, keychain sharing, push). Tests that depend on those can differ from the simulator.
 

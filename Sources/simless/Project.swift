@@ -16,6 +16,7 @@ struct Config: Codable {
     var buildConcurrency: Int?    // max simultaneous full builds across all agents
     var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30)
     var packages: [String]?       // local Swift packages whose views hot reload can patch (relative to root)
+    var team: String?             // signing team when the project sets no DEVELOPMENT_TEAM (e.g. a shared sample)
 
     var kitFile: String { "\(kitDir)/SimlessKit.swift" }
     var fixturesFile: String { "\(kitDir)/SimlessFixtures.swift" }
@@ -228,12 +229,27 @@ struct Workspace {
             upcomingFeatures: Array(Set(features)).sorted(),
             conditions: (bs["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "DEBUG").split(separator: " ").map(String.init),
             bundleID: bs["PRODUCT_BUNDLE_IDENTIFIER"] ?? "",
-            team: bs["DEVELOPMENT_TEAM"] ?? "",
+            team: try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
             wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app")
-        guard !s.bundleID.isEmpty, !s.team.isEmpty else {
-            throw SimlessError("\(config.appTarget) needs PRODUCT_BUNDLE_IDENTIFIER and DEVELOPMENT_TEAM")
+        guard !s.bundleID.isEmpty else {
+            throw SimlessError("\(config.appTarget) needs a PRODUCT_BUNDLE_IDENTIFIER")
         }
         try JSONEncoder().encode(s).write(to: URL(fileURLWithPath: settingsPath))
+    }
+
+    /// The project's team; else `team` from .simless.json; else $SIMLESS_TEAM;
+    /// else the team of the only Apple Development identity in the keychain.
+    private func teamForSigning(fromBuildSettings team: String) throws -> String {
+        if !team.isEmpty { return team }
+        if let t = config.team, !t.isEmpty { return t }
+        if let t = ProcessInfo.processInfo.environment["SIMLESS_TEAM"], !t.isEmpty { return t }
+        let teams = try Signing.developmentTeams()
+        guard teams.count == 1, let only = teams.first else {
+            throw SimlessError(teams.isEmpty
+                ? "\(config.appTarget) sets no DEVELOPMENT_TEAM and the keychain has no Apple Development identity"
+                : "\(config.appTarget) sets no DEVELOPMENT_TEAM; set SIMLESS_TEAM=<one of \(teams.sorted().joined(separator: ", "))>, or add \"team\" to \(Self.configName)")
+        }
+        return only
     }
 
     func settings() throws -> Settings {

@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.1.1"
+let version = "0.1.2"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -17,6 +17,7 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
         [--render <fixture|all>] [--no-fallback]
   simless test [Target[/Class[/method]]...]   unit tests on the Mac, no simulator
   simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
+        [--dark] [--png <dir>]: also dark mode; save both renders of every screen + a side-by-side report.md
   simless status                   slots, hosts, live-reload availability
   simless down [--all]             stop this worktree's host (or every host); relaunches on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
@@ -442,7 +443,9 @@ do {
     case "clean": try Cleanup.clean(all: args.flags.contains("--all"))
     case "calibrate":
         let ws = try Workspace.load()
-        try Calibrate.run(ws: ws, slot: try currentSlot(ws), only: args.positional.first)
+        try Calibrate.run(ws: ws, slot: try currentSlot(ws),
+                          options: .init(only: args.positional.first, imagesDir: args.values["--png"],
+                                         dark: args.flags.contains("--dark")))
     case "skill": try cmdSkill(args)
     case "help", "-h", "--help": print(usage)
     case "version", "--version":
