@@ -27,12 +27,21 @@ enum DemoData {
         let tags: [String]
     }
 
-    static let feed: [FeedItem] = (1...24).map { i in
-        FeedItem(id: i,
-                 title: i % 5 == 0 ? "A longer headline that needs two lines to fit on a phone screen, item \(i)" : "Update \(i): weekly summary",
-                 subtitle: ["Design", "Engineering", "Support", "Research"][i % 4] + " · \(i)h ago",
-                 symbol: ["sparkles", "hammer", "bubble.left", "magnifyingglass"][i % 4],
-                 unread: i % 3 == 0)
+    static let feed: [FeedItem] = (1...24).map(feedItem)
+
+    // Kept to simple, explicitly typed statements: one large expression here took
+    // older Swift type checkers past their time limit.
+    private static func feedItem(_ i: Int) -> FeedItem {
+        let teams: [String] = ["Design", "Engineering", "Support", "Research"]
+        let symbols: [String] = ["sparkles", "hammer", "bubble.left", "magnifyingglass"]
+        let title: String
+        if i % 5 == 0 {
+            title = "A longer headline that needs two lines to fit on a phone screen, item \(i)"
+        } else {
+            title = "Update \(i): weekly summary"
+        }
+        let subtitle: String = "\(teams[i % 4]) · \(i)h ago"
+        return FeedItem(id: i, title: title, subtitle: subtitle, symbol: symbols[i % 4], unread: i % 3 == 0)
     }
 
     static let article = Article(
