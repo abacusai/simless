@@ -27,7 +27,7 @@ enum DemoData {
         let tags: [String]
     }
 
-    static let feed: [FeedItem] = (1...24).map(feedItem)
+    static let feed: [FeedItem] = (1...24).map { feedItem($0) }
 
     // Kept to simple, explicitly typed statements: one large expression here took
     // older Swift type checkers past their time limit.
