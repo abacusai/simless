@@ -42,6 +42,17 @@ Measured on a production SwiftUI app (~280 Swift files, several large Swift pack
 
 Legacy gets slower with every agent you add; simless stays at ~2 s per edit. Full method, caveats and reproduction steps: [docs/benchmarks.md](docs/benchmarks.md).
 
+## Does it look the same?
+
+Mostly. Here are screens from the [demo app](Examples/SimlessDemo), rendered by the iOS Simulator (the legacy workflow) and by simless:
+
+| Welcome: iOS Simulator | Welcome: simless | Settings: iOS Simulator | Settings: simless |
+|:-:|:-:|:-:|:-:|
+| <img src="docs/fidelity/Welcome-light-simulator.png" width="190"> | <img src="docs/fidelity/Welcome-light-simless.png" width="190"> | <img src="docs/fidelity/Settings-light-simulator.png" width="190"> | <img src="docs/fidelity/Settings-light-simless.png" width="190"> |
+| | ✓ matches within 2 pt | | ✗ toggle rows 6 pt taller, Mac accent color |
+
+8 of 14 demo renders (7 screens, light and dark) match within 2 pt. The rest differ in row heights of `List` and `Form`, line breaks in long centered text, and system accent colors. [docs/fidelity.md](docs/fidelity.md) shows every screen side by side. Run `simless calibrate --png <dir>` to get the same comparison for your own app.
+
 ## Requirements
 
 - An Apple Silicon Mac with Xcode 26 or later.
