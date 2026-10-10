@@ -23,6 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # simless needs Xcode 26+ (Swift 6.2: -default-isolation, defaultIsolation in
+      # packages). Runner images default to an older Xcode; select the newest 26.x.
+      - name: Select Xcode 26
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "::error::no Xcode 26 on this runner image"; ls -d /Applications/Xcode*.app; exit 1; fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+
       - name: Build the CLI
         run: swift build -c release
 

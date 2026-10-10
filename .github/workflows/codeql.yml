@@ -42,6 +42,13 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.language == 'swift' && 'manual' || 'none' }}
 
+      - name: Select Xcode 26
+        if: matrix.language == 'swift'
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$xcode" ]; then sudo xcode-select -s "$xcode/Contents/Developer"; fi
+          xcodebuild -version
+
       - name: Build (Swift)
         if: matrix.language == 'swift'
         run: |
