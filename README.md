@@ -8,7 +8,7 @@ Your real iOS app runs natively on your Mac as an invisible render host. Agents 
 $ simless reload --render Welcome.sheet
 reloaded (live) in 1.9s: compile 1.7s + apply 0.2s; files edited since `simless up`: WelcomeSheet.swift
 Welcome.sheet · light · iphone 402×874 · 25 ms · patch 1
-  traits: compact/regular size class, idiom phone, safe area top 62 bottom 34
+  traits: compact/regular size class, idiom pad, safe area top 62 bottom 34
   header  "Welcome to Notes" #welcome.title  @89.3,403.8 223.5×81.5
   text    "Your notes stay on this device and sync with iCloud."  @26.8,493.3 348.5×64.5
   button  "Get Started" #welcome.start  @24,779.5 354×36.5
@@ -154,7 +154,7 @@ simless version                   version, Xcode and macOS
 
 ## How far to trust results
 
-**In short: simless is a fast, high-signal inner loop, not a replacement for a final simulator pass.** Run `simless calibrate` once per app to see how closely its renders match the iOS Simulator for your screens. Before calling a UI change done, check it once in the simulator, especially anything below that simless can't see.
+**In short: simless is a fast, high-signal inner loop, not a replacement for a final simulator pass.** Run `simless calibrate` once per app to see how closely its renders match the iOS Simulator for your screens, and see [docs/fidelity.md](docs/fidelity.md) for side-by-side screenshots of a demo app. Before calling a UI change done, check it once in the simulator, especially anything below that simless can't see.
 
 ### What a result means
 
@@ -167,13 +167,15 @@ simless version                   version, Xcode and macOS
 ### What simless does to stay accurate
 
 - **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
-- **Phone canvases get phone traits.** That means compact width, the phone idiom, and the device's safe areas (notch, home indicator). Every render prints the traits the view saw.
+- **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch. Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 
 ### Known differences from an iPhone
 
-- **`UIDevice.current.userInterfaceIdiom` reports `.pad`.** That can't be overridden on the Mac, so code that reads it directly, rather than the trait collection, takes its iPad branch. Renders print a note about it.
-- **Text can wrap differently.** Font metrics differ slightly between the Mac and iOS. In calibration, a two-line label came out 14 pt wider in simless. Treat exact line breaks and truncation as unverified until calibration shows they match.
+- **The idiom is `.pad`.** On the Mac it can't safely be overridden (doing so crashes SwiftUI's control styles), so code that checks `userInterfaceIdiom` takes its iPad branch. Renders print a note about it.
+- **Text renders 2–4% wider.** Usually lines break the same way, but long or centered text can need an extra line. Treat exact line breaks and truncation as unverified until calibration shows they match.
+- **Platform rows are taller.** `List` rows came out 2 pt taller and `Form` toggle rows 6 pt taller, so content below them sits lower.
+- **System colors follow the Mac.** Controls use the macOS accent color (an "on" toggle can be gray instead of green), which an accessibility tree can't show.
 - **Some controls are exposed differently to accessibility.** In calibration, a `Menu` with a custom label was unlabeled in simless but labeled on iOS, so simless reported an issue that isn't one on a phone. Confirm accessibility flags on `Menu` and other platform-backed controls with `simless calibrate`.
 - **Text size:** Dynamic Type is ignored, so text that fits at the default size can still truncate at larger sizes.
 - **Pixels:** rendering is close to, but not identical with, an iPhone. Use the simulator for final pixels.
@@ -196,7 +198,7 @@ Gestures and swipe actions, the software keyboard, navigation flows across scree
 
 ## How it works
 
-See [docs/architecture.md](docs/architecture.md) for the design and [docs/findings.md](docs/findings.md) for the platform behavior it relies on. Benchmarks are reproducible with [bench/](bench/).
+See [docs/architecture.md](docs/architecture.md) for the design, [docs/findings.md](docs/findings.md) for the platform behavior it relies on, and [docs/fidelity.md](docs/fidelity.md) for side-by-side renders of the [demo app](Examples/SimlessDemo) in the iOS Simulator and in simless. Benchmarks are reproducible with [bench/](bench/).
 
 ## License
 

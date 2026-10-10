@@ -53,7 +53,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode;
-- phone canvases get compact width, the phone idiom and, on the Mac, the device's safe-area insets; iPad canvases get regular width and the iPad idiom. The traits the view actually saw are returned with every render. `UIDevice.current.userInterfaceIdiom` can't be overridden, and reports `.pad`;
+- phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac: overriding it to `.phone` makes SwiftUI's control styles recurse until the stack overflows, and `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display;
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
 

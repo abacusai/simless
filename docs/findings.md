@@ -40,6 +40,14 @@ These are the platform facts behind simless's design, found by building it again
 - **Display scale follows the hidden window's display.** On a 1× external display, layout rounds differently (whole points instead of half points). Pin `traitOverrides.displayScale = 2`.
 - **Headless:** without `LSUIElement` in the Info.plist, a Dock icon flashes for ~1.5–3 s at launch. `INFOPLIST_KEY_LSUIElement` doesn't reach Designed-for-iPad builds, so set it in the built Info.plist and re-sign.
 - **Windows still flash in install and test runs.** Launches by `xcodebuild test` don't carry simless's arguments. In those runs the app's main window was on screen for ~290 ms. Hiding the app early in `App.init` cut that to ~40 ms, and `LSBackgroundOnly` to ~20 ms. Only making `NSWindow` ordering (`orderWindow:relativeTo:`, `orderFront:`, `makeKeyAndOrderFront:`, `orderFrontRegardless`) a no-op removed it completely; rendering is unaffected.
+- **Overriding the idiom crashes SwiftUI.** On the Mac, `traitOverrides.userInterfaceIdiom = .phone` makes SwiftUI's control styles (`Form`, `Toggle`, `Picker`) recurse in `StyleableView._makeViewList` until the stack overflows. Size-class overrides are safe.
+- **Measured rendering differences, from the demo app against an iPhone 17 Pro / iOS 27 simulator** (see [fidelity.md](fidelity.md)):
+  - text renders 2–4% wider, which usually keeps the same line breaks;
+  - `List` rows are 2 pt taller;
+  - `Form` toggle rows are 6 pt taller;
+  - controls use the macOS accent color.
+- **VoiceOver container semantics.** An accessibility element is one unit (VoiceOver doesn't descend into it), and a container that lists `accessibilityElements` replaces its subviews. Walking subviews as well finds duplicates (a `Toggle` row's switch, a `Picker`'s value text, navigation titles) that VoiceOver never announces.
+- **`.xctestrun` comes in two formats.** Schemes with a test plan produce format 2 (`TestConfigurations[].TestTargets[]`); schemes without one produce format 1, with test targets as top-level keys.
 - **Device idiom:** `UIDevice.current.userInterfaceIdiom` reports `.pad` for an iOS app on the Mac, and trait overrides don't change it. `traitOverrides.horizontalSizeClass` and `userInterfaceIdiom` do change what views see through the trait collection.
 - **Calibration against the iOS 27 simulator,** on a production app:
   - Simple layouts matched within 1.5 pt.

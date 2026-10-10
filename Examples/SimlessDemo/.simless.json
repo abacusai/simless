@@ -1,0 +1,11 @@
+{
+  "appTarget" : "SimlessDemo",
+  "device" : "iphone",
+  "kitDir" : "SimlessDemo/Simless",
+  "project" : "SimlessDemo.xcodeproj",
+  "scheme" : "SimlessDemo",
+  "sourceDirs" : [
+    "SimlessDemo"
+  ],
+  "testTarget" : "SimlessDemoTests"
+}

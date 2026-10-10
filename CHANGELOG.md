@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+## 0.1.2 (2026-10-10)
+
+- **Demo app and fidelity page.** [Examples/SimlessDemo](Examples/SimlessDemo) has seven common screens, and [docs/fidelity.md](docs/fidelity.md) shows each one rendered by the iOS Simulator and by simless, side by side, with what differs.
+- **Crash fix: screens with `Form`, `Toggle` or `Picker` no longer crash the host.** 0.1.1 overrode the idiom to `.phone`, which makes SwiftUI's control styles recurse until the stack overflows on the Mac. Phone canvases keep phone size classes and safe areas; the idiom stays iPad, and renders say so.
+- **Accessibility trees match what VoiceOver sees.** Elements are no longer descended into, and containers that list their elements no longer also contribute their subviews. That removes duplicates such as a `Toggle` row's switch, a `Picker`'s value text and navigation titles, which accounted for over half the issues reported on the demo app.
+- **Simulator render window.** In `simless calibrate`, the render window is created on first use, so a scene that connects late no longer fails every render with a misleading "unknown fixture".
+- **Calibration report.** `simless calibrate --png <dir>` saves both renders of every screen and writes a side-by-side `report.md`; `--dark` adds dark mode. Text that only renders slightly wider, and elements exposed with a different role, are reported as minor instead of failing the screen.
+- **Projects without a test plan.** Their test runs use the older `.xctestrun` format, which simless now also handles.
+- **Signing team.** When a project sets no `DEVELOPMENT_TEAM`, simless uses `team` from `.simless.json`, `SIMLESS_TEAM`, or the only Apple Development identity in the keychain.
+
 ## 0.1.1 (2026-10-10)
 
 Fixes found by using simless on a project laid out differently from the one it was built on.

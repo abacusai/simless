@@ -58,6 +58,15 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Demo app uses the current kit
+        run: cmp Templates/SimlessKit.swift Examples/SimlessDemo/SimlessDemo/Simless/SimlessKit.swift
+
+      - name: Build the demo app and its tests (iOS Simulator)
+        run: |
+          xcodebuild build-for-testing -project Examples/SimlessDemo/SimlessDemo.xcodeproj -scheme SimlessDemo \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/demo" \
+            CODE_SIGNING_ALLOWED=NO -quiet
+
       - name: Check benchmark scripts
         run: python3 -m py_compile bench/bench.py bench/memory.py
 
