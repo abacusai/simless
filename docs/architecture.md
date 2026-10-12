@@ -31,9 +31,9 @@ Builds run with `CODE_SIGNING_ALLOWED=NO`. All signing happens when a slot is cr
 macOS runs one instance per bundle id. Several agents need several hosts, so each worktree gets a **slot**: an APFS clone of the build (near-free), modified as follows:
 
 - `CFBundleIdentifier` becomes `<bundle id>.simless<N>`.
-- `PlugIns/*.appex` (and `Watch/`) are removed, because extension ids would fail the prefix check.
+- App extensions (`PlugIns/*.appex`) and the watch app (`Watch/`) stay, with every id in their Info.plists that starts with the app's id moved under the slot's (installd checks that prefix). Each extension gets the profile and its own `application-identifier`. After install, simless sets each extension to "ignore" with `pluginkit`, so a slot's widgets never reach the widget gallery. If an install with them fails, simless installs without them. `"embeddedBundles": false` always removes them.
 - `LSUIElement` is set, so the app never shows a Dock icon, not even during launch.
-- It's re-signed inside-out with the team's **wildcard development profile** and only `application-identifier`, `team-identifier` and `get-task-allow`. The slot has no capabilities: rendering needs no iCloud, push or app groups.
+- It's re-signed inside-out with the team's **wildcard development profile** and only `application-identifier`, `team-identifier` and `get-task-allow`. The slot has no capabilities: rendering needs no iCloud, push or app groups. installd rejects any other entitlement the profile doesn't list, sandbox temporary exceptions included.
 
 A slot is installed through a zero-test `xcodebuild test-without-building -only-testing:<UnitTests>/SimlessInstallOnly` run (xcodebuild is the only supported installer for Designed-for-iPad apps), using a copy of the build's `.xctestrun` with the host bundle id swapped. Installs are serialized machine-wide. The host is then launched **by path** (`open -g -j <slot>/.XCInstall/<App>.app --args --simless-port N`), not by bundle id.
 
@@ -48,12 +48,15 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
   Slots are also `LSUIElement` and `LSBackgroundOnly`. Measured result: no window, Dock icon or focus change, sampled every 10 ms.
 - **Turns on accessibility automation** in-process (`_AXSSetAutomationEnabled`, the approach KIF uses), so SwiftUI vends its accessibility tree.
 - **Calls `simlessFixtures(_:)`**, which the app owns, to register screens.
+- **Opens the sandbox a little,** in every run simless starts. It consumes the read-only sandbox extensions simless issued for the repository (`sandbox_extension_issue_file` / `_consume`, the mechanism behind file panels), so tests and fixtures can read repository files. It also points `containerURL(forSecurityApplicationGroupIdentifier:)` at a private folder per group inside the slot's container, because the slot can't hold app-group entitlements.
 - **Serves newline-delimited JSON on `127.0.0.1:<port>`**: `stats`, `render`, `load`, `stop`.
 - **Exits after 30 idle minutes.**
 
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode;
-- phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac: overriding it to `.phone` makes SwiftUI's control styles recurse until the stack overflows, and `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
+- phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` recurses until the stack overflows under it. When the host dies that way, the CLI relaunches it and renders the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
+- `--text-size` sets `preferredContentSizeCategory` and `dynamicTypeSize`. Layout follows them, but text styles keep their default sizes on the Mac;
+- `--locale` relaunches the host with `-AppleLanguages` and `-AppleLocale`, since the language is process-wide (string lookup, formatters, layout direction);
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display;
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
 
@@ -61,8 +64,21 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 - controls without labels,
 - text exposed twice,
 - elements cut off at the screen's side edges, or of zero size (content wholly below the fold is scroll content, reported as a count, not an issue),
-- tap targets under 44 pt,
+- tap targets under 44 pt (configurable with `checks.minTapTarget`; UIKit's own bar buttons are skipped),
 - overlapping controls.
+
+`checks.ignore` in `.simless.json` drops issues containing a given string. A split view's column resize handle (an unlabeled, full-height adjustable element, partly off screen when the sidebar is hidden) is left out of the tree.
+
+## Unit tests
+
+`simless test` stops the host and runs `xcodebuild test-without-building` with the slot's `.xctestrun`, so tests run inside the slot app like app-hosted tests on a device. Each run gets its own copy of the `.xctestrun` with:
+- `SIMLESS_SANDBOX_TOKENS`, the read-only sandbox extensions for the repository;
+- XCTest's per-test time allowance (`--timeout`, default 300 s), which Swift Testing also honors;
+- an entry per local package test target that was asked for.
+
+Package test targets can't run on the Mac on their own: Xcode drops test bundles without a host app for "Designed for iPad", and `swift test` builds for macOS, where iOS-only frameworks are missing. simless builds them with `xcodebuild build-for-testing -destination generic/platform=iOS` from the package directory, copies the `.xctest` (and the package's resource bundles) into the slot app's `PlugIns`, re-signs, and adds an app-hosted entry for it. The bundle carries its own static copy of the package, so the app's copy and the tests' copy don't share state.
+
+The CLI reads the output as it's written: failures print right away and progress every 10 s. A watchdog stops the run if one test is still running a minute or so past its allowance, which the allowance alone doesn't always manage, and names the test.
 
 ## 4. Hot reload
 
@@ -118,9 +134,9 @@ Hosts and the agent are already long-lived processes, so the CLI coordinates wit
 See [How far to trust results](../README.md#how-far-to-trust-results) for what a pass and a failure mean, the known ways a pass can be wrong (hot reload with nested views, device traits, safe areas, Dynamic Type), and how unit tests can differ. In brief:
 
 - **Hot reload replaces only the edited types.** Unedited views that embed an edited type still run the previously built code until the next full build.
-- **Traits aren't an iPhone's.** It's an iOS app on a Mac: no Dynamic Type, no safe-area insets, and the idiom and size class may differ from an iPhone (not yet verified).
-- **No capabilities.** Slots run without app capabilities.
+- **Traits aren't an iPhone's.** It's an iOS app on a Mac: text doesn't scale with Dynamic Type, and the idiom is `.pad` unless `--idiom phone` is passed. simless sets phone size classes and safe areas itself.
+- **No capabilities.** Slots run without app capabilities. App-group containers are private folders.
 - **Not covered:** gestures, the software keyboard, system UI and navigation flows.
 - **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
 - **Side effects:** the host runs the app's real startup; guard side effects with `SimlessHost.isActive`.
-- **Private APIs:** the host uses private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime) that an OS update could change.
+- **Private APIs:** the host uses private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`) that an OS update could change.

@@ -9,8 +9,10 @@ import AppKit
 enum Slots {
 
     /// Clones the fresh build into the slot and re-signs it as <id>.simlessN:
-    /// no app extensions, no capabilities, LSUIElement (never a Dock icon).
-    static func prepare(_ slot: SlotRecord, ws: Workspace, settings: Workspace.Settings) throws {
+    /// no capabilities, LSUIElement (never a Dock icon). App extensions and the
+    /// watch app stay (tests look for them) under ids within the slot's, unless
+    /// `embedded` is false.
+    static func prepare(_ slot: SlotRecord, ws: Workspace, settings: Workspace.Settings, embedded: Bool = true) throws {
         let t = now()
         let signing = try Signing.material(team: settings.team)
         let products = "\(slot.dir)/Debug-iphoneos"
@@ -21,10 +23,14 @@ enum Slots {
         try Shell.check(["/bin/cp", "-c", "-R", "\(ws.productsIphoneos)/\(settings.wrapperName)", app], what: "clone app")
 
         let fm = FileManager.default
-        for plugin in (try? fm.contentsOfDirectory(atPath: "\(app)/PlugIns")) ?? [] where plugin.hasSuffix(".appex") {
-            try fm.removeItem(atPath: "\(app)/PlugIns/\(plugin)")   // ids would fail the .simlessN prefix check
+        let nested = embeddedBundles(in: app)
+        if embedded {
+            // Their ids must start with the app's, which is now the slot's.
+            for bundle in nested { try reidentify("\(bundle)/Info.plist", from: settings.bundleID, to: slot.slotID) }
+        } else {
+            for bundle in nested { try? fm.removeItem(atPath: bundle) }
+            try? fm.removeItem(atPath: "\(app)/Watch")
         }
-        try? fm.removeItem(atPath: "\(app)/Watch")
         try? fm.removeItem(atPath: "\(app)/SimlessPatches")
 
         let info = "\(app)/Info.plist"
@@ -38,18 +44,21 @@ enum Slots {
         try fm.copyItem(atPath: signing.profilePath, toPath: "\(app)/embedded.mobileprovision")
 
         let entitlements = "\(slot.dir)/entitlements.plist"
-        try """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0"><dict>
-              <key>application-identifier</key><string>\(settings.team).\(slot.slotID)</string>
-              <key>com.apple.developer.team-identifier</key><string>\(settings.team)</string>
-              <key>get-task-allow</key><true/>
-            </dict></plist>
-            """.write(toFile: entitlements, atomically: true, encoding: .utf8)
+        try entitlementsPlist(team: settings.team, id: slot.slotID).write(toFile: entitlements, atomically: true, encoding: .utf8)
 
         // Built unsigned: sign nested code inside-out, then the app.
-        for path in nestedCode(in: app) { try Signing.sign(path, identity: signing.identity) }
+        for path in nestedCode(in: app) {
+            if path.hasSuffix(".appex"), let id = bundleID(path) {
+                // An extension needs a profile and its own application-identifier to install.
+                try? fm.removeItem(atPath: "\(path)/embedded.mobileprovision")
+                try fm.copyItem(atPath: signing.profilePath, toPath: "\(path)/embedded.mobileprovision")
+                let ent = "\(slot.dir)/entitlements-\(id).plist"
+                try entitlementsPlist(team: settings.team, id: id).write(toFile: ent, atomically: true, encoding: .utf8)
+                try Signing.sign(path, identity: signing.identity, entitlements: ent)
+            } else {
+                try Signing.sign(path, identity: signing.identity)
+            }
+        }
         try Signing.sign(app, identity: signing.identity, entitlements: entitlements)
 
         // xctestrun for installing: same as the build's, host bundle id swapped.
@@ -95,15 +104,149 @@ enum Slots {
         try out.write(to: URL(fileURLWithPath: dst))
     }
 
-    /// Frameworks, dylibs and test bundles inside the app, deepest first.
+    /// The minimum a slot (or one of its extensions) is signed with: the
+    /// wildcard profile allows nothing more.
+    private static func entitlementsPlist(team: String, id: String) -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+          <key>application-identifier</key><string>\(team).\(id)</string>
+          <key>com.apple.developer.team-identifier</key><string>\(team)</string>
+          <key>get-task-allow</key><true/>
+        </dict></plist>
+        """
+    }
+
+    /// Frameworks, dylibs, test bundles, extensions and watch apps inside the
+    /// app, deepest first.
     private static func nestedCode(in app: String) -> [String] {
         var found: [String] = []
         guard let e = FileManager.default.enumerator(atPath: app) else { return [] }
         while let rel = e.nextObject() as? String {
             let ext = (rel as NSString).pathExtension
-            if ["framework", "xctest", "dylib"].contains(ext) { found.append("\(app)/\(rel)") }
+            if ["framework", "xctest", "dylib", "appex", "app"].contains(ext) { found.append("\(app)/\(rel)") }
         }
         return found.sorted { $0.split(separator: "/").count > $1.split(separator: "/").count }
+    }
+
+    /// App extensions and watch apps (with their own extensions).
+    private static func embeddedBundles(in app: String) -> [String] {
+        nestedCode(in: app).filter { $0.hasSuffix(".appex") || $0.hasSuffix(".app") }
+    }
+
+    private static func bundleID(_ bundle: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: "\(bundle)/Info.plist"),
+              let plist = try? PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any] else { return nil }
+        return plist["CFBundleIdentifier"] as? String
+    }
+
+    /// Rewrites every id in a nested bundle's Info.plist that is the app's id or
+    /// within it (CFBundleIdentifier, WKCompanionAppBundleIdentifier, ...).
+    private static func reidentify(_ infoPlist: String, from old: String, to new: String) throws {
+        guard let d = FileManager.default.contents(atPath: infoPlist),
+              let plist = try PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any] else { return }
+        func map(_ v: Any) -> Any {
+            if let s = v as? String, s == old || s.hasPrefix(old + ".") { return new + s.dropFirst(old.count) }
+            if let a = v as? [Any] { return a.map(map) }
+            if let dict = v as? [String: Any] { return dict.mapValues(map) }
+            return v
+        }
+        let out = try PropertyListSerialization.data(fromPropertyList: map(plist), format: .binary, options: 0)
+        try out.write(to: URL(fileURLWithPath: infoPlist))
+    }
+
+    /// macOS registers an installed app's extensions; a slot's widgets must not
+    /// show up in the widget gallery, so each is set to "ignore".
+    private static func hideExtensions(_ slot: SlotRecord) {
+        let installed = "\(slot.dir)/Debug-iphoneos/.XCInstall"
+        for app in (try? FileManager.default.contentsOfDirectory(atPath: installed)) ?? [] where app.hasSuffix(".app") {
+            for appex in embeddedBundles(in: "\(installed)/\(app)") where appex.hasSuffix(".appex") {
+                if let id = bundleID(appex) { _ = try? Shell.run(["/usr/bin/pluginkit", "-e", "ignore", "-i", id]) }
+            }
+        }
+    }
+
+    // MARK: - Test runs
+
+    /// Copies package test bundles into the slot app and re-signs it. The next
+    /// test run installs them, and the app hosts them like its own tests.
+    static func injectTests(_ slot: SlotRecord, ws: Workspace, bundles: [(target: String, products: String)]) throws {
+        let settings = try ws.settings()
+        let signing = try Signing.material(team: settings.team)
+        let app = "\(slot.dir)/Debug-iphoneos/\(settings.wrapperName)"
+        let fm = FileManager.default
+        try mkdirp("\(app)/PlugIns")
+        for b in bundles {
+            let dst = "\(app)/PlugIns/\(b.target).xctest"
+            try? fm.removeItem(atPath: dst)
+            try Shell.check(["/bin/cp", "-c", "-R", "\(b.products)/\(b.target).xctest", dst], what: "copy \(b.target)")
+            // SwiftPM resource bundles: Bundle.module looks for them next to its code.
+            for r in (try? fm.contentsOfDirectory(atPath: b.products)) ?? [] where r.hasSuffix(".bundle") {
+                try Shell.check(["/bin/cp", "-c", "-R", "\(b.products)/\(r)", "\(dst)/\(r)"], what: "copy \(r)")
+            }
+            for path in nestedCode(in: dst) { try Signing.sign(path, identity: signing.identity) }
+            try Signing.sign(dst, identity: signing.identity)
+        }
+        try Signing.sign(app, identity: signing.identity, entitlements: "\(slot.dir)/entitlements.plist")
+    }
+
+    /// The xctestrun for one test run: the slot's, plus an entry per injected
+    /// package test bundle (hosted like the app's own tests), the sandbox
+    /// tokens that let tests read the repository, and the per-test time limit.
+    static func testRun(_ slot: SlotRecord, ws: Workspace, packageTargets: [String], timeout: Double) throws -> String {
+        let src = "\(slot.dir)/slot.xctestrun"
+        guard let data = FileManager.default.contents(atPath: src),
+              var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            throw SimlessError("\(slot.slotID) is not installed; run `simless up`")
+        }
+        var dirs = [ws.root]
+        for p in ws.packages {
+            let dir = URL(fileURLWithPath: "\(ws.root)/\(p)").standardizedFileURL.path
+            if !dir.hasPrefix(URL(fileURLWithPath: ws.root).standardizedFileURL.path + "/") { dirs.append(dir) }
+        }
+        let tokens = dirs.compactMap(Sandbox.readToken).joined(separator: "\n")
+        func configure(_ target: [String: Any]) -> [String: Any] {
+            var t = target
+            var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
+            env["SIMLESS_SANDBOX_TOKENS"] = tokens
+            t["EnvironmentVariables"] = env
+            t["TestTimeoutsEnabled"] = true
+            t["DefaultTestExecutionTimeAllowance"] = Int(timeout)
+            t["MaximumTestExecutionTimeAllowance"] = Int(timeout)
+            return t
+        }
+        func hosted(_ template: [String: Any], _ name: String) -> [String: Any] {
+            var t = template
+            t["BlueprintName"] = name
+            t["ProductModuleName"] = name.replacingOccurrences(of: "-", with: "_")
+            t["TestBundlePath"] = "__TESTHOST__/PlugIns/\(name).xctest"
+            if let host = t["TestHostPath"] as? String { t["DependentProductPaths"] = [host, "\(host)/PlugIns/\(name).xctest"] }
+            t.removeValue(forKey: "BlueprintProviderName")
+            t.removeValue(forKey: "BlueprintProviderRelativePath")
+            return t
+        }
+        let main = ws.config.testTarget
+        if var configs = plist["TestConfigurations"] as? [[String: Any]] {
+            for i in configs.indices {
+                var targets = (configs[i]["TestTargets"] as? [[String: Any]] ?? []).map(configure)
+                if let template = targets.first(where: { $0["BlueprintName"] as? String == main }) ?? targets.first {
+                    targets += packageTargets.map { hosted(template, $0) }
+                }
+                configs[i]["TestTargets"] = targets
+            }
+            plist["TestConfigurations"] = configs
+        } else {
+            for (key, value) in plist where !key.hasPrefix("__") {
+                if let target = value as? [String: Any] { plist[key] = configure(target) }
+            }
+            if let template = plist[main] as? [String: Any] {
+                for name in packageTargets { plist[name] = hosted(template, name) }
+            }
+        }
+        let dst = "\(slot.dir)/test.xctestrun"
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: dst))
+        return dst
     }
 
     /// Installs the slot via a zero-test run (xcodebuild is the only supported
@@ -129,12 +272,21 @@ enum Slots {
                                    + r.out.split(separator: "\n").suffix(8).joined(separator: "\n"))
             }
             terminateAll(slot)
+            hideExtensions(slot)
             Log.step("installed \(slot.slotID) in \(secs(t))")
         }
     }
 
-    /// Launches the host headless and waits until it answers.
-    static func launch(_ slot: SlotRecord, idleMinutes: Int = 30) throws {
+    /// Launches the host headless and waits until it answers. `locale` (e.g.
+    /// "hr" or "pt-BR") sets the app's language and region for the whole process.
+    static func launch(_ slot: SlotRecord, idleMinutes: Int = 30, locale: String? = nil) throws {
+        var extra: [String] = []
+        if let locale {
+            extra += ["--simless-locale", locale, "-AppleLanguages", "(\(locale))",
+                      "-AppleLocale", locale.replacingOccurrences(of: "-", with: "_")]
+        }
+        // Fixtures can read files in the repository (read-only), like tests can.
+        if let token = Sandbox.readToken(slot.worktree) { extra += ["--simless-sandbox", token] }
         let t = now()
         // By path, not bundle id: LaunchServices can hold several registrations
         // for one id (older installs) and `open -b` may pick a stale one.
@@ -178,7 +330,7 @@ enum Slots {
                 opened = now()
                 _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "\(installed)/\(wrapper)", "--args",
                                     "--simless-port", String(slot.port),
-                                    "--simless-idle", String(idleMinutes * 60)])
+                                    "--simless-idle", String(idleMinutes * 60)] + extra)
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")

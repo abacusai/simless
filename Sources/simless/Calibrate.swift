@@ -17,6 +17,9 @@ enum Calibrate {
         var only: String?
         var imagesDir: String?   // save both renders of every screen + report.md here
         var dark = false         // also compare dark mode
+        var runtime: String?     // iOS version, e.g. "26.5" (default: newest installed)
+        var device: String?      // simulator device type (default: simDeviceType)
+        var idiom: String?       // "phone": render the Mac side with the phone idiom
     }
 
     static func run(ws: Workspace, slot: SlotRecord, options: Options) throws {
@@ -24,16 +27,23 @@ enum Calibrate {
         let host = slot.stats() == nil ? try { try Slots.launch(slot, idleMinutes: ws.idleMinutes); return slot }() : slot
         let fixtures = options.only.map { [$0] } ?? (host.stats()?["fixtures"] as? [String] ?? [])
         guard !fixtures.isEmpty else { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
-        let canvas = try Render.canvas("iphone")
         if let dir = options.imagesDir { try mkdirp(dir) }
 
-        let udid = try createSimulator()
+        let deviceType = options.device ?? simDeviceType
+        let udid = try createSimulator(runtime: options.runtime, device: deviceType)
         defer { deleteSimulator(udid) }
         let simPort = slot.port + 1000
         try buildAndLaunch(ws: ws, udid: udid, port: simPort)
         let sim = try LineClient(port: simPort, timeout: 30)
-        let mac = try host.client(timeout: 30)
+        var mac = try host.client(timeout: 30)
         let simOS = simRuntimeName(udid)
+        // Both sides render the simulator's own screen size and safe areas.
+        var canvas = try Render.canvas("iphone")
+        if let screen = (try? sim.call(["cmd": "stats"]))?["screen"] as? [Double], screen.count == 4 {
+            canvas = Render.Canvas(width: screen[0], height: screen[1], safeTop: screen[2], safeBottom: screen[3])
+        } else if options.device != nil {
+            Log.info("note: the app's SimlessKit is too old to report the simulator's screen; comparing on the iphone canvas (run `simless init`)")
+        }
 
         var matched = 0, total = 0
         var report: [String] = []
@@ -44,7 +54,17 @@ enum Calibrate {
                 let style = dark ? "dark" : "light"
                 let label = options.dark ? "\(fixture) · \(style)" : fixture
                 let wantImage = options.imagesDir != nil
-                let a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
+                var a: [String: Any]
+                do {
+                    a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage,
+                                                    idiom: options.idiom))
+                } catch where options.idiom != nil && host.stats() == nil {
+                    // A Stepper under the phone idiom takes the Mac host down (see `render`).
+                    Log.info("note: \(fixture) crashed the host under the phone idiom; comparing it with the iPad idiom")
+                    try Slots.launch(host, idleMinutes: ws.idleMinutes)
+                    mac = try host.client(timeout: 30)
+                    a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
+                }
                 let b = try sim.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
                 guard a["ok"] as? Bool == true, b["ok"] as? Bool == true else {
                     report.append("✗ \(label): render failed (\(a["error"] ?? b["error"] ?? "?"))")
@@ -69,7 +89,7 @@ enum Calibrate {
                 }
             }
         }
-        print("calibration against \(Self.simDeviceType) simulator (frames within \(Int(tolerance)) pt):")
+        print("calibration against \(deviceType) simulator, \(simOS)\(options.idiom.map { ", simless with the \($0) idiom" } ?? "") (frames within \(Int(tolerance)) pt):")
         report.forEach { print("  " + $0) }
         print("\(matched)/\(total) renders have the same structure and frames as in the simulator (\(secs(t)))")
         if matched < total {
@@ -78,7 +98,7 @@ enum Calibrate {
         if let dir = options.imagesDir {
             let header = [
                 "# simless vs iOS Simulator", "",
-                "Each screen rendered by the iOS Simulator (\(Self.simDeviceType), \(simOS)) and by simless "
+                "Each screen rendered by the iOS Simulator (\(deviceType), \(simOS)) and by simless "
                     + "(the same app running natively on the Mac). The list under each pair is what `simless calibrate` "
                     + "found when comparing the accessibility trees: elements present on one side only, and frames "
                     + "that differ by more than \(Int(tolerance)) pt. Text that only renders slightly wider or narrower "
@@ -185,18 +205,29 @@ enum Calibrate {
 
     static let simDeviceType = "iPhone 17 Pro"
 
-    private static func createSimulator() throws -> String {
+    /// A fresh simulator of `device` on the iOS runtime whose version starts
+    /// with `runtime` (e.g. "26.5", or "26" for the newest 26.x), else the newest.
+    private static func createSimulator(runtime wanted: String?, device: String) throws -> String {
         deleteStale()
         let runtimes = try Shell.check(["xcrun", "simctl", "list", "runtimes", "-j"], stdoutOnly: true)
         guard let json = try JSONSerialization.jsonObject(with: Data(runtimes.utf8)) as? [String: Any],
-              let list = json["runtimes"] as? [[String: Any]],
-              let runtime = list.filter({ ($0["platform"] as? String) == "iOS" && ($0["isAvailable"] as? Bool) == true })
-                .compactMap({ $0["identifier"] as? String }).last else {
-            throw SimlessError("no iOS simulator runtime installed (Xcode → Settings → Components)")
+              let list = json["runtimes"] as? [[String: Any]] else {
+            throw SimlessError("could not list simulator runtimes")
         }
-        let udid = try Shell.check(["xcrun", "simctl", "create", deviceName, simDeviceType, runtime], stdoutOnly: true)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        Log.step("booting \(simDeviceType) simulator for calibration")
+        let installed = list.filter { ($0["platform"] as? String) == "iOS" && ($0["isAvailable"] as? Bool) == true }
+        guard !installed.isEmpty else { throw SimlessError("no iOS simulator runtime installed (Xcode → Settings → Components)") }
+        let versions = installed.map { $0["version"] as? String ?? "" }
+        let match = wanted.map { w in installed.filter { ($0["version"] as? String ?? "") == w || ($0["version"] as? String ?? "").hasPrefix(w + ".") } }
+            ?? installed
+        guard let runtime = match.compactMap({ $0["identifier"] as? String }).last else {
+            throw SimlessError("no iOS \(wanted ?? "") simulator runtime installed; installed: \(versions.joined(separator: ", "))")
+        }
+        let r = try Shell.run(["xcrun", "simctl", "create", deviceName, device, runtime], stdoutOnly: true)
+        guard r.code == 0 else {
+            throw SimlessError("could not create a '\(device)' simulator on \(runtime); see `xcrun simctl list devicetypes` for names")
+        }
+        let udid = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        Log.step("booting \(device) simulator (\(runtime.split(separator: ".").last ?? "")) for calibration")
         _ = try Shell.run(["xcrun", "simctl", "boot", udid])
         try Shell.check(["xcrun", "simctl", "bootstatus", udid, "-b"], what: "simulator boot")
         return udid

@@ -9,7 +9,12 @@ enum Render {
         var device = "iphone"
         var pngPath: String?
         var json = false
+        var textSize: String?        // Dynamic Type size: xs … xxxl, ax1 … ax5
+        var idiom: String?           // "phone": phone idiom on phone canvases
+        var checks = Config.Checks()
     }
+
+    static let textSizes = ["xs", "s", "m", "l", "xl", "xxl", "xxxl", "ax1", "ax2", "ax3", "ax4", "ax5"]
 
     struct Canvas {
         let width: Double, height: Double
@@ -30,9 +35,13 @@ enum Render {
         return c
     }
 
-    static func request(fixture: String, dark: Bool, canvas c: Canvas, image: Bool) -> [String: Any] {
-        ["cmd": "render", "fixture": fixture, "style": dark ? "dark" : "light", "width": c.width, "height": c.height,
-         "safeTop": c.safeTop, "safeBottom": c.safeBottom, "image": image]
+    static func request(fixture: String, dark: Bool, canvas c: Canvas, image: Bool,
+                        textSize: String? = nil, idiom: String? = nil) -> [String: Any] {
+        var r: [String: Any] = ["cmd": "render", "fixture": fixture, "style": dark ? "dark" : "light", "width": c.width,
+                                "height": c.height, "safeTop": c.safeTop, "safeBottom": c.safeBottom, "image": image]
+        if let textSize { r["textSize"] = textSize }
+        if let idiom, c.width < 600 { r["idiom"] = idiom }
+        return r
     }
 
     /// One-line summary of the traits the view saw, plus warnings where they
@@ -42,8 +51,13 @@ enum Render {
         let safe = (t["safeArea"] as? [Double]) ?? []
         var lines = ["  traits: \(t["horizontalSizeClass"] ?? "?")/\(t["verticalSizeClass"] ?? "?") size class, idiom \(t["idiom"] ?? "?"), safe area top \(Int(safe.first ?? 0)) bottom \(Int(safe.count > 2 ? safe[2] : 0))"]
         let wantPhone = device != "ipad"
-        if wantPhone, t["idiom"] as? String != "phone" || t["deviceIdiom"] as? String != "phone" {
-            lines.append("  note: the idiom is \(t["idiom"] ?? "?") on the Mac; layouts that branch on size class look like a phone's, but code that checks userInterfaceIdiom takes its iPad branch")
+        if wantPhone, t["idiom"] as? String != "phone" {
+            lines.append("  note: the idiom is \(t["idiom"] ?? "?") on the Mac; layouts that branch on size class look like a phone's, but code that checks userInterfaceIdiom takes its iPad branch, and controls get iPad metrics (--idiom phone matches a phone more closely)")
+        } else if wantPhone, t["deviceIdiom"] as? String != "phone" {
+            lines.append("  note: UIDevice.current.userInterfaceIdiom still reports \(t["deviceIdiom"] ?? "?"); views reading the trait collection see phone")
+        }
+        if let size = t["textSize"] as? String, t["onMac"] as? Bool == true {
+            lines.append("  note: text size \(size) applies to layout (dynamicTypeSize branches, scaled metrics), but the Mac draws text at the default size; check text scaling itself in a simulator")
         }
         return lines
     }
@@ -53,7 +67,8 @@ enum Render {
         let c = try canvas(options.device)
         let (w, h) = (c.width, c.height)
         let client = try slot.client(timeout: 30)
-        let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil))
+        let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
+                                        textSize: options.textSize, idiom: options.idiom))
         guard r["ok"] as? Bool == true else {
             let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
             throw SimlessError("\(r["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))
@@ -62,11 +77,14 @@ enum Render {
             try data.write(to: URL(fileURLWithPath: path))
         }
         let nodes = r["nodes"] as? [[String: Any]] ?? []
-        let issues = findIssues(nodes, width: w, height: h)
+        let found = findIssues(nodes, width: w, height: h, minTapTarget: options.checks.minTapTarget ?? 44)
+        let ignore = options.checks.ignore ?? []
+        let issues = found.filter { issue in !ignore.contains { issue.contains($0) } }
         if options.json {
             var out = r
             out.removeValue(forKey: "png")
             out["issues"] = issues
+            out["ignoredIssues"] = found.count - issues.count
             let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
             return (String(decoding: data, as: UTF8.self), issues.count)
         }
@@ -74,19 +92,23 @@ enum Render {
         var lines: [String] = []
         let ms = (r["renderMs"] as? Double).map { String(format: "%.0f ms", $0) } ?? ""
         let patch = (r["patch"] as? Int).map { $0 > 0 ? " · patch \($0)" : "" } ?? ""
-        lines.append("\(fixture) · \(options.dark ? "dark" : "light") · \(options.device) \(Int(w))×\(Int(h)) · \(ms)\(patch)")
+        let extras = [r["locale"] as? String, options.textSize.map { "text \($0)" }].compactMap { $0 }.map { " · " + $0 }.joined()
+        lines.append("\(fixture) · \(options.dark ? "dark" : "light") · \(options.device) \(Int(w))×\(Int(h))\(extras) · \(ms)\(patch)")
         lines += traitsText(r, device: options.device)
         for n in nodes {
-            let role = (n["role"] as? String ?? "element").padding(toLength: 7, withPad: " ", startingAt: 0)
+            let role = n["role"] as? String ?? "element"
+            let column = role.count < 7 ? role.padding(toLength: 7, withPad: " ", startingAt: 0) : role
             var label = (n["label"] as? String).map { "\"\($0)\"" } ?? "(no label)"
             if let v = n["value"] as? String, !v.isEmpty { label += " = \"\(v)\"" }
             let id = (n["id"] as? String).map { " #\($0)" } ?? ""
-            lines.append("  \(role) \(label)\(id)  \(frameText(n))")
+            lines.append("  \(column) \(label)\(id)  \(frameText(n))")
         }
         let below = nodes.filter { frame($0).1 + frame($0).3 > h + 0.5 }.count
         if below > 0 { lines.append("  below the fold: \(below) element(s) (scroll content, listed above)") }
         if let png = options.pngPath { lines.append("  png: \(png)") }
-        lines.append(issues.isEmpty ? "  issues: none" : "  issues (\(issues.count)):")
+        let ignored = found.count - issues.count
+        let ignoredText = ignored > 0 ? " (\(ignored) ignored by \(Workspace.configName))" : ""
+        lines.append(issues.isEmpty ? "  issues: none\(ignoredText)" : "  issues (\(issues.count))\(ignoredText):")
         lines += issues.map { "    ⚠ " + $0 }
         return (lines.joined(separator: "\n"), issues.count)
     }
@@ -103,7 +125,7 @@ enum Render {
     }
 
     /// Deterministic checks; an agent should look at the tree for the rest.
-    static func findIssues(_ nodes: [[String: Any]], width: Double, height: Double) -> [String] {
+    static func findIssues(_ nodes: [[String: Any]], width: Double, height: Double, minTapTarget: Double = 44) -> [String] {
         var issues: [String] = []
         let interactive: Set<String> = ["button", "link", "search", "adjustable"]
         for n in nodes {
@@ -122,8 +144,10 @@ enum Render {
                 // layout problem, so only partial clipping is flagged.
                 issues.append("\(name) is cut off at the \(x < 0 ? "left" : "right") edge \(frameText(n))")
             }
-            if interactive.contains(role), w > 0, h > 0, w < 44 || h < 44 {
-                issues.append("\(name) tap target \(Int(w))×\(Int(h)) is smaller than 44×44")
+            // UIKit's own controls (bar buttons) are sized by the system, not the app.
+            if interactive.contains(role), n["system"] as? Bool != true, w > 0, h > 0, w < minTapTarget || h < minTapTarget {
+                let m = Int(minTapTarget)
+                issues.append("\(name) tap target \(Int(w))×\(Int(h)) is smaller than \(m)×\(m)")
             }
         }
         // A control's label also exposed as a separate element at the same spot:

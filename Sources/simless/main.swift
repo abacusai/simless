@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.1.2"
+let version = "0.2.0"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -12,12 +12,16 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless up                       build (Designed for iPad), install this worktree's slot, start its host
   simless render <fixture|all>     render and print the accessibility tree + issues
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
+        [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
         --matrix: light+dark × iphone, iphone-small, ipad
   simless reload [files...]        hot-reload edited view files (default: all edited since `simless up`)
         [--render <fixture|all>] [--no-fallback]
-  simless test [Target[/Class[/method]]...]   unit tests on the Mac, no simulator
+  simless test [Target[/Class[/method]]...|all]   unit tests on the Mac, no simulator
+        local package test targets too; all: every test target
+        [--skip Target[/Class[/method]]]... [--timeout <seconds per test, default 300>]
   simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
         [--dark] [--png <dir>]: also dark mode; save both renders of every screen + a side-by-side report.md
+        [--runtime <iOS version, e.g. 26.5>] [--sim-device <name, e.g. "iPhone 16e">]
   simless status                   slots, hosts, live-reload availability
   simless down [--all]             stop this worktree's host (or every host); relaunches on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
@@ -35,12 +39,16 @@ struct Args {
     var positional: [String] = []
     var flags: Set<String> = []
     var values: [String: String] = [:]
+    var repeated: [String: [String]] = [:]
 
     init(_ raw: [String]) {
-        let valued: Set<String> = ["--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target"]
+        let valued: Set<String> = ["--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
+                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device"]
+        let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
             let a = raw[i]
+            if repeatable.contains(a), i + 1 < raw.count { repeated[a, default: []].append(raw[i + 1]); i += 2; continue }
             if valued.contains(a), i + 1 < raw.count { values[a] = raw[i + 1]; i += 2; continue }
             if a.hasPrefix("-") { flags.insert(a) } else { positional.append(a) }
             i += 1
@@ -85,23 +93,27 @@ func cmdInit(_ args: Args) throws {
     let kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
 
     // Local Swift packages the project references: their views can be hot-reloaded too.
-    let pbxText = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
-    let packages = localPackages(pbx: pbxText).map { inProjectDir($0) }
-        .map { (URL(fileURLWithPath: "\(root)/\($0)").standardizedFileURL.path).replacingOccurrences(of: root + "/", with: "") }
-        .filter { exists("\(root)/\($0)/Package.swift") }
+    let packages = Workspace.localPackages(root: root, project: project)
 
-    let config = Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
-                        kitDir: kitDir, sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages)
-    let enc = JSONEncoder()
-    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try enc.encode(config).write(to: URL(fileURLWithPath: "\(root)/\(Workspace.configName)"))
+    // An existing .simless.json is kept (re-running init updates SimlessKit);
+    // --force writes a fresh one.
+    let configPath = "\(root)/\(Workspace.configName)"
+    let existing = args.flags.contains("--force") ? nil : (try? Workspace.load(at: root))?.config
+    let config = existing ?? Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
+                                    kitDir: kitDir, sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages)
+    if existing == nil {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(config).write(to: URL(fileURLWithPath: configPath))
+    }
 
     try mkdirp("\(root)/\(kitDir)")
     let kit = "\(root)/\(config.kitFile)"
     try? fm.removeItem(atPath: kit)
     try fm.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessKit.swift", toPath: kit)
     let fixtures = "\(root)/\(config.fixturesFile)"
-    if !fm.fileExists(atPath: fixtures) {
+    let newFixtures = !fm.fileExists(atPath: fixtures)
+    if newFixtures {
         try fm.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: fixtures)
     }
 
@@ -122,9 +134,11 @@ func cmdInit(_ args: Args) throws {
     let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
     let synced = pbx.contains("PBXFileSystemSynchronizedRootGroup")
     let hook = args.flags.contains("--no-hook") ? nil : try insertHook(in: "\(root)/\(sourceDir)")
+    let configLine = existing != nil ? "kept \(Workspace.configName) (--force rewrites it)"
+        : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
     print("""
-        wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))
-        wrote \(config.kitFile) and \(config.fixturesFile)
+        \(configLine)
+        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
 
         Next:
           1. \(synced ? "Both files are in a synchronized folder, so Xcode picks them up." : "Add both files to the \(appTarget) target.")
@@ -166,13 +180,6 @@ func findProject(in root: String) throws -> String {
     return candidates[0]
 }
 
-/// `relativePath` of XCLocalSwiftPackageReference entries, relative to the project's directory.
-func localPackages(pbx: String) -> [String] {
-    guard let re = try? NSRegularExpression(pattern: #"isa = XCLocalSwiftPackageReference;\s*relativePath = "?([^";]+)"?;"#) else { return [] }
-    return re.matches(in: pbx, range: NSRange(pbx.startIndex..., in: pbx)).compactMap {
-        Range($0.range(at: 1), in: pbx).map { String(pbx[$0]) }
-    }
-}
 
 /// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
 /// Returns what it did, or nil when it couldn't find a safe place.
@@ -249,16 +256,27 @@ func cmdUp(_ args: Args) throws {
     }
     let settings = try ws.settings()
     var slot = try GlobalState.slot(bundleBase: settings.bundleID, worktree: ws.root)
-    try Slots.prepare(slot, ws: ws, settings: settings)
+    let embedded = ws.config.embeddedBundles ?? true
+    try Slots.prepare(slot, ws: ws, settings: settings, embedded: embedded)
     // The fresh build contains every edit; earlier patches must not be re-applied.
     slot.builtAt = buildStart
     slot.patch = 0
     slot.lastPatch = nil
     try GlobalState.update(slot)
-    try Slots.install(slot, ws: ws)
+    do {
+        try Slots.install(slot, ws: ws)
+    } catch where embedded {
+        // An extension or watch app the slot can't sign for shouldn't block renders.
+        Log.info("note: installing with app extensions and the watch app failed; retrying without them (\(error))")
+        try Slots.prepare(slot, ws: ws, settings: settings, embedded: false)
+        try Slots.install(slot, ws: ws)
+    }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
     let stats = slot.stats() ?? [:]
     let fixtures = stats["fixtures"] as? [String] ?? []
+    if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
+        Log.info("note: \(ws.config.kitFile) is from an older simless; run `simless init` to update it (keeps .simless.json and your fixtures). Until then --locale, --text-size and --idiom are ignored and tests can't read the repository.")
+    }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")")
@@ -271,8 +289,30 @@ func cmdRender(_ args: Args) throws {
     try render(slot: slot, target: target, args: args, ws: ws)
 }
 
+/// SimlessKit version this simless needs for every feature (see `kitVersion` in the kit).
+let requiredKit = 2
+
 func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws {
-    let fixtures = target == "all" ? (slot.stats()?["fixtures"] as? [String] ?? []) : [target]
+    if let size = args.values["--text-size"], !Render.textSizes.contains(size) {
+        throw SimlessError("unknown text size '\(size)'; one of \(Render.textSizes.joined(separator: ", "))")
+    }
+    if let idiom = args.values["--idiom"] ?? ws.config.idiom, idiom != "phone", idiom != "pad" {
+        throw SimlessError("unknown idiom '\(idiom)'; phone or pad")
+    }
+    // The language is process-wide: relaunch the host when it differs.
+    let locale = args.values["--locale"]
+    var stats = slot.stats() ?? [:]
+    if stats["locale"] as? String != locale {
+        if locale != nil, (stats["kit"] as? Int ?? 1) < requiredKit {
+            throw SimlessError("--locale needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
+        }
+        if locale != nil || stats["locale"] != nil {
+            Slots.stop(slot)
+            try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
+            stats = slot.stats() ?? [:]
+        }
+    }
+    let fixtures = target == "all" ? (stats["fixtures"] as? [String] ?? []) : [target]
     if fixtures.isEmpty { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
     let variants: [(dark: Bool, device: String)] = args.flags.contains("--matrix")
         ? [false, true].flatMap { d in ["iphone", "iphone-small", "ipad"].map { (d, $0) } }
@@ -281,13 +321,26 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     for fixture in fixtures {
         for v in variants {
             var options = Render.Options(dark: v.dark, device: v.device, json: args.flags.contains("--json"))
+            options.textSize = args.values["--text-size"]
+            options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
+            options.checks = ws.config.checks ?? .init()
             if var png = args.values["--png"] {
                 while png.count > 1 && png.hasSuffix("/") { png.removeLast() }
                 let isDir = fixtures.count > 1 || variants.count > 1 || args.values["--png"]!.hasSuffix("/")
                 if isDir { try mkdirp(png) }
                 options.pngPath = isDir ? "\(png)/\(fixture)\(v.dark ? "-dark" : "")-\(v.device).png" : png
             }
-            let (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
+            let text: String, issues: Int
+            do {
+                (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
+            } catch let error as SimlessError where options.idiom != nil && slot.stats() == nil {
+                // SwiftUI's Stepper recurses until the stack overflows under the
+                // phone idiom on the Mac, which takes the host down with it.
+                Log.info("note: \(fixture) crashed the host under the phone idiom (\(error)); it likely has a Stepper. Rendering it with the iPad idiom.")
+                try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
+                options.idiom = nil
+                (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
+            }
             print(text)
             total += issues
             count += 1
@@ -341,34 +394,99 @@ func cmdTest(_ args: Args) throws {
     let ws = try Workspace.load()
     let slot = try currentSlot(ws)
     let edited = ws.changedSources()
-    if !edited.isEmpty { Log.info("note: \(edited.count) file(s) edited since `simless up`; tests run the last full build") }
-    let filters = args.positional.isEmpty ? [ws.config.testTarget] : args.positional
+    if !edited.isEmpty { Log.info("note: \(edited.count) file(s) edited since `simless up`; app tests run the last full build (package tests are rebuilt)") }
+    let all = args.positional == ["all"]
+    let filters = all ? [] : args.positional.isEmpty ? [ws.config.testTarget] : args.positional
+    let skips = (ws.config.tests?.skip ?? []) + (args.repeated["--skip"] ?? [])
+    let timeoutArg = args.values["--timeout"]
+    let timeout = timeoutArg.flatMap(Double.init) ?? ws.config.tests?.timeout ?? 300
+    if (timeoutArg != nil && Double(timeoutArg!) == nil) || timeout <= 0 {
+        throw SimlessError("--timeout takes seconds per test, e.g. --timeout 120")
+    }
     let t = now()
+
+    // Local package test targets that were asked for (all of them for `all`):
+    // built for iOS and hosted in the slot app.
+    var bundles: [(target: String, products: String)] = []
+    for p in Packages.testTargets(ws: ws) {
+        let wanted = p.targets.filter { target in all || filters.contains { $0 == target || $0.hasPrefix(target + "/") } }
+        if wanted.isEmpty { continue }
+        let products = try Packages.buildTests(p, targets: wanted, ws: ws)
+        bundles += wanted.map { ($0, products) }
+    }
+
     // Tests run inside the slot app, so the host stops for the duration.
     Slots.stop(slot)
     defer { try? Slots.launch(slot, idleMinutes: ws.idleMinutes) }
-    let r = try withLock("install") {
-        try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
-                       "-derivedDataPath", ws.derivedData,
-                       "-destination", Workspace.dfiDestination] + filters.map { "-only-testing:\($0)" },
-                      cwd: ws.root, logPath: "\(slot.dir)/test.log")
-    }
-    let lines = r.out.split(separator: "\n")
+    if !bundles.isEmpty { try Slots.injectTests(slot, ws: ws, bundles: bundles) }
+    let xctestrun = try Slots.testRun(slot, ws: ws, packageTargets: bundles.map(\.target), timeout: timeout)
+
     // Swift Testing lines start with an SF Symbols glyph; drop it.
-    func clean(_ l: Substring) -> String {
+    func clean(_ l: String) -> String {
         String(l.drop { !$0.isASCII || $0 == " " }).trimmingCharacters(in: .whitespaces)
     }
-    // Failures only: XCTest ("<file>:<line>: error: -[Class test] : ..."), Swift
-    // Testing ("Test x() recorded an issue at ..." / "... failed after"), and xcodebuild errors.
-    for l in lines where l.contains(": error: -[") || l.hasPrefix("xcodebuild: error:") || l.contains("' failed (")
-        || l.contains(") recorded an issue") || (l.contains("Test ") && l.contains(" failed after") && !l.contains("Test run with")) {
-        print("  " + clean(l))
+    func isFailure(_ l: String) -> Bool {
+        // XCTest ("<file>:<line>: error: -[Class test] : ..."), Swift Testing
+        // ("Test x() recorded an issue at ..." / "... failed after"), and xcodebuild errors.
+        l.contains(": error: -[") || l.hasPrefix("xcodebuild: error:") || l.contains("' failed (")
+            || l.contains(") recorded an issue") || (l.contains("Test ") && l.contains(" failed after") && !l.contains("Test run with"))
     }
-    // Summaries: XCTest's "Executed N tests" (when it ran any) and Swift Testing's "Test run with N tests".
-    if let xctest = lines.last(where: { $0.contains("Executed") && !$0.contains("Executed 0 tests") }) {
-        print(xctest.trimmingCharacters(in: .whitespaces))
+    let xctestCase = try NSRegularExpression(pattern: #"Test Case '-\[(?:[\w.]+\.)?(\w+) (\w+)\]' (started|passed|failed|skipped)"#)
+    let swiftTest = try NSRegularExpression(pattern: #"^Test (.+?) (started|passed after|failed after|skipped)"#)
+    var running: [String: Double] = [:]      // test -> start
+    var slowReported = Set<String>()
+    var passed = 0, failed = 0, lastProgress = now()
+    var timedOut: String?
+    // XCTest enforces the limit itself (rounded up to whole minutes) and moves
+    // on; the watchdog catches what it can't, like a hung Swift Testing test.
+    let watchdog = (timeout / 60).rounded(.up) * 60 + 30
+
+    func onLine(_ raw: String) {
+        let line = clean(raw)
+        let range = NSRange(line.startIndex..., in: line)
+        var name: String?, event: String?
+        if let m = xctestCase.firstMatch(in: line, range: range), let c = Range(m.range(at: 1), in: line),
+           let f = Range(m.range(at: 2), in: line), let e = Range(m.range(at: 3), in: line) {
+            (name, event) = ("\(line[c])/\(line[f])", String(line[e]))
+        } else if !line.hasPrefix("Test run"), !line.hasPrefix("Test Suite"), !line.hasPrefix("Test Case"),
+                  let m = swiftTest.firstMatch(in: line, range: range),
+                  let n = Range(m.range(at: 1), in: line), let e = Range(m.range(at: 2), in: line) {
+            (name, event) = (String(line[n]), String(line[e]))
+        }
+        if let name, let event {
+            if event == "started" { running[name] = now() } else { running.removeValue(forKey: name) }
+            if event.hasPrefix("passed") { passed += 1 }
+            if event.hasPrefix("failed") { failed += 1 }
+        }
+        if isFailure(line) { print("  " + line); fflush(stdout) }
     }
-    if let swiftTesting = lines.last(where: { $0.contains("Test run with") }) { print(clean(swiftTesting)) }
+    func tick() -> Bool {
+        if let (name, started) = running.min(by: { $0.value < $1.value }) {
+            let elapsed = now() - started
+            if elapsed > watchdog { timedOut = name; return false }
+            if elapsed > 30, slowReported.insert(name).inserted { Log.info("  … \(name) has been running for \(Int(elapsed))s") }
+        }
+        if now() - lastProgress >= 10 {
+            lastProgress = now()
+            Log.info("  … \(passed) passed, \(failed) failed after \(secs(t))")
+        }
+        return true
+    }
+
+    let r = try withLock("install") {
+        try Shell.stream(["xcodebuild", "test-without-building", "-xctestrun", xctestrun,
+                          "-derivedDataPath", ws.derivedData, "-destination", Workspace.dfiDestination]
+                         + filters.map { "-only-testing:\($0)" } + skips.map { "-skip-testing:\($0)" },
+                         cwd: ws.root, logPath: "\(slot.dir)/test.log", onLine: onLine, tick: tick)
+    }
+    if let timedOut {
+        Slots.terminateAll(slot)   // the test host is still stuck in the test
+        print("  TIMED OUT: \(timedOut) ran for over \(Int(watchdog))s; the run was stopped")
+        print("  skip it with --skip <Target/Class/test> (on the Mac, a test that needs a device can't finish), or raise --timeout")
+    }
+    // XCTest and Swift Testing each summarize every test bundle separately; count across all of them.
+    let skipped = r.out.components(separatedBy: "\n").filter { $0.contains("Test Case") && $0.contains("' skipped") || clean($0).hasPrefix("Test ") && $0.contains(" skipped") }.count
+    print("\(passed) passed, \(failed) failed\(skipped > 0 ? ", \(skipped) skipped" : "")")
     print("\(r.code == 0 ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/test.log)")
     if r.code != 0 { exit(1) }
 }
@@ -445,7 +563,10 @@ do {
         let ws = try Workspace.load()
         try Calibrate.run(ws: ws, slot: try currentSlot(ws),
                           options: .init(only: args.positional.first, imagesDir: args.values["--png"],
-                                         dark: args.flags.contains("--dark")))
+                                         dark: args.flags.contains("--dark"),
+                                         runtime: args.values["--runtime"] ?? ws.config.calibrate?.runtime,
+                                         device: args.values["--sim-device"] ?? ws.config.calibrate?.device,
+                                         idiom: (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }))
     case "skill": try cmdSkill(args)
     case "help", "-h", "--help": print(usage)
     case "version", "--version":

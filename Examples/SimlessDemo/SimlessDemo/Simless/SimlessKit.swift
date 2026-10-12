@@ -47,6 +47,14 @@ enum SimlessHost {
     private static var lastRequest = Date()
     /// Exit after this long without requests, so a forgotten host never lingers.
     private static var idleLimit: TimeInterval = 1800
+    /// The language simless launched this host with (`--locale`), if any.
+    private static var launchLocale: String? {
+        let args = ProcessInfo.processInfo.arguments
+        return args.firstIndex(of: "--simless-locale").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+    }
+    /// Bumped when the CLI needs something new from the kit; `simless up` asks
+    /// for a `simless init` when the app's copy is older.
+    static let kitVersion = 2
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -57,6 +65,8 @@ enum SimlessHost {
         let launchedBySimless = port != nil || ProcessInfo.processInfo.environment["SIMLESS_HEADLESS"] == "1"
         guard launchedBySimless else { return }
         if ProcessInfo.processInfo.isiOSAppOnMac {
+            consumeSandboxExtensions(args)
+            redirectAppGroups()
             // No window may reach the screen: suppress ordering before the first
             // window exists, hide, and hide again whenever one appears.
             suppressWindowOrdering()
@@ -108,6 +118,8 @@ enum SimlessHost {
         var safeBottom: Double?
         var image: Bool?
         var file: String?
+        var textSize: String?      // Dynamic Type: xs … xxxl, ax1 … ax5
+        var idiom: String?         // "phone": report the phone idiom (Mac only; see render)
     }
 
     private struct Node: Encodable {
@@ -116,6 +128,7 @@ enum SimlessHost {
         let value: String?
         let id: String?
         let frame: [Double]
+        var system: Bool?          // UIKit's own control (e.g. a bar button); its size isn't the app's to fix
     }
 
     private struct Traits: Encodable {
@@ -125,6 +138,7 @@ enum SimlessHost {
         let deviceIdiom: String    // UIDevice.current.userInterfaceIdiom (can't be overridden)
         let safeArea: [Double]     // top, left, bottom, right
         let onMac: Bool
+        var textSize: String?
     }
 
     private struct Response: Encodable {
@@ -142,6 +156,9 @@ enum SimlessHost {
         var png: String?
         var loadMs: Double?
         var traits: Traits?
+        var locale: String?        // the host's language (simless relaunches it to switch)
+        var screen: [Double]?      // device screen and safe area (calibration reads the simulator's)
+        var kit: Int?
     }
 
     /// One client connection. Network delivers its callbacks on the main queue,
@@ -189,9 +206,16 @@ enum SimlessHost {
         }
         switch req.cmd {
         case "stats":
-            return (Response(pid: getpid(), tmp: FileManager.default.temporaryDirectory.path,
+            var r = Response(pid: getpid(), tmp: FileManager.default.temporaryDirectory.path,
                              fixtures: registry.names, patch: patchGeneration, renders: renders,
-                             footprintMB: footprintMB()), nil)
+                             footprintMB: footprintMB())
+            r.locale = launchLocale
+            r.kit = kitVersion
+            if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+                let b = scene.screen.bounds, s = scene.windows.first?.safeAreaInsets ?? .zero
+                r.screen = [b.width, b.height, s.top, s.bottom].map { Double($0) }
+            }
+            return (r, nil)
         case "render":
             return (render(req), nil)
         case "load":
@@ -237,19 +261,23 @@ enum SimlessHost {
         let start = CFAbsoluteTimeGetCurrent()
         let rect = CGRect(x: 0, y: 0, width: req.width ?? 402, height: req.height ?? 874)
         window.frame = rect
-        let host = UIHostingController(rootView: view)
+        let size = req.textSize.flatMap { textSizes[$0] }
+        let host = UIHostingController(rootView: size.map { AnyView(view.environment(\.dynamicTypeSize, $0.swiftUI)) } ?? view)
         host.overrideUserInterfaceStyle = req.style == "dark" ? .dark : .light
         // The hidden window lands on whichever display macOS picks; pin the
         // scale so layout rounding (and PNGs) don't depend on that display.
         host.traitOverrides.displayScale = 2
         // An iOS app on a Mac reports iPad-like traits; give phone canvases a
         // phone's size classes and, on the Mac, the device's safe areas (notch,
-        // home indicator). A simulator already has the real ones. The idiom is
-        // left alone: overriding it to .phone on the Mac makes SwiftUI's control
-        // styles (Form, Toggle, Picker) recurse until the stack overflows.
+        // home indicator). A simulator already has the real ones. The idiom stays
+        // iPad unless asked: under .phone on the Mac, SwiftUI's Stepper recurses
+        // until the stack overflows.
         let phone = rect.width < 600
         host.traitOverrides.horizontalSizeClass = phone ? .compact : .regular
         host.traitOverrides.verticalSizeClass = .regular
+        if let size { host.traitOverrides.preferredContentSizeCategory = size.uiKit }
+        // `--idiom phone`: a phone's control metrics and idiom branches.
+        if req.idiom == "phone" { host.traitOverrides.userInterfaceIdiom = .phone }
         if ProcessInfo.processInfo.isiOSAppOnMac {
             host.additionalSafeAreaInsets = UIEdgeInsets(top: req.safeTop ?? 0, left: 0, bottom: req.safeBottom ?? 0, right: 0)
         }
@@ -282,9 +310,18 @@ enum SimlessHost {
         r.traits = Traits(horizontalSizeClass: sizeClass(tc.horizontalSizeClass), verticalSizeClass: sizeClass(tc.verticalSizeClass),
                           idiom: idiom(tc.userInterfaceIdiom), deviceIdiom: idiom(UIDevice.current.userInterfaceIdiom),
                           safeArea: [insets.top, insets.left, insets.bottom, insets.right].map { Double($0) },
-                          onMac: ProcessInfo.processInfo.isiOSAppOnMac)
+                          onMac: ProcessInfo.processInfo.isiOSAppOnMac, textSize: req.textSize)
+        r.locale = launchLocale
         return r
     }
+
+    private static let textSizes: [String: (uiKit: UIContentSizeCategory, swiftUI: DynamicTypeSize)] = [
+        "xs": (.extraSmall, .xSmall), "s": (.small, .small), "m": (.medium, .medium), "l": (.large, .large),
+        "xl": (.extraLarge, .xLarge), "xxl": (.extraExtraLarge, .xxLarge), "xxxl": (.extraExtraExtraLarge, .xxxLarge),
+        "ax1": (.accessibilityMedium, .accessibility1), "ax2": (.accessibilityLarge, .accessibility2),
+        "ax3": (.accessibilityExtraLarge, .accessibility3), "ax4": (.accessibilityExtraExtraLarge, .accessibility4),
+        "ax5": (.accessibilityExtraExtraExtraLarge, .accessibility5),
+    ]
 
     // MARK: - Accessibility tree
 
@@ -305,13 +342,18 @@ enum SimlessHost {
         func visit(_ obj: NSObject, depth: Int) {
             guard depth < 80, seen.insert(ObjectIdentifier(obj)).inserted else { return }
             if obj.isAccessibilityElement {
+                let cls = String(describing: type(of: obj))
+                // A split view's column resize handle: unlabeled, full height, and
+                // partly off screen when the sidebar is hidden. Not app content.
+                if cls.contains("SplitViewController"), cls.contains("Separator") { return }
                 let a = obj.accessibilityFrame
                 let id = obj.responds(to: NSSelectorFromString("accessibilityIdentifier"))
                     ? obj.value(forKey: "accessibilityIdentifier") as? String : nil
                 out.append(Node(role: role(obj.accessibilityTraits), label: obj.accessibilityLabel,
                                 value: obj.accessibilityValue, id: (id?.isEmpty ?? true) ? nil : id,
                                 frame: [a.minX - origin.x, a.minY - origin.y, a.width, a.height]
-                                    .map { (Double($0) * 10).rounded() / 10 }))
+                                    .map { (Double($0) * 10).rounded() / 10 },
+                                system: cls.hasPrefix("_UI") ? true : nil))
                 // VoiceOver treats an element as one unit and doesn't descend into it
                 // (a Toggle row's switch, a Picker's value text). Neither do we.
                 return
@@ -397,6 +439,37 @@ enum SimlessHost {
         let newest = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
             .filter { $0.hasSuffix(".dylib") }.sorted().last
         if let newest { _ = apply(dir.appendingPathComponent(newest).path) }
+    }
+
+    // MARK: - Sandbox
+
+    /// The Mac runs the app in its sandbox, which can't read the repository.
+    /// `simless` (unsandboxed) issues read-only extensions for it, so tests and
+    /// fixtures can read files next to their sources. No entitlement can do
+    /// this: the slot's provisioning profile wouldn't allow one.
+    private static func consumeSandboxExtensions(_ args: [String]) {
+        var tokens = (ProcessInfo.processInfo.environment["SIMLESS_SANDBOX_TOKENS"] ?? "")
+            .split(separator: "\n").map(String.init)
+        for (i, a) in args.enumerated() where a == "--simless-sandbox" && i + 1 < args.count { tokens.append(args[i + 1]) }
+        guard !tokens.isEmpty, let h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_NOW),
+              let sym = dlsym(h, "sandbox_extension_consume") else { return }
+        typealias Consume = @convention(c) (UnsafePointer<CChar>) -> Int64
+        for t in tokens { _ = unsafeBitCast(sym, to: Consume.self)(t) }
+    }
+
+    /// The slot can't hold app-group entitlements, so writes to a group
+    /// container fail. Group containers resolve to a private folder instead,
+    /// one per group id, inside the slot's own container. Nonisolated: tests
+    /// ask for group containers from any thread.
+    nonisolated private static func redirectAppGroups() {
+        let sel = NSSelectorFromString("containerURLForSecurityApplicationGroupIdentifier:")
+        guard let m = class_getInstanceMethod(FileManager.self, sel) else { return }
+        let block: @convention(block) (AnyObject, NSString) -> NSURL? = { _, group in
+            let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/SimlessAppGroups/\(group)")
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url as NSURL
+        }
+        method_setImplementation(m, imp_implementationWithBlock(block))
     }
 
     // MARK: - Headless

@@ -94,6 +94,7 @@ struct Shell {
         p.environment = environment
         // Through a file, not a pipe: xcodebuild output can exceed pipe buffers.
         let out = logPath ?? NSTemporaryDirectory() + "simless-\(UUID().uuidString).log"
+        try mkdirp((out as NSString).deletingLastPathComponent)
         FileManager.default.createFile(atPath: out, contents: nil)
         let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
         p.standardOutput = handle
@@ -107,6 +108,54 @@ struct Shell {
         return Result(code: p.terminationStatus, out: text)
     }
 
+    /// Like `run` with a log file, but hands each output line to `onLine` as it
+    /// arrives. `tick` runs about four times a second; returning false
+    /// terminates the command (its result then has exit code 15).
+    static func stream(_ args: [String], cwd: String? = nil, logPath: String,
+                       onLine: (String) -> Void, tick: () -> Bool) throws -> Result {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = args
+        if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+        var environment = ProcessInfo.processInfo.environment
+        if let dev = developerDir { environment["DEVELOPER_DIR"] = dev }
+        p.environment = environment
+        try mkdirp((logPath as NSString).deletingLastPathComponent)
+        FileManager.default.createFile(atPath: logPath, contents: nil)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+        p.standardOutput = handle
+        p.standardError = handle
+        let reader = try FileHandle(forReadingFrom: URL(fileURLWithPath: logPath))
+        var pending = Data()
+        func drain() {
+            pending.append(reader.availableData)
+            while let nl = pending.firstIndex(of: 0x0A) {
+                onLine(String(decoding: pending[pending.startIndex..<nl], as: UTF8.self))
+                pending.removeSubrange(pending.startIndex...nl)
+            }
+        }
+        try p.run()
+        var stopped = false
+        while p.isRunning {
+            drain()
+            if !stopped, !tick() {
+                stopped = true
+                p.terminate()
+                let deadline = now() + 5
+                while p.isRunning && now() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+                if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        p.waitUntilExit()
+        try handle.close()
+        drain()
+        if !pending.isEmpty { onLine(String(decoding: pending, as: UTF8.self)) }
+        Log.debug("$ \(args.joined(separator: " ")) -> \(p.terminationStatus)")
+        let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
+        return Result(code: stopped ? 15 : p.terminationStatus, out: text)
+    }
+
     @discardableResult
     static func check(_ args: [String], cwd: String? = nil, logPath: String? = nil,
                       what: String? = nil, stdoutOnly: Bool = false) throws -> String {
@@ -117,6 +166,25 @@ struct Shell {
                           + (logPath.map { "; log: \($0)" } ?? "") + "\n" + tail)
         }
         return r.out
+    }
+}
+
+// MARK: - Sandbox extensions
+
+/// The slot app runs in the Mac's app sandbox, which can't read the repository.
+/// simless isn't sandboxed, so it can issue a sandbox extension: a token that
+/// grants read-only access to one directory tree, which SimlessKit consumes at
+/// launch. (The slot's profile can't carry a temporary-exception entitlement;
+/// installd rejects the app.)
+enum Sandbox {
+    static func readToken(_ path: String) -> String? {
+        guard let h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_NOW),
+              let sym = dlsym(h, "sandbox_extension_issue_file") else { return nil }
+        typealias Issue = @convention(c) (UnsafePointer<CChar>, UnsafePointer<CChar>, UInt32) -> UnsafeMutablePointer<CChar>?
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let t = unsafeBitCast(sym, to: Issue.self)("com.apple.app-sandbox.read", resolved, 0) else { return nil }
+        defer { free(t) }
+        return String(cString: t)
     }
 }
 

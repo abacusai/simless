@@ -17,6 +17,24 @@ struct Config: Codable {
     var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30)
     var packages: [String]?       // local Swift packages whose views hot reload can patch (relative to root)
     var team: String?             // signing team when the project sets no DEVELOPMENT_TEAM (e.g. a shared sample)
+    var idiom: String?            // "phone": phone canvases also get the phone idiom (default: the Mac's iPad idiom)
+    var checks: Checks?
+    var tests: Tests?
+    var calibrate: Calibration?
+    var embeddedBundles: Bool?    // keep app extensions and the watch app in the slot (default true)
+
+    struct Checks: Codable {
+        var minTapTarget: Double?     // points (default 44)
+        var ignore: [String]?         // issues containing any of these strings aren't reported
+    }
+    struct Tests: Codable {
+        var timeout: Double?          // seconds one test may run before simless stops the run (default 300)
+        var skip: [String]?           // always skipped, like --skip
+    }
+    struct Calibration: Codable {
+        var runtime: String?          // iOS version of the simulator, e.g. "26.5" (default: newest installed)
+        var device: String?           // simulator device type (default "iPhone 17 Pro")
+    }
 
     var kitFile: String { "\(kitDir)/SimlessKit.swift" }
     var fixturesFile: String { "\(kitDir)/SimlessFixtures.swift" }
@@ -47,6 +65,25 @@ struct Workspace {
     static func load(at root: String) throws -> Workspace {
         let data = try Data(contentsOf: URL(fileURLWithPath: "\(root)/\(configName)"))
         return Workspace(root: root, config: try JSONDecoder().decode(Config.self, from: data))
+    }
+
+    /// Local packages (relative to root): from the config, else the ones the
+    /// project references now (a package added after `simless init` counts).
+    var packages: [String] { config.packages ?? Self.localPackages(root: root, project: config.project) }
+
+    static func localPackages(root: String, project: String) -> [String] {
+        let projectDir = (project as NSString).deletingLastPathComponent
+        let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
+        // `relativePath` of XCLocalSwiftPackageReference entries, relative to the project's directory.
+        guard let re = try? NSRegularExpression(pattern: #"isa = XCLocalSwiftPackageReference;\s*relativePath = "?([^";]+)"?;"#) else { return [] }
+        return re.matches(in: pbx, range: NSRange(pbx.startIndex..., in: pbx)).compactMap {
+            Range($0.range(at: 1), in: pbx).map { String(pbx[$0]) }
+        }
+        .map { projectDir.isEmpty ? $0 : "\(projectDir)/\($0)" }
+        // Standardize both sides: it also drops /private from /private/tmp paths.
+        .map { URL(fileURLWithPath: "\(root)/\($0)").standardizedFileURL.path
+            .replacingOccurrences(of: URL(fileURLWithPath: root).standardizedFileURL.path + "/", with: "") }
+        .filter { exists("\(root)/\($0)/Package.swift") }
     }
 
     var work: String { Paths.workDir(forWorktree: root) }
@@ -243,7 +280,10 @@ struct Workspace {
         if !team.isEmpty { return team }
         if let t = config.team, !t.isEmpty { return t }
         if let t = ProcessInfo.processInfo.environment["SIMLESS_TEAM"], !t.isEmpty { return t }
-        let teams = try Signing.developmentTeams()
+        var teams = try Signing.developmentTeams()
+        // Several teams: only one may have the wildcard profile simless signs with.
+        let usable = teams.filter { (try? Signing.wildcardProfile(team: $0)) != nil }
+        if usable.count == 1 { teams = usable }
         guard teams.count == 1, let only = teams.first else {
             throw SimlessError(teams.isEmpty
                 ? "\(config.appTarget) sets no DEVELOPMENT_TEAM and the keychain has no Apple Development identity"

@@ -20,7 +20,7 @@ enum Packages {
     /// Modules of every local package in the config, cached per Package.swift mtime.
     static func modules(ws: Workspace) -> [PackageModule] {
         var result: [PackageModule] = []
-        for rel in ws.config.packages ?? [] {
+        for rel in ws.packages {
             let dir = "\(ws.root)/\(rel)"
             let manifest = "\(dir)/Package.swift"
             guard exists(manifest) else { continue }
@@ -84,5 +84,69 @@ enum Packages {
     /// The module a source file belongs to, if it's in one of the packages.
     static func module(of file: String, in modules: [PackageModule]) -> PackageModule? {
         modules.filter { file.hasPrefix($0.dir + "/") }.max { $0.dir.count < $1.dir.count }
+    }
+}
+
+/// A local package's test targets. The Mac can't run them on their own: Xcode
+/// drops hostless test bundles for "Designed for iPad", and `swift test` builds
+/// for macOS, where iOS-only imports fail. simless builds them for iOS devices
+/// (the slot app runs iOS binaries) and hosts them in the slot app.
+struct PackageTests: Codable {
+    let package: String         // package name
+    let dir: String             // absolute package directory
+    let targets: [String]
+}
+
+extension Packages {
+    static func testTargets(ws: Workspace) -> [PackageTests] {
+        ws.packages.compactMap { rel in
+            let dir = "\(ws.root)/\(rel)"
+            let manifest = "\(dir)/Package.swift"
+            guard exists(manifest) else { return nil }
+            let cache = "\(ws.work)/package-tests-\(shortHash(dir))-\(Int(mtime(manifest))).json"
+            if let d = FileManager.default.contents(atPath: cache), let cached = try? JSONDecoder().decode(PackageTests.self, from: d) {
+                return cached
+            }
+            guard let out = try? Shell.check(["swift", "package", "dump-package"], cwd: dir, stdoutOnly: true),
+                  let json = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
+                  let targets = json["targets"] as? [[String: Any]] else { return nil }
+            let tests = PackageTests(package: json["name"] as? String ?? (rel as NSString).lastPathComponent, dir: dir,
+                                     targets: targets.filter { $0["type"] as? String == "test" }.compactMap { $0["name"] as? String })
+            try? mkdirp(ws.work)
+            try? JSONEncoder().encode(tests).write(to: URL(fileURLWithPath: cache))
+            return tests
+        }
+    }
+
+    /// Builds the given test targets of a package for iOS devices. Returns the
+    /// products directory, which holds `<target>.xctest` and resource bundles.
+    static func buildTests(_ p: PackageTests, targets: [String], ws: Workspace) throws -> String {
+        let dd = "\(ws.work)/PackageTests/\(p.package)"
+        let log = "\(ws.work)/package-tests-\(p.package).log"
+        // Xcode names a package's all-targets scheme "<name>-Package" when it
+        // has several products, and after the package when it has one.
+        let listing = try withDefaultDerivedDataGuard(projectNames: [p.package]) {
+            try Shell.run(["xcodebuild", "-list", "-json"], cwd: p.dir, stdoutOnly: true).out
+        }
+        let schemes = listing.firstIndex(of: "{").flatMap { start in
+            (try? JSONSerialization.jsonObject(with: Data(listing[start...].utf8)) as? [String: Any])
+                .flatMap { ($0["workspace"] as? [String: Any])?["schemes"] as? [String] }
+        } ?? []
+        let scheme = schemes.first { $0 == "\(p.package)-Package" } ?? schemes.first { $0 == p.package } ?? schemes.first ?? p.package
+        try withBuildToken(count: ws.config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)) {
+            let t = now()
+            Log.step("building \(targets.joined(separator: ", ")) for iOS (log: \(log))")
+            let r = try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
+                                   "-destination", "generic/platform=iOS", "-derivedDataPath", dd,
+                                   "-skipMacroValidation", "-skipPackagePluginValidation",
+                                   "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
+                                   "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache"]
+                                  + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log)
+            guard r.code == 0 else {
+                throw SimlessError("building \(p.package)'s tests failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
+            }
+            Log.step("built in \(secs(t))")
+        }
+        return "\(dd)/Build/Products/Debug-iphoneos"
     }
 }

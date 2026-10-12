@@ -116,10 +116,13 @@ simless init [--no-hook]          set up a repo
 simless up                        build, install this worktree's host, start it
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
+      [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
 simless reload [files...]         hot-reload everything edited since `simless up`
       [--render <fixture|all>] [--matrix] [--no-fallback]
-simless test [Target/Class/method...]   unit tests on the Mac
+simless test [Target/Class/method...|all]   unit tests on the Mac, local package tests included
+      [--skip Target/Class/method]... [--timeout <seconds per test>]
 simless calibrate [fixture]       compare renders with an iOS Simulator (boots one; run once per app)
+      [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone]
 simless status                    hosts, slots, live-reload availability
 simless down [--all]              stop hosts (they relaunch in ~1 s on next use)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
@@ -129,6 +132,29 @@ simless version                   version, Xcode and macOS
 ```
 
 `--matrix` renders light and dark on `iphone`, `iphone-small` and `ipad`.
+
+`--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees. Layouts that branch on it switch, but the Mac draws text at the default size (see [Known differences](#known-differences-from-an-iphone)).
+
+`simless test` prints failures as they happen and a progress line every 10 s. A test that runs longer than `--timeout` (default 300 s) fails, and a test that hangs past that stops the run and says which one it was. `simless test all` runs the app's test targets and every local package's.
+
+### Options in `.simless.json`
+
+```json
+{
+  "checks": { "minTapTarget": 32, "ignore": ["\"Daily\" tap target", "Show Sidebar"] },
+  "tests": { "timeout": 120, "skip": ["AppTests/DeviceOnlyTests"] },
+  "calibrate": { "runtime": "26.5", "device": "iPhone 17 Pro" },
+  "idiom": "phone",
+  "embeddedBundles": true
+}
+```
+
+- `checks.minTapTarget`: the smallest tap target in points that isn't reported (default 44).
+- `checks.ignore`: issues containing any of these strings aren't reported. Renders say how many were ignored.
+- `tests.timeout` and `tests.skip`: defaults for `--timeout` and `--skip`.
+- `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against (default: the newest runtime, iPhone 17 Pro).
+- `idiom`: `"phone"` renders phone canvases with the phone idiom (see below).
+- `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 
 ## Using it from AI agents
 
@@ -148,8 +174,11 @@ simless version                   version, Xcode and macOS
 - `simless render all --matrix` checks every screen in light/dark on iPhone, small iPhone and iPad.
 - New screen or state? Register it in SimlessFixtures.swift with deterministic data.
 - Use `--png <dir>` only when visual detail matters.
-- Logic: `simless test <Target>/<Class>`. Use the simulator only for gestures, the real keyboard,
-  system UI and Dynamic Type, which simless can't check.
+- Logic: `simless test <Target>/<Class>` (local package test targets work too, and `simless test all` runs every one).
+  Use the simulator only for gestures, the real keyboard, system UI and Dynamic Type text scaling,
+  which simless can't check.
+- Tests that need a real device: gate them on `ProcessInfo.processInfo.isiOSAppOnMac` (or
+  `SIMLESS_HEADLESS`), since `targetEnvironment(simulator)` is false on the Mac.
 - Compile errors from `simless reload` point at your file:line.
 - A pass is strong evidence, not proof. Run `simless calibrate` once per app to see which screens match
   the simulator. Say what still needs a simulator.
@@ -178,34 +207,39 @@ simless version                   version, Xcode and macOS
 ### What simless does to stay accurate
 
 - **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
-- **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch. Every render prints the traits the view saw.
+- **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac unless you pass `--idiom phone`. Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 
 ### Known differences from an iPhone
 
-- **The idiom is `.pad`.** On the Mac it can't safely be overridden (doing so crashes SwiftUI's control styles), so code that checks `userInterfaceIdiom` takes its iPad branch. Renders print a note about it.
+- **The idiom is `.pad` by default.** Code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and renders print a note about it. `--idiom phone` (or `"idiom": "phone"`) gives views the phone idiom. It's opt-in because SwiftUI's `Stepper` recurses until the stack overflows under it on the Mac. When that happens simless restarts the host, renders that screen with the iPad idiom and says so. On the demo app it fixed the navigation bar of a split view, but didn't close the other gaps below, so run `simless calibrate --idiom phone` to see whether it helps your screens. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
 - **Text renders 2–4% wider.** Usually lines break the same way, but long or centered text can need an extra line. Treat exact line breaks and truncation as unverified until calibration shows they match.
 - **Platform rows are taller.** `List` rows came out 2 pt taller and `Form` toggle rows 6 pt taller, so content below them sits lower.
 - **System colors follow the Mac.** Controls use the macOS accent color (an "on" toggle can be gray instead of green), which an accessibility tree can't show.
 - **Some controls are exposed differently to accessibility.** In calibration, a `Menu` with a custom label was unlabeled in simless but labeled on iOS, so simless reported an issue that isn't one on a phone. Confirm accessibility flags on `Menu` and other platform-backed controls with `simless calibrate`.
-- **Text size:** Dynamic Type is ignored, so text that fits at the default size can still truncate at larger sizes.
+- **Text size:** `--text-size` sets the Dynamic Type size views see, so layouts that switch at accessibility sizes switch. The text itself stays at the default size: iOS apps on the Mac resolve every text style (SwiftUI, `UIFont.preferredFont`, `UIFontMetrics`) to its default size, whatever the size category. Text that fits at the default size can still truncate at larger sizes, so check those in a simulator.
 - **Pixels:** rendering is close to, but not identical with, an iPhone. Use the simulator for final pixels.
 
 ### Unit tests
 
-- **No capabilities.** Hosts run without app capabilities (iCloud/CloudKit, app groups, keychain sharing, push). Tests that need them can fail or take other code paths.
+- **Local package tests.** Package test targets run in the slot app, like the app's own tests. simless builds them for iOS devices, because Xcode won't run a test bundle without a host app on "My Mac (Designed for iPad)", and `swift test` builds for macOS, where iOS-only imports fail. The bundle links its own copy of the package, so state it shares with the app (singletons, globals) isn't shared.
+- **The repository is readable.** Tests (and fixtures) can read files in the repository, for example next to `#filePath`, but not write them. The app sandbox would block it, so simless grants read access when it starts the app.
+- **App groups.** `containerURL(forSecurityApplicationGroupIdentifier:)` returns a private folder per group inside the slot's container, so reads and writes work but nothing is shared with other apps.
+- **Other capabilities are missing.** Hosts run without iCloud/CloudKit, keychain sharing or push. Tests that need them can fail or take other code paths.
+- **App extensions and the watch app stay in the app.** They're re-identified under the slot's bundle id so tests can find them. macOS registers the extensions, and simless sets each one to "ignore" so a slot's widgets never show up in the widget gallery.
+- **Device-only tests run.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` instead, or on the `SIMLESS_HEADLESS` environment variable, which is set only in simless runs.
 - **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice`, file-system locations, the sandbox.
-- **Last full build.** Tests run against the last full build, not against hot-reload patches. `simless test` warns when sources have changed since then.
+- **Last full build.** App tests run against the last full build, not against hot-reload patches. `simless test` warns when sources have changed since then. Package tests are built from the current sources.
 
 ### Not checked at all
 
-Gestures and swipe actions, the software keyboard, navigation flows across screens, system UI (permissions, share sheets, StoreKit sheets) and Dynamic Type sizes.
+Gestures and swipe actions, the software keyboard, navigation flows across screens, system UI (permissions, share sheets, StoreKit sheets) and Dynamic Type text scaling.
 
 ### Other limits
 
 - **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an app-hosted unit-test target.
 - **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
-- **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app, suppressing its windows). An OS update could break them; they never ship in release builds.
+- **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app, suppressing its windows, sandbox extensions for reading the repository). An OS update could break them; they never ship in release builds.
 
 ## How it works
 

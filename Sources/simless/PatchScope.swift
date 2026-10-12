@@ -67,7 +67,7 @@ enum PatchScope {
     }
 
     /// Throws when an edited file declares something the type graph can't track.
-    private static func checkTraceable(_ edited: [Source]) throws {
+    private static func checkTraceable(_ edited: [Source], fixturesPath: String) throws {
         let editedTypes = edited.reduce(into: Set<String>()) { $0.formUnion($1.declared) }
         for src in edited {
             let s = src.text
@@ -84,6 +84,8 @@ enum PatchScope {
                         throw SimlessError("patch can't cover this edit: \(file) extends \(name), which other code can use without naming an edited type")
                     }
                 case "func", "var", "let":
+                    // The fixtures entry point is only ever called through the patch.
+                    if kind == "func", name == "simlessFixtures", src.path == fixturesPath { continue }
                     if !(mods.contains("private") || mods.contains("fileprivate")) {
                         throw SimlessError("patch can't cover this edit: \(file) declares top-level \(kind) \(name), which other files can use")
                     }
@@ -116,7 +118,7 @@ enum PatchScope {
         }
         let byPath = Dictionary(uniqueKeysWithValues: sources.map { ($0.path, $0) })
         let editedSet = Set(edited)
-        try checkTraceable(edited.compactMap { byPath[$0] })
+        try checkTraceable(edited.compactMap { byPath[$0] }, fixturesPath: fixturesPath)
 
         // deps[f]: files whose types f can see and mentions. Within a module any
         // top-level type; across modules only public ones, along import edges.

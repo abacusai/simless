@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-10-12)
+
+Fixes and features from running simless on a larger app with most of its tests in a local Swift package. Run `simless init` once to update SimlessKit; it keeps `.simless.json` and your fixtures now.
+
+- **Local package tests.** `simless test MyKitTests` runs a local Swift package's test target. Xcode won't run a hostless test bundle on "My Mac (Designed for iPad)" and `swift test` fails on iOS-only imports, so simless builds the package's tests for iOS and hosts them in the slot app. `simless test all` runs every app and package test target.
+- **Tests can read the repository.** Reading files next to `#filePath` (project files, xcconfigs, fixtures, copy) failed with "Code=257". simless now grants the app read-only access to the repository through a sandbox extension. An entitlement can't do it: installd rejects any the profile doesn't allow.
+- **App groups and embedded bundles.** Group containers resolve to a private folder per group, so writes work instead of failing with "Code=513". App extensions and the watch app stay in the slot under the slot's id, so tests can find them. Their extensions are set to "ignore" so they never show up in the widget gallery.
+- **Unattended test runs.** `simless test` prints failures as they happen and progress every 10 s. Each test has a time limit (`--timeout`, default 300 s), and a test that hangs stops the run and is named. `--skip` (repeatable) and `tests.skip` in `.simless.json` skip tests.
+- **Device-only tests.** `targetEnvironment(simulator)` is false on the Mac. The docs now say to gate such tests on `isiOSAppOnMac` or `SIMLESS_HEADLESS`.
+- **`--locale` and `--text-size`.** `simless render Home --locale hr --text-size ax5` renders in another language without a fixture per locale, at a given Dynamic Type size. Text itself doesn't scale on the Mac (every text style resolves to its default size there), so renders say that layout follows the size but text doesn't.
+- **`--idiom phone`.** Phone canvases can use the phone idiom. Only `Stepper` crashes under it (not `Form`, `Toggle` or `Picker`, as 0.1.2 said). When it does, simless restarts the host and renders that screen with the iPad idiom. It's opt-in, because on the demo app it didn't close the other differences.
+- **Configurable checks.** `checks.minTapTarget` sets the tap-target threshold and `checks.ignore` drops matching issues. Renders say how many were ignored. UIKit's own bar buttons are no longer reported for their size.
+- **Split views on iPad.** A split view's column resize handle is no longer in the tree. It caused false "cut off at the left edge" and overlap issues with the sidebar button. Long role names (`adjustable`) are no longer cut off in the tree.
+- **Calibration simulator.** `simless calibrate --runtime 26.5 --sim-device "iPhone 16e"` (or `calibrate` in `.simless.json`) picks the simulator. Both sides render at that simulator's screen size and safe areas.
+- **Hot reload without remote packages.** In projects with no remote Swift package dependencies, every patch got a bogus module map path (an error message from `find`) and fell back to a full build. Those projects now hot-reload, the demo app in about 1.2 s.
+- **Fixture edits hot-reload.** Adding or changing a fixture in `SimlessFixtures.swift` used to force a full build.
+- **Smaller fixes.** Local packages added after `simless init` are picked up. With several development teams, simless picks the only one with a usable wildcard profile. `simless test` before a successful `simless up` says so instead of failing on a missing log.
+
 ## 0.1.2 (2026-10-10)
 
 - **Demo app and fidelity page.** [Examples/SimlessDemo](Examples/SimlessDemo) has seven common screens, and [docs/fidelity.md](docs/fidelity.md) shows each one rendered by the iOS Simulator and by simless, side by side, with what differs.

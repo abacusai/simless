@@ -166,9 +166,13 @@ enum Patch {
         maps += ((try? FileManager.default.contentsOfDirectory(atPath: generated)) ?? [])
             .filter { $0.hasSuffix(".modulemap") }.map { "\(generated)/\($0)" }
         // find(1), not a recursive glob: package checkouts contain symlink cycles.
-        let checkouts = (try? Shell.run(["/usr/bin/find", "\(ws.derivedData)/SourcePackages/checkouts",
-                                         "-name", "module.modulemap"]).out) ?? ""
+        // Stdout only, and only when there are checkouts: find's "No such file"
+        // on stderr would otherwise become a module map path and fail the patch.
+        let dir = "\(ws.derivedData)/SourcePackages/checkouts"
+        let checkouts = exists(dir) ? (try? Shell.run(["/usr/bin/find", dir, "-name", "module.modulemap"],
+                                                      stdoutOnly: true).out) ?? "" : ""
         maps += checkouts.split(separator: "\n").map(String.init).filter { path in
+            path.hasSuffix("module.modulemap") &&
             !["/Tests/", "/Examples/", "/Example/", "/.build/", "/Benchmarks/"].contains { path.contains($0) }
         }
         let include = "\(ws.productsIphoneos)/include/module.modulemap"
