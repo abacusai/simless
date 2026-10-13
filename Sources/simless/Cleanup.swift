@@ -16,6 +16,7 @@ enum Cleanup {
     /// Stops the host, unregisters the install, deletes the slot directory.
     static func removeSlot(_ slot: SlotRecord) {
         Slots.stop(slot)
+        Slots.terminateAll(slot)   // test and UI-test hosts don't answer the render protocol
         removeSlotDir(slot.dir)
     }
 
@@ -119,8 +120,8 @@ enum Cleanup {
         } else {
             let ws = try Workspace.load()
             let settings = try? ws.settings()
-            if let settings, let slot = GlobalState.load().slots.first(where: {
-                $0.bundleBase == settings.bundleID && $0.worktree == ws.root }) {
+            // The render slot and its test and UI-test siblings.
+            for slot in GlobalState.load().slots where settings.map({ $0.bundleID == slot.bundleBase }) ?? false && slot.worktree == ws.root {
                 removeSlot(slot)
                 try GlobalState.release(slot)
             }

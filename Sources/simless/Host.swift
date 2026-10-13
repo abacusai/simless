@@ -5,7 +5,7 @@ import Foundation
 
 /// Newline-delimited JSON over TCP (render hosts) or a Unix socket (the agent).
 final class LineClient {
-    private let fd: Int32
+    let fd: Int32
 
     init(port: Int, timeout: Double = 15) throws {
         fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -41,13 +41,13 @@ final class LineClient {
 
     deinit { close(fd) }
 
-    private func setTimeout(_ seconds: Double) {
+    func setTimeout(_ seconds: Double) {
         var tv = timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - Double(Int(seconds))) * 1e6))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
-    private var pending = Data()
+    var pending = Data()
 
     func call(_ request: [String: Any]) throws -> [String: Any] {
         var data = try JSONSerialization.data(withJSONObject: request)
@@ -73,6 +73,42 @@ final class LineClient {
             let n = read(fd, &buf, buf.count)
             guard n > 0 else { throw SimlessError(n == 0 ? "connection closed" : "timed out waiting for response") }
             pending.append(contentsOf: buf[0..<n])
+        }
+    }
+}
+
+extension LineClient {
+    enum Next { case line([String: Any]), timeout, closed }
+
+    /// Writes one request without waiting for a reply.
+    func send(_ request: [String: Any]) throws {
+        var data = try JSONSerialization.data(withJSONObject: request)
+        data.append(0x0A)
+        try data.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(fd, raw.baseAddress! + off, raw.count - off)
+                guard n > 0 else { throw SimlessError("write failed") }
+                off += n
+            }
+        }
+    }
+
+    /// The next line of a streamed reply; `.timeout` after the socket's receive
+    /// timeout passes with nothing to read, `.closed` when the host is gone.
+    func next() -> Next {
+        var buf = [UInt8](repeating: 0, count: 1 << 16)
+        while true {
+            if let nl = pending.firstIndex(of: 0x0A) {
+                let line = pending[pending.startIndex..<nl]
+                pending.removeSubrange(pending.startIndex...nl)
+                if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] { return .line(obj) }
+                continue
+            }
+            let n = read(fd, &buf, buf.count)
+            if n > 0 { pending.append(contentsOf: buf[0..<n]); continue }
+            if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { return .timeout }
+            return .closed
         }
     }
 }

@@ -28,8 +28,14 @@ struct Config: Codable {
         var ignore: [String]?         // issues containing any of these strings aren't reported
     }
     struct Tests: Codable {
-        var timeout: Double?          // seconds one test may run before simless stops the run (default 300)
+        var timeout: Double?          // seconds one test may run before simless stops the run (default 600)
         var skip: [String]?           // always skipped, like --skip
+        var simulatorOnly: [String: String]?  // "Target/Suite/test()": why it needs a simulator
+        var jobs: Int?                // Swift Testing tests running at once per host
+        var hosts: Int?               // test hosts running side by side (default: up to 4 for 4+ targets)
+        var uiJobs: Int?              // UI test hosts running side by side (default: up to 4)
+        var uiTimeout: Double?        // seconds one UI test may run (default 300)
+        var uiSources: [String: String]?  // UI test target -> source folder, when it isn't a synchronized folder
     }
     struct Calibration: Codable {
         var runtime: String?          // iOS version of the simulator, e.g. "26.5" (default: newest installed)

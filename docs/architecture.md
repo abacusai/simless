@@ -1,6 +1,6 @@
 # Architecture
 
-simless gives coding agents a fast, headless way to check SwiftUI screens and run unit tests without the iOS Simulator. This document explains how it works. [findings.md](findings.md) explains why it works this way.
+simless gives coding agents a fast, headless way to check SwiftUI screens and run unit and UI tests without the iOS Simulator. This document explains how it works. [findings.md](findings.md) explains why it works this way.
 
 ```
  agent ──► simless CLI ──► xcodebuild (Designed-for-iPad build, unsigned)
@@ -55,7 +55,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode;
 - phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` crashes under it. When a render takes the host down, the CLI reads the macOS crash report for the slot (`~/Library/Logs/DiagnosticReports`), reports the exception and first frames in the app or SwiftUI, relaunches the host and carries on. Under `.phone` it first retries the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
-- `--text-size` sets `preferredContentSizeCategory` and `dynamicTypeSize`. Layout follows them, but text styles keep their default sizes on the Mac;
+- `--text-size` sets `preferredContentSizeCategory` and `dynamicTypeSize`. Layout follows them, and text scales too, because SimlessRuntime makes CoreText use iOS's text-style sizes (see [findings.md](findings.md));
 - `--locale` relaunches the host with `-AppleLanguages` and `-AppleLocale`, since the language is process-wide (string lookup, formatters, layout direction);
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display;
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
@@ -71,16 +71,35 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 
 ## Unit tests
 
-`simless test` stops the host and runs `xcodebuild test-without-building` with the slot's `.xctestrun`, so tests run inside the slot app like app-hosted tests on a device. Each run gets its own copy of the `.xctestrun` with:
-- `SIMLESS_SANDBOX_TOKENS`, the read-only sandbox extensions for the repository;
-- XCTest's per-test time allowance (`--timeout`, default 300 s), which Swift Testing also honors;
-- an entry per local package test target that was asked for.
+`simless test` doesn't use xcodebuild to run tests. It keeps a test host: a copy of the slot app launched with `SimlessRuntime.dylib` inserted (`DYLD_INSERT_LIBRARIES`) and Xcode's macOS test frameworks on `DYLD_FRAMEWORK_PATH`. The runtime listens on the slot's port and loads test bundles on request with `dlopen`:
+- app test targets from the slot app's `PlugIns`,
+- local package test targets, built for iOS devices (`xcodebuild build-for-testing -destination generic/platform=iOS` from the package directory), with the package's resource bundles copied in and the bundle signed, since a sandboxed app only loads signed code.
 
-Package test targets can't run on the Mac on their own: Xcode drops test bundles without a host app for "Designed for iPad", and `swift test` builds for macOS, where iOS-only frameworks are missing. simless builds them with `xcodebuild build-for-testing -destination generic/platform=iOS` from the package directory, copies the `.xctest` (and the package's resource bundles) into the slot app's `PlugIns`, re-signs, and adds an app-hosted entry for it. The bundle carries its own static copy of the package, so the app's copy and the tests' copy don't share state.
+Swift Testing runs through its ABI entry point (`swt_abiv0_getEntryPoint`), with a filter, a skip list and a parallelization width, and streams events as JSON. XCTest runs its default suite with an observer. Both report back over the socket, and the CLI prints failures and crashes as they happen.
 
-Every launch of the app for a test target runs the app's startup, which for a big app can take most of a run. Package targets that run whole (no class or test filters or skips) therefore share one launch: the first one's entry carries `SIMLESS_TEST_BUNDLES`, and SimlessKit `dlopen`s the other bundles at launch. XCTest and Swift Testing find tests in every loaded image. xcodebuild doesn't know about the loaded bundles' tests, so after a crash it would restart that launch forever. On the first crash simless stops it and runs those targets again, one launch each, where xcodebuild's restart limit applies.
+A host runs many targets in one process, so the app's startup is paid once per host, not once per target. Tests on the main actor run one at a time in a process, though, and heavy ones (rendering, image comparisons) would queue everything else behind them. So a big run uses several hosts (`--hosts`, by default up to 4 when there are 4 or more targets), each its own slot (`test`, `test2`, …), with targets spread by how long their tests took in the last run. When a run finishes, the next hosts are started in the background (with a token, so only a host simless started for this is reused), and they're usually up by the next run.
 
-The CLI reads the output as it's written: failures and crashes print right away, and progress every 10 s. Lines are matched after removing invisible characters (interleaved output can carry U+200B) and SF Symbols glyphs, anywhere in the line. A watchdog stops the run when it has been silent for a minute or so past the allowance while a test is still running, and names the test.
+A test that crashes the host or runs past `--timeout` doesn't end the run:
+- simless reads the crash report and names the test. If the crashed thread's stack has one of the running tests on it, that test is blamed.
+- a fresh host runs only what didn't finish.
+- tests that were running when the host went down, and that the stack doesn't clear up, run again after the others, together. A group that brings its host down again is split in half until the crash lands on one test.
+- a test that ran out of time while the run was busy is run alone. If it passes there, it's reported as load, not a failure.
+
+Tests marked in `tests.simulatorOnly` (or skipped with a reason starting "simulator only") are counted apart, and `simless test --simulator-only` lists them with the xcodebuild command that runs them in a simulator.
+
+## UI tests
+
+`simless test ui` (or a UI test target, class or test) runs the app's XCUITest code without a simulator. The test sources are compiled unchanged for macOS, as a test bundle, together with `SimlessXCUI.swift`. That file defines `XCUIApplication`, `XCUIElement`, `XCUIElementQuery`, `XCUICoordinate`, `XCUIDevice` and the rest in the test module, so they take precedence over XCTest's. `xcrun xctest` runs the bundle.
+
+Each `XCUIApplication.launch()` starts a UI host, a copy of the slot app with the runtime inserted, the test's arguments and environment, and an iPhone-sized canvas. The host is hidden but runs the app's real startup (`SIMLESS_HEADLESS` isn't set). The test talks to the runtime over a socket:
+- **Queries** run against a snapshot of the app's accessibility tree, with XCUITest's element types, identifiers, labels, values and frames.
+- **Taps** on SwiftUI elements are accessibility activations when the element has an action. Everything else is a touch: a `UITouch` in a `UITouchesEvent` with a digitizer `IOHIDEvent`, sent through `-[UIApplication sendEvent:]`. SwiftUI's gestures live in gesture recognizer containers that aren't views, so for each touch the runtime asks the view under the finger for its container (`-[UIView _hitTestWithContext:]`) and adds that container's recognizers to the touch.
+- **Drags and swipes** without a hold are replayed faster than real time. Their touches carry the timestamps of a real finger, so scroll physics come out the same.
+- **Waiting:** after every action the runtime waits for animations that are on screen and moving, and for presentations and dismissals in flight, the way XCUITest waits for the app to settle.
+- **What the Mac shows differently is emulated.** UIKit shows alerts as AppKit panels and menus as AppKit menus, outside the app's tree. The runtime intercepts them and puts iPhone-style alerts and menus into the tree. The same goes for the share sheet (a sheet with Close), compact date pickers (a button, then wheels), and the keyboard (keyboard notifications, an iPhone keyboard's frame and the input accessory bar).
+- **Audits** (`performAccessibilityAudit`) are simless's own checks with the same audit types, since Xcode's audit runs in a system service.
+
+Tests are spread over several hosts (`--jobs`) by their last durations. Each host is its own slot (`ui1`, `ui2`, …), because macOS runs one instance per bundle id. A failure saves a screenshot and the element tree next to the run's logs.
 
 ## 4. Hot reload
 
@@ -136,9 +155,9 @@ Hosts and the agent are already long-lived processes, so the CLI coordinates wit
 See [How far to trust results](../README.md#how-far-to-trust-results) for what a pass and a failure mean, the known ways a pass can be wrong (hot reload with nested views, device traits, safe areas, Dynamic Type), and how unit tests can differ. In brief:
 
 - **Hot reload replaces only the edited types.** Unedited views that embed an edited type still run the previously built code until the next full build.
-- **Traits aren't an iPhone's.** It's an iOS app on a Mac: text doesn't scale with Dynamic Type, and the idiom is `.pad` unless `--idiom phone` is passed. simless sets phone size classes and safe areas itself.
+- **Traits aren't an iPhone's.** It's an iOS app on a Mac: the idiom is `.pad` unless `--idiom phone` is passed. simless sets phone size classes and safe areas itself, and its runtime makes text scale with Dynamic Type.
 - **No capabilities.** Slots run without app capabilities. App-group containers are private folders.
-- **Not covered:** gestures, the software keyboard, system UI and navigation flows.
+- **Not covered:** system UI that UI tests don't emulate (permission prompts, HealthKit and StoreKit sheets, photo and file pickers), the watch app, and pixel-exact rendering.
 - **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
 - **Side effects:** the host runs the app's real startup; guard side effects with `SimlessHost.isActive`.
-- **Private APIs:** the host uses private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`) that an OS update could change.
+- **Private APIs:** the hosts use private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`, CoreText's text-style tables, UIKit's touch and gesture-container internals) that an OS update could change.

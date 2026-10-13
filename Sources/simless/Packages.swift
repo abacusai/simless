@@ -123,6 +123,15 @@ extension Packages {
     static func buildTests(_ p: PackageTests, targets: [String], ws: Workspace) throws -> String {
         let dd = "\(ws.work)/PackageTests/\(p.package)"
         let log = "\(ws.work)/package-tests-\(p.package).log"
+        let products = "\(dd)/Build/Products/Debug-iphoneos"
+        // Nothing changed in the package (or the local packages it uses) since
+        // these targets were last built: a no-op xcodebuild still costs ~10 s.
+        let stamp = "\(dd)/.simless-built-\(shortHash(targets.sorted().joined(separator: ",")))"
+        let newest = newestSource(p.dir)
+        if let built = try? String(contentsOfFile: stamp, encoding: .utf8), Double(built).map({ $0 >= newest }) == true,
+           targets.allSatisfy({ exists("\(products)/\($0).xctest") }) {
+            return products
+        }
         // Xcode names a package's all-targets scheme "<name>-Package" when it
         // has several products, and after the package when it has one.
         let listing = try withDefaultDerivedDataGuard(projectNames: [p.package]) {
@@ -147,6 +156,37 @@ extension Packages {
             }
             Log.step("built in \(secs(t))")
         }
-        return "\(dd)/Build/Products/Debug-iphoneos"
+        try? String(newest).write(toFile: stamp, atomically: true, encoding: .utf8)
+        return products
+    }
+
+    /// The newest modification time of the package's own files and of the
+    /// local packages it depends on by path (build folders left out).
+    static func newestSource(_ dir: String) -> Double {
+        var newest = 0.0
+        var seen = Set<String>()
+        func scan(_ root: String) {
+            let root = (root as NSString).standardizingPath
+            guard seen.insert(root).inserted else { return }
+            let fm = FileManager.default
+            guard let e = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                                        options: [.skipsHiddenFiles]) else { return }
+            for case let url as URL in e {
+                let name = url.lastPathComponent
+                if name == ".build" || name == "DerivedData" || name.hasSuffix(".xcodeproj") { e.skipDescendants(); continue }
+                if let d = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                    newest = max(newest, d.timeIntervalSince1970)
+                }
+            }
+            // Local packages it uses: .package(path: "...").
+            if let manifest = try? String(contentsOfFile: "\(root)/Package.swift", encoding: .utf8),
+               let re = try? NSRegularExpression(pattern: #"\.package\(\s*(?:name:\s*"[^"]*",\s*)?path:\s*"([^"]+)""#) {
+                for m in re.matches(in: manifest, range: NSRange(manifest.startIndex..., in: manifest)) {
+                    if let r = Range(m.range(at: 1), in: manifest) { scan("\(root)/\(manifest[r])") }
+                }
+            }
+        }
+        scan(dir)
+        return newest
     }
 }

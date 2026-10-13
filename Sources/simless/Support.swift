@@ -111,13 +111,13 @@ struct Shell {
     /// Like `run` with a log file, but hands each output line to `onLine` as it
     /// arrives. `tick` runs about four times a second; returning false
     /// terminates the command (its result then has exit code 15).
-    static func stream(_ args: [String], cwd: String? = nil, logPath: String,
+    static func stream(_ args: [String], cwd: String? = nil, logPath: String, env: [String: String]? = nil,
                        onLine: (String) -> Void, tick: () -> Bool) throws -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = args
         if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
-        var environment = ProcessInfo.processInfo.environment
+        var environment = env ?? ProcessInfo.processInfo.environment
         if let dev = developerDir { environment["DEVELOPER_DIR"] = dev }
         p.environment = environment
         try mkdirp((logPath as NSString).deletingLastPathComponent)
@@ -249,7 +249,8 @@ struct SlotRecord: Codable {
     var builtAt: Double = 0     // reference-date seconds of the last full build
     var patch: Int = 0          // patches applied since that build
     var lastPatch: String?      // newest patch dylib; re-applied whenever the host relaunches
-    var slotID: String { "\(bundleBase).simless\(n)" }
+    var kind: String?           // nil: the render host. "test": unit tests. "ui1"...: UI test app hosts
+    var slotID: String { "\(bundleBase).simless\(n)\(kind.map { "-" + $0 } ?? "")" }
     var dir: String { "\(Paths.slots)/\(slotID)" }
 }
 
@@ -270,15 +271,18 @@ struct GlobalState: Codable {
     }
 
     /// Returns this worktree's slot, assigning the lowest free slot number and port.
-    static func slot(bundleBase: String, worktree: String) throws -> SlotRecord {
+    /// A `kind` slot shares its render slot's number (app.simless1, app.simless1-test).
+    static func slot(bundleBase: String, worktree: String, kind: String? = nil) throws -> SlotRecord {
         try withLock("state") {
             var s = load()
-            if let r = s.slots.first(where: { $0.bundleBase == bundleBase && $0.worktree == worktree }) { return r }
-            let usedN = Set(s.slots.filter { $0.bundleBase == bundleBase }.map(\.n))
+            if let r = s.slots.first(where: { $0.bundleBase == bundleBase && $0.worktree == worktree && $0.kind == kind }) { return r }
+            let usedN = Set(s.slots.filter { $0.bundleBase == bundleBase && $0.kind == kind }.map(\.n))
             let usedPorts = Set(s.slots.map(\.port))
-            let n = (1...).first { !usedN.contains($0) }!
+            let sibling = s.slots.first { $0.bundleBase == bundleBase && $0.worktree == worktree && $0.kind == nil }?.n
+            let n = sibling.flatMap { usedN.contains($0) ? nil : $0 } ?? (1...).first { !usedN.contains($0) }!
             let port = (47800...).first { !usedPorts.contains($0) }!
-            let r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: port)
+            var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: port)
+            r.kind = kind
             s.slots.append(r)
             try s.save()
             return r
@@ -301,4 +305,13 @@ struct GlobalState: Codable {
             try s.save()
         }
     }
+}
+
+/// A value shared between threads, behind a lock.
+final class Locked<T>: @unchecked Sendable {
+    private var stored: T
+    private let lock = NSLock()
+    init(_ value: T) { stored = value }
+    var value: T { lock.lock(); defer { lock.unlock() }; return stored }
+    func mutate(_ body: (inout T) -> Void) { lock.lock(); defer { lock.unlock() }; body(&stored) }
 }

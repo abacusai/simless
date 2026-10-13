@@ -1,13 +1,13 @@
 ---
 name: simless
-description: Fast, headless, simulator-free verification of SwiftUI iOS apps with the `simless` CLI. Use it whenever you build or change SwiftUI views and need to check that screens render correctly (layout, text, accessibility labels, dark mode, iPad/small iPhone), when the user says to test or verify UI with simless, or instead of booting the iOS Simulator for screen checks or unit tests.
+description: Fast, headless, simulator-free verification of SwiftUI iOS apps with the `simless` CLI. Use it whenever you build or change SwiftUI views and need to check that screens render correctly (layout, text, accessibility labels, dark mode, iPad/small iPhone), when the user says to test or verify UI with simless, or instead of booting the iOS Simulator for screen checks, unit tests or XCUITest UI tests.
 ---
 
 # SwiftUI verification with `simless`
 
 `simless` runs the app natively on the Mac as an invisible render host: no simulator, no windows. A screen render returns its accessibility tree in milliseconds. An edited view hot-reloads in about 2 s. Many agents can work in parallel, one host per git worktree.
 
-**Do not boot the iOS Simulator for screen checks or unit tests.** Use `simless`. Use the simulator only for what `simless` can't do (see Limits).
+**Do not boot the iOS Simulator for screen checks, unit tests or UI tests.** Use `simless`. Use the simulator only for what `simless` can't do (see Limits).
 
 ## 1. Is the repo set up?
 
@@ -57,13 +57,18 @@ simless render all --matrix                  # every fixture × light/dark × ip
 simless calibrate                            # once per app: compare every fixture with an iOS Simulator
 simless render <Fixture> --png /tmp/shots/   # only when you need to see pixels
 simless render <Fixture> --locale hr         # another language, without a fixture per locale
-simless render <Fixture> --text-size ax5     # Dynamic Type size for layout (text itself stays default size)
+simless render <Fixture> --text-size ax5     # at a Dynamic Type size (text scales like on an iPhone)
 simless test MyAppTests/SomeTests            # unit tests on the Mac, no simulator
 simless test MyKitTests                      # a local package's test target works the same way
 simless test all --skip MyAppTests/DeviceOnlyTests   # every test target, minus what needs a device
+simless test ui                              # the XCUITest UI tests, no simulator
+simless test MyAppUITests/LoginUITests       # one UI test class (or Target/Class/testMethod)
+simless test --simulator-only                # what's marked as needing a simulator, and how to run it
 ```
 
-`simless test` prints failures and crashes (with the trap's file and message) as they happen, and a progress line every 10 s. A test that runs past `--timeout` (default 300 s per test) fails, and one that hangs stops the run with its name. Skip it with `--skip`, and tell the user it needs a device. If simless says a `--skip` didn't match, fix the id (Swift Testing: `Target/Suite/test()`, XCTest: `Target/Class/testMethod`).
+`simless test` prints failures and crashes (with the trap's file and message) as they happen, and a progress line every 10 s. A test that runs past `--timeout` (default 600 s per test, like Xcode) fails, and one that hangs stops the run with its name. Skip it with `--skip`, and tell the user it needs a device. If simless says a `--skip` didn't match, fix the id (Swift Testing: `Target/Suite/test()`, XCTest: `Target/Class/testMethod`).
+
+`simless test ui` runs the UI tests' XCUITest code unchanged in hidden hosts. A failure prints the test's message and saves a screenshot and the element tree (the run's last line says where); read them before changing anything. A test that needs a real simulator (HealthKit sheets, StoreKit, the photo or file picker, the watch app) goes in `tests.simulatorOnly` in `.simless.json` with the reason, after you've confirmed with the user. Then tell the user to run what `simless test --simulator-only` lists in a simulator.
 
 Reading a render:
 
@@ -92,20 +97,19 @@ A **failure** from simless (a test failure, an issue, a wrong label or frame) is
 - **Scroll content.** "below the fold: N element(s)" is information, not an issue: it counts scroll content listed in the tree.
 - **Device traits.** Phone canvases get phone size classes and safe areas, and every render prints its traits. The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch in simless. `--idiom phone` switches the trait collection's idiom. A screen with a `Stepper` can crash under it, and simless then renders that screen with the iPad idiom and says so.
 - **"crashed the render host".** The crash's first frames tell you where. If they're in your view, fix it. If they're only in SwiftUI (a `Stepper` can crash SwiftUI on the Mac), check that screen in a simulator instead and say so.
-- **Mac differences.** Text renders 2–4% wider than on iOS (long or centered text can wrap differently), `List`/`Form` rows are a few points taller, system accent colors follow the Mac, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. `--text-size` changes layout, not the size text is drawn at.
+- **Mac differences.** Text renders 2–4% wider than on iOS (long or centered text can wrap differently), `List`/`Form` rows are a few points taller, system accent colors follow the Mac, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`.
 - **"issues: none"** only means the five automatic checks passed. Read the tree yourself.
 - **`simless test`** runs app tests from the last full build (not patches), and package tests from current sources. Tests can read repository files but not write them. App-group containers are private folders. iCloud, keychain sharing and push are missing, so tests that depend on them can differ from the simulator.
 - **Device-only tests.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run here. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` (or the `SIMLESS_HEADLESS` environment variable) instead, or skip them with `--skip`.
 
+- **UI tests.** Alerts, menus, the share sheet, compact date pickers and the keyboard are shown the iPhone way in UI tests, since the Mac shows them differently. Sharing to a target isn't emulated, and the audit is simless's own (no elementDetection or trait checks).
+
 simless can't verify:
-- Dynamic Type text scaling (layout at a size, yes; text drawn at that size, no),
-- gestures and swipe actions,
-- the software keyboard,
-- system UI (permissions, share sheets, StoreKit sheets),
-- navigation flows across screens,
+- system UI it doesn't emulate: permission prompts, HealthKit and StoreKit sheets, photo and file pickers,
+- the watch app, widgets and Siri themselves (deep links into the app work),
 - pixel-exact iPhone rendering.
 
-Before you call a UI change done, say what you verified with simless and what still needs a simulator or XCUITest pass. Never claim simless verified any of the above.
+Before you call a UI change done, say what you verified with simless and what still needs a simulator. Never claim simless verified any of the above.
 
 ## 5. Housekeeping
 

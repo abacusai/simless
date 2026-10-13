@@ -69,6 +69,12 @@ enum Slots {
         try? fm.removeItem(atPath: xctestrun)
         try retargetXCTestRun(from: "\(ws.products)/\(src)", to: xctestrun,
                               hostBundleID: settings.bundleID, slotID: slot.slotID)
+        // The runtime every launch of this slot injects (Dynamic Type, original
+        // bundle ids, the test runner), outside the app so it never needs re-signing.
+        let runtime = try RuntimeBuild.dylib(team: settings.team)
+        try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
+        try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
+        try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         Log.step("slot \(slot.slotID) prepared in \(secs(t))")
     }
 
@@ -167,97 +173,6 @@ enum Slots {
         }
     }
 
-    // MARK: - Test runs
-
-    /// Copies package test bundles into the slot app and re-signs it. The next
-    /// test run installs them, and the app hosts them like its own tests.
-    static func injectTests(_ slot: SlotRecord, ws: Workspace, bundles: [(target: String, products: String)]) throws {
-        let settings = try ws.settings()
-        let signing = try Signing.material(team: settings.team)
-        let app = "\(slot.dir)/Debug-iphoneos/\(settings.wrapperName)"
-        let fm = FileManager.default
-        try mkdirp("\(app)/PlugIns")
-        for b in bundles {
-            let dst = "\(app)/PlugIns/\(b.target).xctest"
-            try? fm.removeItem(atPath: dst)
-            try Shell.check(["/bin/cp", "-c", "-R", "\(b.products)/\(b.target).xctest", dst], what: "copy \(b.target)")
-            // SwiftPM resource bundles: Bundle.module looks for them next to its code.
-            for r in (try? fm.contentsOfDirectory(atPath: b.products)) ?? [] where r.hasSuffix(".bundle") {
-                try Shell.check(["/bin/cp", "-c", "-R", "\(b.products)/\(r)", "\(dst)/\(r)"], what: "copy \(r)")
-            }
-            for path in nestedCode(in: dst) { try Signing.sign(path, identity: signing.identity) }
-            try Signing.sign(dst, identity: signing.identity)
-        }
-        try Signing.sign(app, identity: signing.identity, entitlements: "\(slot.dir)/entitlements.plist")
-    }
-
-    /// The xctestrun for one test run: the slot's, plus an entry per injected
-    /// package test bundle (hosted like the app's own tests), the sandbox
-    /// tokens that let tests read the repository, and the per-test time limit.
-    /// `merged` package targets run in one launch: the first one's entry loads
-    /// the others (SimlessKit dlopens them), and they get no entries of their own.
-    static func testRun(_ slot: SlotRecord, ws: Workspace, packageTargets: [String], merged: [String] = [],
-                        timeout: Double) throws -> String {
-        let src = "\(slot.dir)/slot.xctestrun"
-        guard let data = FileManager.default.contents(atPath: src),
-              var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            throw SimlessError("\(slot.slotID) is not installed; run `simless up`")
-        }
-        var dirs = [ws.root]
-        for p in ws.packages {
-            let dir = URL(fileURLWithPath: "\(ws.root)/\(p)").standardizedFileURL.path
-            if !dir.hasPrefix(URL(fileURLWithPath: ws.root).standardizedFileURL.path + "/") { dirs.append(dir) }
-        }
-        let tokens = dirs.compactMap(Sandbox.readToken).joined(separator: "\n")
-        func configure(_ target: [String: Any]) -> [String: Any] {
-            var t = target
-            var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
-            env["SIMLESS_SANDBOX_TOKENS"] = tokens
-            t["EnvironmentVariables"] = env
-            t["TestTimeoutsEnabled"] = true
-            t["DefaultTestExecutionTimeAllowance"] = Int(timeout)
-            t["MaximumTestExecutionTimeAllowance"] = Int(timeout)
-            return t
-        }
-        func hosted(_ template: [String: Any], _ name: String) -> [String: Any] {
-            var t = template
-            if name == merged.first {
-                var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
-                env["SIMLESS_TEST_BUNDLES"] = merged.dropFirst().joined(separator: "\n")
-                t["EnvironmentVariables"] = env
-            }
-            t["BlueprintName"] = name
-            t["ProductModuleName"] = name.replacingOccurrences(of: "-", with: "_")
-            t["TestBundlePath"] = "__TESTHOST__/PlugIns/\(name).xctest"
-            if let host = t["TestHostPath"] as? String { t["DependentProductPaths"] = [host, "\(host)/PlugIns/\(name).xctest"] }
-            t.removeValue(forKey: "BlueprintProviderName")
-            t.removeValue(forKey: "BlueprintProviderRelativePath")
-            return t
-        }
-        let main = ws.config.testTarget
-        let entries = packageTargets.filter { !merged.dropFirst().contains($0) }
-        if var configs = plist["TestConfigurations"] as? [[String: Any]] {
-            for i in configs.indices {
-                var targets = (configs[i]["TestTargets"] as? [[String: Any]] ?? []).map(configure)
-                if let template = targets.first(where: { $0["BlueprintName"] as? String == main }) ?? targets.first {
-                    targets += entries.map { hosted(template, $0) }
-                }
-                configs[i]["TestTargets"] = targets
-            }
-            plist["TestConfigurations"] = configs
-        } else {
-            for (key, value) in plist where !key.hasPrefix("__") {
-                if let target = value as? [String: Any] { plist[key] = configure(target) }
-            }
-            if let template = plist[main] as? [String: Any] {
-                for name in entries { plist[name] = hosted(template, name) }
-            }
-        }
-        let dst = "\(slot.dir)/test.xctestrun"
-        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: dst))
-        return dst
-    }
-
     /// Installs the slot via a zero-test run (xcodebuild is the only supported
     /// installer for DfI apps). Installs are serialized machine-wide.
     static func install(_ slot: SlotRecord, ws: Workspace) throws {
@@ -289,6 +204,7 @@ enum Slots {
     /// Launches the host headless and waits until it answers. `locale` (e.g.
     /// "hr" or "pt-BR") sets the app's language and region for the whole process.
     static func launch(_ slot: SlotRecord, idleMinutes: Int = 30, locale: String? = nil) throws {
+        if let team = try? Workspace.load(at: slot.worktree).settings().team { try RuntimeHost.refreshRuntime(slot, team: team) }
         var extra: [String] = []
         if let locale {
             extra += ["--simless-locale", locale, "-AppleLanguages", "(\(locale))",
@@ -340,7 +256,8 @@ enum Slots {
                 // The host's stderr names a trap (`Fatal error: ...`) when macOS
                 // writes no crash report (it limits repeated ones).
                 try? FileManager.default.removeItem(atPath: "\(slot.dir)/host.log")
-                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/host.log",
+                let env = RuntimeHost.baseEnvironment(slot).sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
+                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/host.log"] + env + [
                                     "\(installed)/\(wrapper)", "--args",
                                     "--simless-port", String(slot.port),
                                     "--simless-idle", String(idleMinutes * 60)] + extra)

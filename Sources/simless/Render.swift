@@ -56,9 +56,6 @@ enum Render {
         } else if wantPhone, t["deviceIdiom"] as? String != "phone" {
             lines.append("  note: UIDevice.current.userInterfaceIdiom still reports \(t["deviceIdiom"] ?? "?"); views reading the trait collection see phone")
         }
-        if let size = t["textSize"] as? String, t["onMac"] as? Bool == true {
-            lines.append("  note: text size \(size) applies to layout (dynamicTypeSize branches, scaled metrics), but the Mac draws text at the default size; check text scaling itself in a simulator")
-        }
         return lines
     }
 
@@ -186,6 +183,7 @@ enum CrashReport {
     /// newest report for `slot` written after `since`. Reports appear a few
     /// seconds after the crash.
     static func summary(slot: SlotRecord, since: Date, wait: Double = 4) -> String? {
+        lastSymbols = []
         let dir = "\(Paths.home)/Library/Logs/DiagnosticReports"
         let deadline = now() + wait
         repeat {
@@ -202,14 +200,23 @@ enum CrashReport {
             }
             Thread.sleep(forTimeInterval: 0.5)
         } while now() < deadline
-        let log = (try? String(contentsOfFile: "\(slot.dir)/host.log", encoding: .utf8)) ?? ""
-        if let trap = log.split(separator: "\n").last(where: { $0.contains("Fatal error:") || $0.contains("Assertion failed:") || $0.contains("Precondition failed:") }) {
-            return TestOutput.normalize(String(trap)) + " (no crash report from macOS this time)"
-        }
-        return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run the screen in a simulator to see the crash"
+        if let trap = hostTrap(slot) { return trap + " (no crash report from macOS this time)" }
+        return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run it in a simulator to see the crash"
     }
 
+    /// The last trap message (`Fatal error: ...`) the host printed.
+    static func hostTrap(_ slot: SlotRecord) -> String? {
+        let log = (try? String(contentsOfFile: "\(slot.dir)/host.log", encoding: .utf8)) ?? ""
+        return log.split(separator: "\n").last(where: { $0.contains("Fatal error:") || $0.contains("Assertion failed:") || $0.contains("Precondition failed:") })
+            .map { visibleText(String($0)) }
+    }
+
+    /// Every symbol on the crashed thread of the last report `summary` read.
+    nonisolated(unsafe) static var lastSymbols: [String] = []
+
     private static func describe(_ body: [String: Any]) -> String {
+        lastSymbols = ((body["threads"] as? [[String: Any]] ?? []).first { $0["triggered"] as? Bool == true }?["frames"] as? [[String: Any]] ?? [])
+            .compactMap { $0["symbol"] as? String }
         let exception = body["exception"] as? [String: Any] ?? [:]
         var what = exception["type"] as? String ?? "crash"
         if let message = exception["message"] as? String, message.contains("stack guard") { what += ", stack overflow" }
@@ -224,6 +231,26 @@ enum CrashReport {
         }
         var seen = Set<String>()
         let top = frames.filter { seen.insert($0).inserted }.prefix(3)
-        return top.isEmpty ? what : "\(what) in " + top.joined(separator: " ← ")
+        var text = top.isEmpty ? what : "\(what) in " + top.joined(separator: " ← ")
+        // A stack overflow inside one runtime conformance check under SwiftUI's
+        // style resolution: SwiftUI on the Mac, not the app (seen with Stepper
+        // drawn by ImageRenderer or under the phone idiom).
+        if what.contains("stack overflow"), frames.prefix(4).contains(where: { $0.contains("StyleableView._makeViewList") || $0.contains("StyleModifier") }) {
+            text += ". This is a SwiftUI crash on the Mac, not your code (a Stepper drawn by ImageRenderer or under the phone idiom); mark the test simulator-only"
+        }
+        return text
     }
+}
+
+/// Without SF Symbols glyphs (private use), invisible format characters
+/// (U+200B, U+FEFF, ...) and control characters, trimmed.
+func visibleText(_ raw: String) -> String {
+    var scalars = String.UnicodeScalarView()
+    for s in raw.unicodeScalars {
+        switch s.properties.generalCategory {
+        case .format, .privateUse, .control where s != "\t": continue
+        default: scalars.append(s)
+        }
+    }
+    return String(scalars).trimmingCharacters(in: .whitespaces)
 }

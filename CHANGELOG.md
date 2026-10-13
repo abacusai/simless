@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+## 0.3.0 (2026-10-13)
+
+The goal for this one was replacing the simulator for a whole test suite, unit and UI tests, on a production app with about 2,200 unit tests and 115 UI tests. The full unit suite now runs in 5.8 min against 8.9 min in the simulator (build included), with the same results. The UI tests run in 7.8 min against 51 min of test time on one simulator, without any simulator clones. 101 of the 104 that don't need a simulator pass. The 3 that don't: a chart that scrolls less per swipe than on an iPhone, a SwiftUI `Button` inside a view with its own `onTapGesture` (the outer gesture wins), and Vision reading a photographed document differently in one language. I'll keep digging into the first two.
+
+- **UI tests without a simulator.** `simless test ui` runs your XCUITest code as it is. The test sources are compiled for the Mac with simless's own `XCUIApplication`, `XCUIElement` and queries, which drive the real app in hidden hosts. Launch arguments and environment, terminate and relaunch, queries, taps, typing, swipes, coordinates, alerts, screenshots and `performAccessibilityAudit` all work. Tests are spread over several hosts by their last durations (`--jobs`), and every failure saves a screenshot and the element tree.
+- **SwiftUI gestures work with synthesized touches.** `onTapGesture`, drags and chart scrubbing used to ignore them on the Mac. Their recognizers live in gesture containers that aren't views, and simless now adds them to each touch the way UIKit does for a real one.
+- **iPhone UI where the Mac differs.** Alerts, confirmation dialogs, context menus, `Menu`, the share sheet, compact date pickers and the keyboard with its toolbar show up in tests the way they do on an iPhone, instead of as AppKit windows or not at all.
+- **Simulator-only tests are marked, not failed.** List them in `tests.simulatorOnly` with the reason (HealthKit sheets, StoreKit, pickers, the watch app). They're counted apart, and `simless test --simulator-only` prints them with the xcodebuild command to run them in a simulator.
+- **Dynamic Type scales text now.** iOS apps on the Mac resolve every text style to one size, below SwiftUI in CoreText. simless's runtime makes CoreText use iOS's sizes, so text at AX5 is as big as on an iPhone, in tests and in renders. 15 Dynamic Type tests that failed before now pass.
+- **Warm test hosts instead of xcodebuild.** Unit tests run in long-lived hosts that load the test bundles themselves, Swift Testing in parallel. A big run is spread over several hosts (`--hosts`), because tests on the main actor run one at a time per process and heavy rendering tests would hold everything else up. A 20-test selection takes 3.4 s instead of 40 s.
+- **One bad test doesn't cost the run.** A crash or a timeout is reported with the test's name and the crash's frames, and a fresh host runs only what didn't finish. If the crash's stack names one of the running tests, that's the culprit. Otherwise the others run again together and get split in half until the crash lands on one test, instead of all running one at a time. Tests that only ran out of time because the machine was busy run again alone and are reported as load.
+- **Same results as the simulator.** Extensions and the watch app report their real bundle ids, hosts aren't slowed down by App Nap, and a test run can keep more than 256 files open. In UI tests, `mailto:` and `tel:` links have no handler and a watch session is supported, like on an iPhone simulator.
+- **Tests get 600 s by default**, like Xcode's execution time allowance, instead of 300 s. A parameterized test's cases count as one test, and a heavy one could run past 300 s on a busy Mac.
+- **Stepper crashes say what they are.** A test that hits SwiftUI's `Stepper` crash on the Mac gets a note to mark it simulator-only.
+- **`simless status`** shows each host's role (renders, unit tests, UI tests), memory and CPU, and the cache's size on disk.
+
 ## 0.2.1 (2026-10-13)
 
 Fixes from running 0.2.0's test runner on a larger app. Run `simless init` once to update SimlessKit (needed for the faster `test all`).

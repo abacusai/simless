@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.2.1"
+let version = "0.3.0"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -42,8 +42,8 @@ struct Args {
     var repeated: [String: [String]] = [:]
 
     init(_ raw: [String]) {
-        let valued: Set<String> = ["--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
-                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device"]
+        let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
+                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device", "--jobs"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
@@ -224,7 +224,7 @@ func cmdSkill(_ args: Args) throws {
 func currentSlot(_ ws: Workspace) throws -> SlotRecord {
     let settings = try ws.settings()
     let state = GlobalState.load()
-    guard let slot = state.slots.first(where: { $0.bundleBase == settings.bundleID && $0.worktree == ws.root }) else {
+    guard let slot = state.slots.first(where: { $0.bundleBase == settings.bundleID && $0.worktree == ws.root && $0.kind == nil }) else {
         throw SimlessError("no host for this worktree; run `simless up`")
     }
     return slot
@@ -411,126 +411,28 @@ func cmdReload(_ args: Args) throws {
     if let target = args.values["--render"] { try render(slot: slot, target: target, args: args, ws: ws) }
 }
 
-func cmdTest(_ args: Args) throws {
-    let ws = try Workspace.load()
-    let slot = try currentSlot(ws)
-    let edited = ws.changedSources()
-    if !edited.isEmpty { Log.info("note: \(edited.count) file(s) edited since `simless up`; app tests run the last full build (package tests are rebuilt)") }
-    let all = args.positional == ["all"]
-    let filters = all ? [] : args.positional.isEmpty ? [ws.config.testTarget] : args.positional
-    let skips = (ws.config.tests?.skip ?? []) + (args.repeated["--skip"] ?? [])
-    let timeoutArg = args.values["--timeout"]
-    let timeout = timeoutArg.flatMap(Double.init) ?? ws.config.tests?.timeout ?? 300
-    if (timeoutArg != nil && Double(timeoutArg!) == nil) || timeout <= 0 {
-        throw SimlessError("--timeout takes seconds per test, e.g. --timeout 120")
-    }
-    let t = now()
-
-    // Local package test targets that were asked for (all of them for `all`):
-    // built for iOS and hosted in the slot app.
-    var bundles: [(target: String, products: String)] = []
-    for p in Packages.testTargets(ws: ws) {
-        let wanted = p.targets.filter { target in all || filters.contains { $0 == target || $0.hasPrefix(target + "/") } }
-        if wanted.isEmpty { continue }
-        let products = try Packages.buildTests(p, targets: wanted, ws: ws)
-        bundles += wanted.map { ($0, products) }
-    }
-    // Package targets that run whole (no class or test filters or skips) share
-    // one launch of the app: the kit loads the others into the first one's.
-    // Each launch runs the app's startup, which can take most of a run.
-    let kitSource = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.kitFile)", encoding: .utf8)) ?? ""
-    let kit = kitSource.range(of: #"kitVersion = \d+"#, options: .regularExpression)
-        .flatMap { Int(kitSource[$0].split(separator: " ").last ?? "") } ?? 0
-    let whole = bundles.map(\.target).filter { target in
-        (all || filters.contains(target)) && !filters.contains { $0.hasPrefix(target + "/") }
-            && !skips.contains { $0.hasPrefix(target + "/") }
-    }
-    let canMerge = kit >= 3 && whole.count > 1
-
-    // Tests run inside the slot app, so the host stops for the duration.
-    Slots.stop(slot)
-    defer { try? Slots.launch(slot, idleMinutes: ws.idleMinutes) }
-    if !bundles.isEmpty { try Slots.injectTests(slot, ws: ws, bundles: bundles) }
-
-    // XCTest enforces the limit itself (rounded up to whole minutes), and Swift
-    // Testing honors it too. The watchdog only catches a run that has gone
-    // silent with a test still running: a test that can't be stopped.
-    let watchdog = (timeout / 60).rounded(.up) * 60 + 30
-    var output = TestOutput()
-    var timedOut: String?
-
-    /// One xcodebuild run. With `merged` targets in one launch, a crash stops it
-    /// early: xcodebuild can't tell which of their tests already ran, and would
-    /// restart the launch forever.
-    func run(merged: [String]) throws -> (result: Shell.Result, crashedMerged: Bool) {
-        var runFilters = filters
-        if let first = merged.first { runFilters = filters.filter { !merged.contains($0) } + (all ? [] : [first]) }
-        let xctestrun = try Slots.testRun(slot, ws: ws, packageTargets: bundles.map(\.target), merged: merged, timeout: timeout)
-        if merged.count > 1 { Log.step("running \(merged.count) package test targets in one launch") }
-        output = TestOutput()
-        timedOut = nil
-        var slowReported = Set<String>()
-        var lastProgress = now()
-        var crashedMerged = false
-        func onLine(_ raw: String) {
-            for line in output.consume(raw) { print("  " + line); fflush(stdout) }
-        }
-        func tick() -> Bool {
-            if !merged.isEmpty, !output.crashes.isEmpty { crashedMerged = true; return false }
-            let silent = now() - output.lastOutput
-            if let oldest = output.oldestRunning {
-                if silent > watchdog { timedOut = oldest.name; return false }
-                if silent > 30, now() - oldest.since > 30, slowReported.insert(oldest.name).inserted {
-                    Log.info("  … no output for \(Int(silent))s; \(oldest.name) has been running for \(Int(now() - oldest.since))s")
-                }
-            }
-            if now() - lastProgress >= 10 {
-                lastProgress = now()
-                Log.info("  … \(output.passed) passed, \(output.failed) failed after \(secs(t))")
-            }
-            return true
-        }
-        let r = try withLock("install") {
-            try Shell.stream(["xcodebuild", "test-without-building", "-xctestrun", xctestrun,
-                              "-derivedDataPath", ws.derivedData, "-destination", Workspace.dfiDestination]
-                             + runFilters.map { "-only-testing:\($0)" } + skips.map { "-skip-testing:\($0)" },
-                             cwd: ws.root, logPath: "\(slot.dir)/test.log", onLine: onLine, tick: tick)
-        }
-        if crashedMerged || timedOut != nil { Slots.terminateAll(slot) }   // the test host may still be stuck
-        return (r, crashedMerged)
-    }
-
-    var (r, crashedMerged) = try run(merged: canMerge ? whole : [])
-    if crashedMerged {
-        Log.info("note: a test crashed while package test targets shared one launch; running them again, one launch per target")
-        (r, _) = try run(merged: [])
-    }
-    if let timedOut {
-        Slots.terminateAll(slot)   // the test host is still stuck in the test
-        print("  TIMED OUT: no output for \(Int(watchdog))s while \(timedOut) was running; the run was stopped")
-        print("  skip it with --skip <Target/Suite/test()> (on the Mac, a test that needs a device can't finish), or raise --timeout")
-    }
-    for id in output.unmatchedSkips(skips) {
-        print("  note: --skip \(id) didn't skip it (a test with that name still ran). Swift Testing ids look like Target/Suite/test() or Target/Suite/test(_:), XCTest ids like Target/Class/testMethod")
-    }
-    // XCTest and Swift Testing each summarize every test bundle separately; count across all of them.
-    let crashed = output.crashes.count
-    print("\(output.passed) passed, \(output.failed) failed\(crashed > 0 ? ", \(crashed) crash\(crashed == 1 ? "" : "es")" : "")")
-    print("\(r.code == 0 ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/test.log)")
-    if r.code != 0 { exit(1) }
-}
+func cmdTest(_ args: Args) throws { try TestEngine.run(args) }
 
 func cmdStatus(_ args: Args) throws {
     let state = GlobalState.load()
     if state.slots.isEmpty { print("no hosts"); return }
+    var totalMB = 0.0, running = 0
     for s in state.slots.sorted(by: { $0.port < $1.port }) {
-        if let st = s.stats() {
-            print("\(s.slotID)  :\(s.port)  up  \(st["footprintMB"] ?? "?") MB  patch \(st["patch"] ?? 0)  renders \(st["renders"] ?? 0)  \(s.worktree)")
+        let role = s.kind.map { $0.hasPrefix("test") ? "unit tests" : "UI tests" } ?? "renders"
+        if let use = RuntimeHost.usage(s) {
+            totalMB += use.mb
+            running += 1
+            var line = "\(s.slotID)  :\(s.port)  up    \(role)  \(Int(use.mb)) MB  \(String(format: "%.0f", use.cpu))% CPU"
+            if s.kind == nil, let st = s.stats() { line += "  patch \(st["patch"] ?? 0)  renders \(st["renders"] ?? 0)" }
+            print(line + "  \(s.worktree)")
         } else {
-            print("\(s.slotID)  :\(s.port)  down  \(s.worktree)")
+            print("\(s.slotID)  :\(s.port)  down  \(role)  \(s.worktree)")
         }
     }
-    let probe = state.slots.first { $0.stats() != nil }
+    // Disk: slots are APFS clones of the build, so they share most of it.
+    let disk = (try? Shell.run(["/usr/bin/du", "-sk", Paths.cache]).out.split(separator: "\t").first).flatMap { Double($0) } ?? 0
+    print("\(running) host(s) running, \(Int(totalMB)) MB; simless cache \(String(format: "%.1f", disk / 1_048_576)) GB on disk (\(Paths.cache); `simless clean --all` removes it)")
+    let probe = state.slots.first { $0.kind == nil && $0.stats() != nil }
     print("live reload: \(Agent.liveStatus(probeSlot: probe).map { "off (\($0))" } ?? "on")")
 }
 
