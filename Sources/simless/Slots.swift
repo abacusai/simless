@@ -194,7 +194,10 @@ enum Slots {
     /// The xctestrun for one test run: the slot's, plus an entry per injected
     /// package test bundle (hosted like the app's own tests), the sandbox
     /// tokens that let tests read the repository, and the per-test time limit.
-    static func testRun(_ slot: SlotRecord, ws: Workspace, packageTargets: [String], timeout: Double) throws -> String {
+    /// `merged` package targets run in one launch: the first one's entry loads
+    /// the others (SimlessKit dlopens them), and they get no entries of their own.
+    static func testRun(_ slot: SlotRecord, ws: Workspace, packageTargets: [String], merged: [String] = [],
+                        timeout: Double) throws -> String {
         let src = "\(slot.dir)/slot.xctestrun"
         guard let data = FileManager.default.contents(atPath: src),
               var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
@@ -218,6 +221,11 @@ enum Slots {
         }
         func hosted(_ template: [String: Any], _ name: String) -> [String: Any] {
             var t = template
+            if name == merged.first {
+                var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
+                env["SIMLESS_TEST_BUNDLES"] = merged.dropFirst().joined(separator: "\n")
+                t["EnvironmentVariables"] = env
+            }
             t["BlueprintName"] = name
             t["ProductModuleName"] = name.replacingOccurrences(of: "-", with: "_")
             t["TestBundlePath"] = "__TESTHOST__/PlugIns/\(name).xctest"
@@ -227,11 +235,12 @@ enum Slots {
             return t
         }
         let main = ws.config.testTarget
+        let entries = packageTargets.filter { !merged.dropFirst().contains($0) }
         if var configs = plist["TestConfigurations"] as? [[String: Any]] {
             for i in configs.indices {
                 var targets = (configs[i]["TestTargets"] as? [[String: Any]] ?? []).map(configure)
                 if let template = targets.first(where: { $0["BlueprintName"] as? String == main }) ?? targets.first {
-                    targets += packageTargets.map { hosted(template, $0) }
+                    targets += entries.map { hosted(template, $0) }
                 }
                 configs[i]["TestTargets"] = targets
             }
@@ -241,7 +250,7 @@ enum Slots {
                 if let target = value as? [String: Any] { plist[key] = configure(target) }
             }
             if let template = plist[main] as? [String: Any] {
-                for name in packageTargets { plist[name] = hosted(template, name) }
+                for name in entries { plist[name] = hosted(template, name) }
             }
         }
         let dst = "\(slot.dir)/test.xctestrun"
@@ -328,7 +337,11 @@ enum Slots {
                 // Timestamp before `open`: on a busy machine it can take seconds to
                 // return, and the new instance must not look older than the launch.
                 opened = now()
-                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "\(installed)/\(wrapper)", "--args",
+                // The host's stderr names a trap (`Fatal error: ...`) when macOS
+                // writes no crash report (it limits repeated ones).
+                try? FileManager.default.removeItem(atPath: "\(slot.dir)/host.log")
+                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/host.log",
+                                    "\(installed)/\(wrapper)", "--args",
                                     "--simless-port", String(slot.port),
                                     "--simless-idle", String(idleMinutes * 60)] + extra)
             }

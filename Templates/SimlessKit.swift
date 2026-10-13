@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 2
+    static let kitVersion = 3
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -67,6 +67,7 @@ enum SimlessHost {
         if ProcessInfo.processInfo.isiOSAppOnMac {
             consumeSandboxExtensions(args)
             redirectAppGroups()
+            loadTestBundles()
             // No window may reach the screen: suppress ordering before the first
             // window exists, hide, and hide again whenever one appears.
             suppressWindowOrdering()
@@ -470,6 +471,17 @@ enum SimlessHost {
             return url as NSURL
         }
         method_setImplementation(m, imp_implementationWithBlock(block))
+    }
+
+    /// Package test bundles that `simless test` runs in this same launch. XCTest
+    /// and Swift Testing find tests in every loaded image, so one launch runs
+    /// them all instead of starting the app once per bundle.
+    private static func loadTestBundles() {
+        let names = (ProcessInfo.processInfo.environment["SIMLESS_TEST_BUNDLES"] ?? "").split(separator: "\n")
+        for name in names {
+            let path = Bundle.main.bundlePath + "/PlugIns/\(name).xctest/\(name)"
+            if dlopen(path, RTLD_NOW) == nil { print("simless: could not load \(name): \(String(cString: dlerror()))") }
+        }
     }
 
     // MARK: - Headless

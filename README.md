@@ -135,7 +135,7 @@ simless version                   version, Xcode and macOS
 
 `--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees. Layouts that branch on it switch, but the Mac draws text at the default size (see [Known differences](#known-differences-from-an-iphone)).
 
-`simless test` prints failures as they happen and a progress line every 10 s. A test that runs longer than `--timeout` (default 300 s) fails, and a test that hangs past that stops the run and says which one it was. `simless test all` runs the app's test targets and every local package's.
+`simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. A test that runs longer than `--timeout` (default 300 s) fails, and a run that goes silent past that while a test runs is stopped and names the test. `simless test all` runs the app's test targets and every local package's. Package targets that run whole share one launch of the app, so the app's startup runs once instead of once per target. If a test crashes in that shared launch, simless runs those targets again one launch each, to say which crashed. A `--skip` that didn't match anything (its test still ran) gets a note with the id formats.
 
 ### Options in `.simless.json`
 
@@ -212,13 +212,14 @@ simless version                   version, Xcode and macOS
 
 ### Known differences from an iPhone
 
-- **The idiom is `.pad` by default.** Code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and renders print a note about it. `--idiom phone` (or `"idiom": "phone"`) gives views the phone idiom. It's opt-in because SwiftUI's `Stepper` recurses until the stack overflows under it on the Mac. When that happens simless restarts the host, renders that screen with the iPad idiom and says so. On the demo app it fixed the navigation bar of a split view, but didn't close the other gaps below, so run `simless calibrate --idiom phone` to see whether it helps your screens. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
+- **The idiom is `.pad` by default.** Code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and renders print a note about it. `--idiom phone` (or `"idiom": "phone"`) gives views the phone idiom. It's opt-in because SwiftUI's `Stepper` crashes on the Mac under it, and it has been seen crashing under the iPad idiom too. When the phone idiom crashes a screen, simless restarts the host, renders that screen with the iPad idiom and says so. On the demo app it fixed the navigation bar of a split view, but didn't close the other gaps below, so run `simless calibrate --idiom phone` to see whether it helps your screens. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
 - **Text renders 2–4% wider.** Usually lines break the same way, but long or centered text can need an extra line. Treat exact line breaks and truncation as unverified until calibration shows they match.
 - **Platform rows are taller.** `List` rows came out 2 pt taller and `Form` toggle rows 6 pt taller, so content below them sits lower.
 - **System colors follow the Mac.** Controls use the macOS accent color (an "on" toggle can be gray instead of green), which an accessibility tree can't show.
 - **Some controls are exposed differently to accessibility.** In calibration, a `Menu` with a custom label was unlabeled in simless but labeled on iOS, so simless reported an issue that isn't one on a phone. Confirm accessibility flags on `Menu` and other platform-backed controls with `simless calibrate`.
 - **Text size:** `--text-size` sets the Dynamic Type size views see, so layouts that switch at accessibility sizes switch. The text itself stays at the default size: iOS apps on the Mac resolve every text style (SwiftUI, `UIFont.preferredFont`, `UIFontMetrics`) to its default size, whatever the size category. Text that fits at the default size can still truncate at larger sizes, so check those in a simulator.
-- **Pixels:** rendering is close to, but not identical with, an iPhone. Use the simulator for final pixels.
+- **Pixels and images:** rendering is close to, but not identical with, an iPhone, and the Mac loads and draws images its own way. Use the simulator for final pixels and image checks.
+- **Crashes:** a screen that crashes the render host is reported with the crash's first frames in your code or SwiftUI, and `render all` carries on with the other screens. SwiftUI itself can crash on the Mac where an iPhone doesn't (`Stepper` is the known case), so confirm such a crash in a simulator.
 
 ### Unit tests
 

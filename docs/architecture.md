@@ -54,7 +54,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode;
-- phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` recurses until the stack overflows under it. When the host dies that way, the CLI relaunches it and renders the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
+- phone canvases get compact width and, on the Mac, the device's safe-area insets; iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` crashes under it. When a render takes the host down, the CLI reads the macOS crash report for the slot (`~/Library/Logs/DiagnosticReports`), reports the exception and first frames in the app or SwiftUI, relaunches the host and carries on. Under `.phone` it first retries the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all;
 - `--text-size` sets `preferredContentSizeCategory` and `dynamicTypeSize`. Layout follows them, but text styles keep their default sizes on the Mac;
 - `--locale` relaunches the host with `-AppleLanguages` and `-AppleLocale`, since the language is process-wide (string lookup, formatters, layout direction);
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display;
@@ -78,7 +78,9 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 
 Package test targets can't run on the Mac on their own: Xcode drops test bundles without a host app for "Designed for iPad", and `swift test` builds for macOS, where iOS-only frameworks are missing. simless builds them with `xcodebuild build-for-testing -destination generic/platform=iOS` from the package directory, copies the `.xctest` (and the package's resource bundles) into the slot app's `PlugIns`, re-signs, and adds an app-hosted entry for it. The bundle carries its own static copy of the package, so the app's copy and the tests' copy don't share state.
 
-The CLI reads the output as it's written: failures print right away and progress every 10 s. A watchdog stops the run if one test is still running a minute or so past its allowance, which the allowance alone doesn't always manage, and names the test.
+Every launch of the app for a test target runs the app's startup, which for a big app can take most of a run. Package targets that run whole (no class or test filters or skips) therefore share one launch: the first one's entry carries `SIMLESS_TEST_BUNDLES`, and SimlessKit `dlopen`s the other bundles at launch. XCTest and Swift Testing find tests in every loaded image. xcodebuild doesn't know about the loaded bundles' tests, so after a crash it would restart that launch forever. On the first crash simless stops it and runs those targets again, one launch each, where xcodebuild's restart limit applies.
+
+The CLI reads the output as it's written: failures and crashes print right away, and progress every 10 s. Lines are matched after removing invisible characters (interleaved output can carry U+200B) and SF Symbols glyphs, anywhere in the line. A watchdog stops the run when it has been silent for a minute or so past the allowance while a test is still running, and names the test.
 
 ## 4. Hot reload
 

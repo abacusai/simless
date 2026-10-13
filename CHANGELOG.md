@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+## 0.2.1 (2026-10-13)
+
+Fixes from running 0.2.0's test runner on a larger app. Run `simless init` once to update SimlessKit (needed for the faster `test all`).
+
+- **No more false hangs.** Interleaved test output can put invisible U+200B characters into lines, and parameterized tests finish as "with N test cases passed". simless didn't recognize those "passed" lines, so finished tests looked hung and `--timeout` stopped the run. Lines are now matched after removing invisible characters, anywhere in the line. The watchdog also only fires when the run has gone silent, not just because a test looks unfinished.
+- **Crashes are reported.** A crashing test used to show up as "1 passed, 0 failed" and then FAILED. Now each crash prints as it happens with the trap's message and file (for example `T.swift:10: Fatal error: boom`) and the tests that were running, once even though xcodebuild retries it twice, and the summary counts crashes.
+- **`test all` is much faster for many package targets.** Package targets that run whole now share one launch of the app instead of one each, so the app's startup runs once. On the demo app, 7 targets went from 16.4 s to 9.8 s. A crash in the shared launch makes simless run those targets again, one launch each, to say which crashed.
+- **Render crashes.** A screen that crashes the render host is reported with the crash's first frames in your code or SwiftUI, read from the macOS crash report (or the trap message from the host's output when macOS skips the report), and `render all` carries on with the other screens. The phone idiom's iPad-idiom retry uses the same path, and `Stepper` is now documented as able to crash under the iPad idiom too.
+- **`--skip` check.** When a skipped test still ran, simless says the id didn't match and shows the id formats.
+
 ## 0.2.0 (2026-10-12)
 
 Fixes and features from running simless on a larger app with most of its tests in a local Swift package. Run `simless init` once to update SimlessKit; it keeps `.simless.json` and your fixtures now.

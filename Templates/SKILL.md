@@ -63,7 +63,7 @@ simless test MyKitTests                      # a local package's test target wor
 simless test all --skip MyAppTests/DeviceOnlyTests   # every test target, minus what needs a device
 ```
 
-`simless test` prints failures as they happen and a progress line every 10 s. A test that runs past `--timeout` (default 300 s per test) fails, and one that hangs stops the run with its name. Skip it with `--skip`, and tell the user it needs a device.
+`simless test` prints failures and crashes (with the trap's file and message) as they happen, and a progress line every 10 s. A test that runs past `--timeout` (default 300 s per test) fails, and one that hangs stops the run with its name. Skip it with `--skip`, and tell the user it needs a device. If simless says a `--skip` didn't match, fix the id (Swift Testing: `Target/Suite/test()`, XCTest: `Target/Class/testMethod`).
 
 Reading a render:
 
@@ -90,7 +90,8 @@ A **failure** from simless (a test failure, an issue, a wrong label or frame) is
 - **Calibrate once per app.** Run `simless calibrate` once per app, and again after large UI changes. It renders every fixture in one iOS Simulator too and lists what differs. Trust renders of the matching fixtures; check the others in a simulator.
 - **Hot reload.** Hot reload works for views in the app target and in local Swift packages, and also patches the views that embed what you edited. When it says "patch can't cover this edit", it does a full build; that's expected.
 - **Scroll content.** "below the fold: N element(s)" is information, not an issue: it counts scroll content listed in the tree.
-- **Device traits.** Phone canvases get phone size classes and safe areas, and every render prints its traits. The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch in simless. `--idiom phone` switches the trait collection's idiom. A screen with a `Stepper` crashes under it, and simless then renders that screen with the iPad idiom and says so.
+- **Device traits.** Phone canvases get phone size classes and safe areas, and every render prints its traits. The idiom stays iPad on the Mac, so code that checks `userInterfaceIdiom` takes its iPad branch in simless. `--idiom phone` switches the trait collection's idiom. A screen with a `Stepper` can crash under it, and simless then renders that screen with the iPad idiom and says so.
+- **"crashed the render host".** The crash's first frames tell you where. If they're in your view, fix it. If they're only in SwiftUI (a `Stepper` can crash SwiftUI on the Mac), check that screen in a simulator instead and say so.
 - **Mac differences.** Text renders 2–4% wider than on iOS (long or centered text can wrap differently), `List`/`Form` rows are a few points taller, system accent colors follow the Mac, and some controls (for example a `Menu` with a custom label) are exposed differently to accessibility. Confirm line breaks, truncation and accessibility flags on such controls with `simless calibrate`. `--text-size` changes layout, not the size text is drawn at.
 - **"issues: none"** only means the five automatic checks passed. Read the tree yourself.
 - **`simless test`** runs app tests from the last full build (not patches), and package tests from current sources. Tests can read repository files but not write them. App-group containers are private folders. iCloud, keychain sharing and push are missing, so tests that depend on them can differ from the simulator.

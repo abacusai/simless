@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.2.0"
+let version = "0.2.1"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -275,7 +275,7 @@ func cmdUp(_ args: Args) throws {
     let stats = slot.stats() ?? [:]
     let fixtures = stats["fixtures"] as? [String] ?? []
     if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
-        Log.info("note: \(ws.config.kitFile) is from an older simless; run `simless init` to update it (keeps .simless.json and your fixtures). Until then --locale, --text-size and --idiom are ignored and tests can't read the repository.")
+        Log.info("note: \(ws.config.kitFile) is from an older simless; run `simless init` to update it (keeps .simless.json and your fixtures). Until then, features that need the newer kit are off (see the changelog).")
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
@@ -290,7 +290,7 @@ func cmdRender(_ args: Args) throws {
 }
 
 /// SimlessKit version this simless needs for every feature (see `kitVersion` in the kit).
-let requiredKit = 2
+let requiredKit = 3
 
 func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws {
     if let size = args.values["--text-size"], !Render.textSizes.contains(size) {
@@ -318,6 +318,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
         ? [false, true].flatMap { d in ["iphone", "iphone-small", "ipad"].map { (d, $0) } }
         : [(args.flags.contains("--dark"), args.values["--device"] ?? ws.config.device)]
     var total = 0, count = 0
+    var crashed: [(fixture: String, reason: String)] = []
     for fixture in fixtures {
         for v in variants {
             var options = Render.Options(dark: v.dark, device: v.device, json: args.flags.contains("--json"))
@@ -330,23 +331,43 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
                 if isDir { try mkdirp(png) }
                 options.pngPath = isDir ? "\(png)/\(fixture)\(v.dark ? "-dark" : "")-\(v.device).png" : png
             }
-            let text: String, issues: Int
+            var text = "", issues = 0
+            var attempt = Date()
             do {
                 (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
-            } catch let error as SimlessError where options.idiom != nil && slot.stats() == nil {
-                // SwiftUI's Stepper recurses until the stack overflows under the
-                // phone idiom on the Mac, which takes the host down with it.
-                Log.info("note: \(fixture) crashed the host under the phone idiom (\(error)); it likely has a Stepper. Rendering it with the iPad idiom.")
+            } catch let error as SimlessError where slot.stats() == nil {
+                // The render took the host down. SwiftUI's Stepper does that on the
+                // Mac, most often under the phone idiom: retry with the iPad idiom.
+                let reason = CrashReport.summary(slot: slot, since: attempt) ?? error.description
                 try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
-                options.idiom = nil
-                (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
+                if options.idiom != nil {
+                    Log.info("note: \(fixture) crashed the host under the phone idiom (\(reason)). Rendering it with the iPad idiom.")
+                    options.idiom = nil
+                    attempt = Date()
+                    do {
+                        (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
+                    } catch let error as SimlessError where slot.stats() == nil {
+                        crashed.append((fixture, CrashReport.summary(slot: slot, since: attempt) ?? error.description))
+                        try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
+                    }
+                } else {
+                    crashed.append((fixture, reason))
+                }
+            }
+            if let crash = crashed.last, crash.fixture == fixture {
+                print("\(fixture) · \(v.dark ? "dark" : "light") · \(v.device)\n  ✗ crashed the render host: \(crash.reason)")
+                count += 1
+                continue
             }
             print(text)
             total += issues
             count += 1
         }
     }
-    if count > 1 { print("\(count) renders (\(fixtures.count) fixture(s) × \(variants.count) variant(s)), \(total) issue(s)") }
+    if count > 1 { print("\(count) renders (\(fixtures.count) fixture(s) × \(variants.count) variant(s)), \(total) issue(s)\(crashed.isEmpty ? "" : ", \(crashed.count) crashed the host")") }
+    if !crashed.isEmpty {
+        throw SimlessError("\(Set(crashed.map(\.fixture)).sorted().joined(separator: ", ")) crashed the render host; the crash is in the view (or SwiftUI on the Mac), so check it in a simulator")
+    }
 }
 
 func cmdReload(_ args: Args) throws {
@@ -414,79 +435,87 @@ func cmdTest(_ args: Args) throws {
         let products = try Packages.buildTests(p, targets: wanted, ws: ws)
         bundles += wanted.map { ($0, products) }
     }
+    // Package targets that run whole (no class or test filters or skips) share
+    // one launch of the app: the kit loads the others into the first one's.
+    // Each launch runs the app's startup, which can take most of a run.
+    let kitSource = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.kitFile)", encoding: .utf8)) ?? ""
+    let kit = kitSource.range(of: #"kitVersion = \d+"#, options: .regularExpression)
+        .flatMap { Int(kitSource[$0].split(separator: " ").last ?? "") } ?? 0
+    let whole = bundles.map(\.target).filter { target in
+        (all || filters.contains(target)) && !filters.contains { $0.hasPrefix(target + "/") }
+            && !skips.contains { $0.hasPrefix(target + "/") }
+    }
+    let canMerge = kit >= 3 && whole.count > 1
 
     // Tests run inside the slot app, so the host stops for the duration.
     Slots.stop(slot)
     defer { try? Slots.launch(slot, idleMinutes: ws.idleMinutes) }
     if !bundles.isEmpty { try Slots.injectTests(slot, ws: ws, bundles: bundles) }
-    let xctestrun = try Slots.testRun(slot, ws: ws, packageTargets: bundles.map(\.target), timeout: timeout)
 
-    // Swift Testing lines start with an SF Symbols glyph; drop it.
-    func clean(_ l: String) -> String {
-        String(l.drop { !$0.isASCII || $0 == " " }).trimmingCharacters(in: .whitespaces)
-    }
-    func isFailure(_ l: String) -> Bool {
-        // XCTest ("<file>:<line>: error: -[Class test] : ..."), Swift Testing
-        // ("Test x() recorded an issue at ..." / "... failed after"), and xcodebuild errors.
-        l.contains(": error: -[") || l.hasPrefix("xcodebuild: error:") || l.contains("' failed (")
-            || l.contains(") recorded an issue") || (l.contains("Test ") && l.contains(" failed after") && !l.contains("Test run with"))
-    }
-    let xctestCase = try NSRegularExpression(pattern: #"Test Case '-\[(?:[\w.]+\.)?(\w+) (\w+)\]' (started|passed|failed|skipped)"#)
-    let swiftTest = try NSRegularExpression(pattern: #"^Test (.+?) (started|passed after|failed after|skipped)"#)
-    var running: [String: Double] = [:]      // test -> start
-    var slowReported = Set<String>()
-    var passed = 0, failed = 0, lastProgress = now()
-    var timedOut: String?
-    // XCTest enforces the limit itself (rounded up to whole minutes) and moves
-    // on; the watchdog catches what it can't, like a hung Swift Testing test.
+    // XCTest enforces the limit itself (rounded up to whole minutes), and Swift
+    // Testing honors it too. The watchdog only catches a run that has gone
+    // silent with a test still running: a test that can't be stopped.
     let watchdog = (timeout / 60).rounded(.up) * 60 + 30
+    var output = TestOutput()
+    var timedOut: String?
 
-    func onLine(_ raw: String) {
-        let line = clean(raw)
-        let range = NSRange(line.startIndex..., in: line)
-        var name: String?, event: String?
-        if let m = xctestCase.firstMatch(in: line, range: range), let c = Range(m.range(at: 1), in: line),
-           let f = Range(m.range(at: 2), in: line), let e = Range(m.range(at: 3), in: line) {
-            (name, event) = ("\(line[c])/\(line[f])", String(line[e]))
-        } else if !line.hasPrefix("Test run"), !line.hasPrefix("Test Suite"), !line.hasPrefix("Test Case"),
-                  let m = swiftTest.firstMatch(in: line, range: range),
-                  let n = Range(m.range(at: 1), in: line), let e = Range(m.range(at: 2), in: line) {
-            (name, event) = (String(line[n]), String(line[e]))
+    /// One xcodebuild run. With `merged` targets in one launch, a crash stops it
+    /// early: xcodebuild can't tell which of their tests already ran, and would
+    /// restart the launch forever.
+    func run(merged: [String]) throws -> (result: Shell.Result, crashedMerged: Bool) {
+        var runFilters = filters
+        if let first = merged.first { runFilters = filters.filter { !merged.contains($0) } + (all ? [] : [first]) }
+        let xctestrun = try Slots.testRun(slot, ws: ws, packageTargets: bundles.map(\.target), merged: merged, timeout: timeout)
+        if merged.count > 1 { Log.step("running \(merged.count) package test targets in one launch") }
+        output = TestOutput()
+        timedOut = nil
+        var slowReported = Set<String>()
+        var lastProgress = now()
+        var crashedMerged = false
+        func onLine(_ raw: String) {
+            for line in output.consume(raw) { print("  " + line); fflush(stdout) }
         }
-        if let name, let event {
-            if event == "started" { running[name] = now() } else { running.removeValue(forKey: name) }
-            if event.hasPrefix("passed") { passed += 1 }
-            if event.hasPrefix("failed") { failed += 1 }
+        func tick() -> Bool {
+            if !merged.isEmpty, !output.crashes.isEmpty { crashedMerged = true; return false }
+            let silent = now() - output.lastOutput
+            if let oldest = output.oldestRunning {
+                if silent > watchdog { timedOut = oldest.name; return false }
+                if silent > 30, now() - oldest.since > 30, slowReported.insert(oldest.name).inserted {
+                    Log.info("  … no output for \(Int(silent))s; \(oldest.name) has been running for \(Int(now() - oldest.since))s")
+                }
+            }
+            if now() - lastProgress >= 10 {
+                lastProgress = now()
+                Log.info("  … \(output.passed) passed, \(output.failed) failed after \(secs(t))")
+            }
+            return true
         }
-        if isFailure(line) { print("  " + line); fflush(stdout) }
-    }
-    func tick() -> Bool {
-        if let (name, started) = running.min(by: { $0.value < $1.value }) {
-            let elapsed = now() - started
-            if elapsed > watchdog { timedOut = name; return false }
-            if elapsed > 30, slowReported.insert(name).inserted { Log.info("  … \(name) has been running for \(Int(elapsed))s") }
+        let r = try withLock("install") {
+            try Shell.stream(["xcodebuild", "test-without-building", "-xctestrun", xctestrun,
+                              "-derivedDataPath", ws.derivedData, "-destination", Workspace.dfiDestination]
+                             + runFilters.map { "-only-testing:\($0)" } + skips.map { "-skip-testing:\($0)" },
+                             cwd: ws.root, logPath: "\(slot.dir)/test.log", onLine: onLine, tick: tick)
         }
-        if now() - lastProgress >= 10 {
-            lastProgress = now()
-            Log.info("  … \(passed) passed, \(failed) failed after \(secs(t))")
-        }
-        return true
+        if crashedMerged || timedOut != nil { Slots.terminateAll(slot) }   // the test host may still be stuck
+        return (r, crashedMerged)
     }
 
-    let r = try withLock("install") {
-        try Shell.stream(["xcodebuild", "test-without-building", "-xctestrun", xctestrun,
-                          "-derivedDataPath", ws.derivedData, "-destination", Workspace.dfiDestination]
-                         + filters.map { "-only-testing:\($0)" } + skips.map { "-skip-testing:\($0)" },
-                         cwd: ws.root, logPath: "\(slot.dir)/test.log", onLine: onLine, tick: tick)
+    var (r, crashedMerged) = try run(merged: canMerge ? whole : [])
+    if crashedMerged {
+        Log.info("note: a test crashed while package test targets shared one launch; running them again, one launch per target")
+        (r, _) = try run(merged: [])
     }
     if let timedOut {
         Slots.terminateAll(slot)   // the test host is still stuck in the test
-        print("  TIMED OUT: \(timedOut) ran for over \(Int(watchdog))s; the run was stopped")
-        print("  skip it with --skip <Target/Class/test> (on the Mac, a test that needs a device can't finish), or raise --timeout")
+        print("  TIMED OUT: no output for \(Int(watchdog))s while \(timedOut) was running; the run was stopped")
+        print("  skip it with --skip <Target/Suite/test()> (on the Mac, a test that needs a device can't finish), or raise --timeout")
+    }
+    for id in output.unmatchedSkips(skips) {
+        print("  note: --skip \(id) didn't skip it (a test with that name still ran). Swift Testing ids look like Target/Suite/test() or Target/Suite/test(_:), XCTest ids like Target/Class/testMethod")
     }
     // XCTest and Swift Testing each summarize every test bundle separately; count across all of them.
-    let skipped = r.out.components(separatedBy: "\n").filter { $0.contains("Test Case") && $0.contains("' skipped") || clean($0).hasPrefix("Test ") && $0.contains(" skipped") }.count
-    print("\(passed) passed, \(failed) failed\(skipped > 0 ? ", \(skipped) skipped" : "")")
+    let crashed = output.crashes.count
+    print("\(output.passed) passed, \(output.failed) failed\(crashed > 0 ? ", \(crashed) crash\(crashed == 1 ? "" : "es")" : "")")
     print("\(r.code == 0 ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/test.log)")
     if r.code != 0 { exit(1) }
 }

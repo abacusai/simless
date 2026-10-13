@@ -179,3 +179,51 @@ enum Render {
         return issues
     }
 }
+
+/// What macOS's crash report says about a host that died.
+enum CrashReport {
+    /// The exception and the first frames in the app or SwiftUI, from the
+    /// newest report for `slot` written after `since`. Reports appear a few
+    /// seconds after the crash.
+    static func summary(slot: SlotRecord, since: Date, wait: Double = 4) -> String? {
+        let dir = "\(Paths.home)/Library/Logs/DiagnosticReports"
+        let deadline = now() + wait
+        repeat {
+            let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".ips") }
+                .map { "\(dir)/\($0)" }
+                .filter { (try? FileManager.default.attributesOfItem(atPath: $0)[.creationDate] as? Date).map { $0 >= since } ?? false }
+            for path in files {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8), let nl = text.firstIndex(of: "\n"),
+                      let header = try? JSONSerialization.jsonObject(with: Data(text[..<nl].utf8)) as? [String: Any],
+                      header["bundleID"] as? String == slot.slotID,
+                      let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: nl)...].utf8)) as? [String: Any]
+                else { continue }
+                return describe(body) + " (report: \(path))"
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        } while now() < deadline
+        let log = (try? String(contentsOfFile: "\(slot.dir)/host.log", encoding: .utf8)) ?? ""
+        if let trap = log.split(separator: "\n").last(where: { $0.contains("Fatal error:") || $0.contains("Assertion failed:") || $0.contains("Precondition failed:") }) {
+            return TestOutput.normalize(String(trap)) + " (no crash report from macOS this time)"
+        }
+        return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run the screen in a simulator to see the crash"
+    }
+
+    private static func describe(_ body: [String: Any]) -> String {
+        let exception = body["exception"] as? [String: Any] ?? [:]
+        var what = exception["type"] as? String ?? "crash"
+        if let message = exception["message"] as? String, message.contains("stack guard") { what += ", stack overflow" }
+        let images = (body["usedImages"] as? [[String: Any]] ?? []).map { $0["name"] as? String ?? "?" }
+        let thread = (body["threads"] as? [[String: Any]] ?? []).first { $0["triggered"] as? Bool == true } ?? [:]
+        let frames = (thread["frames"] as? [[String: Any]] ?? []).compactMap { f -> String? in
+            guard let i = f["imageIndex"] as? Int, i < images.count, let symbol = f["symbol"] as? String else { return nil }
+            let image = images[i]
+            let interesting = image.hasPrefix("SwiftUI") || image.hasPrefix("UIKit") || image.hasSuffix(".debug.dylib")
+                || image == (body["procName"] as? String)
+            return interesting ? "\(image): \(symbol.count > 90 ? String(symbol.prefix(90)) + "…" : symbol)" : nil
+        }
+        var seen = Set<String>()
+        let top = frames.filter { seen.insert($0).inserted }.prefix(3)
+        return top.isEmpty ? what : "\(what) in " + top.joined(separator: " ← ")
+    }
+}
