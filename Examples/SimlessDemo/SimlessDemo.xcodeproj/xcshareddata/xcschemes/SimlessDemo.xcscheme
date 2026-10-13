@@ -38,6 +38,16 @@
                ReferencedContainer = "container:SimlessDemo.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "80A5C6E1F3B7D8293A4B5C61"
+               BuildableName = "SimlessDemoUITests.xctest"
+               BlueprintName = "SimlessDemoUITests"
+               ReferencedContainer = "container:SimlessDemo.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

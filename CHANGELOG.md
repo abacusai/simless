@@ -3,7 +3,45 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
-## Unreleased
+## 0.4.0 (2026-10-13)
+
+Fixes from running 0.3.0 on the same production app, plus a second app to keep it generic. Every fix has a small SwiftUI repro in the demo app's UI tests and was checked on both apps.
+
+On the first app (iPhone 17 simulator as the baseline): all 104 UI tests that don't need a simulator pass, in 7.0 min against 19.2 min in the simulator, with no clones. A fresh worktree (with the shared compilation cache from earlier builds) goes from `simless up` to a finished `test all` in 7.6 min against 8.2 min for the simulator's build and test run, with the same results (2,189 passed, 17 skipped, 4 simulator-only). On the second app, 79 of 104 UI tests pass. Most of the rest need a simulator (recording, StoreKit products, the save panel, the Home Screen) or count on app code behind `#if targetEnvironment(simulator)`, and simless now says so.
+
+- **Three SwiftUI patterns now behave in UI tests the way they do on an iPhone.** The demo app has a small lab screen for each and UI tests that check them (`Examples/SimlessDemo/SimlessDemoUITests`).
+  - Combined elements (`.accessibilityElement(children: .combine)` or `.ignore`) keep their children's identifiers findable. simless reads `automationElements`, which is what XCUITest sees, and the audit still only looks at what VoiceOver reads.
+  - A Button inside a view with its own `onTapGesture` gets the tap, also when the Button is merged into one element and inside a ScrollView.
+  - Swipes run at a finger's pace and ease off before the finger lifts, and waiting for the app to settle includes a scroll view that's still gliding. Two slow swipes on a scrolling chart now move it about a month, a scrub after them selects a day instead of just stopping the glide, and swiping up until a row is hittable reaches every row of a long list. Before, one swipe could carry a list about 1,000 pt and jump right past the row.
+- **Steppers.** Increment and Decrement are found by those names and tapping them changes the value.
+- **More of SwiftUI behaves like on an iPhone in UI tests**, each with a lab screen and a test in the demo app:
+  - A submenu in a context menu or a `Menu` is a row that opens its own items, instead of all items showing at once.
+  - Choosing an option of a menu-style `Picker` works. The tap used to land on the Picker's hidden copy of the option, so the menu closed and nothing changed.
+  - A long press in a text field shows the edit menu (Select, Select All, Paste) as `menuItems`.
+  - A Button whose label holds a container (`.accessibilityElement(children: .contain)`) shows that container's elements inside it, so `buttons.containing(...)` finds the row by its text.
+  - A confirmation dialog is an action sheet, and its buttons keep the identifiers the app gave them.
+  - `XCTNSPredicateExpectation` on a query's `count` works (it never completed before).
+- **No more permission popups.** A test host is a real Mac app, so asking for calendar, notifications, microphone, camera, speech, photos, contacts, location or tracking access put macOS's own dialog on your screen, and so did review requests. The runtime now answers those requests itself: access is denied, and review requests do nothing. A feature that needs the access (recording, say) needs a simulator.
+- **UI test sources are compiled as iOS code.** `#if os(macOS)`, `canImport(AppKit)` and `targetEnvironment(simulator)` in UI tests now take the iPhone simulator's branch, so a macOS-only test doesn't run and fail.
+- **A failing run says when the app has simulator-only code.** simless builds the app for a device, so `#if targetEnvironment(simulator)` in the app takes its device branch. When a run fails and the app has such checks, simless says where, so a test that counts on the simulator branch can be marked.
+- **Skipped tests keep their reason**, and an XCTest skip no longer crashes the host.
+- **Tests see the app's real bundle id.** `Bundle.main.bundleIdentifier`, a watch app's companion id in its Info.plist and `Bundle(identifier:)` all use the original id in test and UI hosts, while asset catalogs still find the app's colors and images.
+- **UI tests get 600 s each by default** too, like unit tests. A heavy audit at the largest text size can take over 4 min in the simulator.
+- **`simless down` stops everything**: the render host and every test and UI host of the worktree (or all of them with `--all`), including standby hosts.
+- **Results for a merge script.** `test-results.json` and `ui-test-results.json` list every test with its status (passed, failed, crashed, skipped, simulator-only, load), its time and its reason or failure. Simulator-only marks that name a class or a target are listed test by test.
+- **The simulator-only command fits the project.** Each target gets the shared scheme that tests it and a simulator of its platform (an Apple Watch for a watch UI test target), on the newest installed runtime or `calibrate.runtime`, with the OS in the destination.
+- **Crashes without a crash report.** macOS stops writing reports after a few crashes of the same app. simless's runtime now prints the crashed thread's top frames and the test's own frames to the host's log, so the crash is still described, pinned on the right test, and SwiftUI's Stepper crash still gets its note.
+- **Faster first run.** `simless up` builds local packages' tests alongside the app and prepares the test hosts, so the first `simless test all` only runs tests (`--no-tests` skips that). A run reuses a package build that covers its targets, so a narrower run after `test all` doesn't build again.
+- **Less disk.** Package tests build without debug info and no index store (failures still name their file and line, crashes their functions), the shared compilation cache is cleared above 8 GB instead of 12, and `simless status` breaks the cache down by worktree with what `simless clean` would free.
+- **simless cleans up after itself more thoroughly.**
+  - Removing a slot empties the app's data container first. macOS protects containers from other processes, so the app is launched once to delete its own files.
+  - A unit test run starts with an empty `tmp`.
+  - Crash reports of simless hosts go after a day.
+  - Worktrees that haven't used simless for two weeks lose their slots and builds.
+  - Standby test hosts exit after 10 idle minutes, since they run the app's idle work (animations, timers) for nothing.
+- **A full disk is reported as a full disk**, instead of "no error lines found". A compilation cache it left damaged is cleared, and the build runs again.
+- **UI tests use up to 4 hosts** (one per two cores), and failures rerun to rule out load on all hosts side by side.
+- **Help and skill.** `simless --help` lists `test ui`, `--simulator-only`, `--hosts`, `--jobs` and the 600 s timeout. `simless skill install` links the skill instead of copying it, so it stays current, and `simless up` says when an installed copy is out of date.
 
 ## 0.3.0 (2026-10-13)
 

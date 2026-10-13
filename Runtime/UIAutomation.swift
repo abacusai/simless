@@ -54,11 +54,29 @@ enum UIAutomation {
             if let b = Snapshotter.object(req) as? DatePickers.Button { DatePickers.tap(b); return ["ok": true, "how": "datePicker"] }
             if DatePickers.tapOutside(at: p) { return ["ok": true, "how": "closeDatePicker"] }
             // A long press opens the context menu under the finger.
+            if duration >= 0.4, Menus.openEditMenu(at: p) { return ["ok": true, "how": "editMenu"] }
             if duration >= 0.4, Menus.openContextMenu(at: p) { return ["ok": true, "how": "contextMenu"] }
             // A button that shows a menu when tapped.
             if count == 1, duration < 0.3, let target = Snapshotter.object(req) ?? Snapshotter.element(at: p),
                Menus.openButtonMenu(target, at: p) {
                 return ["ok": true, "how": "buttonMenu"]
+            }
+            // A stepper's Increment and Decrement: the Mac's stepper doesn't take
+            // touches, so the tap does what VoiceOver's increment would.
+            if count == 1, let part = Snapshotter.object(req),
+               let stepper = Snapshotter.parentObject(req, type: .stepper) ?? Input.stepper(containing: part, at: p) {
+                let id = (part.value(forKey: "accessibilityIdentifier") as? String ?? "") + (part.accessibilityLabel ?? "")
+                let increment = id.hasSuffix("Increment") || (!id.hasSuffix("Decrement") && p.x > stepper.accessibilityFrame.midX)
+                let before = stepper.accessibilityValue
+                if increment { stepper.accessibilityIncrement() } else { stepper.accessibilityDecrement() }
+                Input.spin(0.03)
+                // A UIStepper that ignores accessibility: change its value as a tap would.
+                if stepper.accessibilityValue == before, let control = Input.stepperControl(stepper) {
+                    control.value = increment ? min(control.maximumValue, control.value + control.stepValue) : max(control.minimumValue, control.value - control.stepValue)
+                    control.sendActions(for: .valueChanged)
+                    Input.spin(0.03)
+                }
+                return ["ok": true, "how": increment ? "increment" : "decrement"]
             }
             // The keyboard toolbar lives in simless's own window: its buttons are
             // activated directly.
@@ -76,6 +94,10 @@ enum UIAutomation {
             if field == nil, count == 1, duration < 0.3, let target = Snapshotter.object(req) ?? Snapshotter.element(at: p),
                Input.activates(target) {
                 if target.accessibilityActivate() { return ["ok": true, "how": "activate"] }
+                // An element that merges its children (children: .ignore or .combine)
+                // can lose a Button's action; the Button is still one of the
+                // elements XCUITest sees under it.
+                if Snapshotter.activateAutomationChild(of: target) { return ["ok": true, "how": "activateChild"] }
                 // No action of its own: a tap gesture on a SwiftUI container
                 // around it (onTapGesture) is that container's activation.
                 var o = target.value(forKey: "accessibilityContainer") as? NSObject
@@ -348,6 +370,17 @@ enum Snapshotter {
              cell = 75, stepper = 79
     }
 
+    /// Each ref's parent node index and type, from the last snapshot.
+    private static var parents: [Int: Int] = [:]
+    private static var types: [Int: Int] = [:]
+
+    /// The object of the element containing `req`'s element, when it has `type`.
+    static func parentObject(_ req: [String: Any], type: T) -> NSObject? {
+        guard object(req) != nil, let ref = req["ref"] as? Int, let p = parents[ref], p >= 0,
+              let pref = refs.indices.contains(p) ? p : nil, types[pref] == type.rawValue else { return nil }
+        return refs[pref]
+    }
+
     static func take() -> ([[String: Any]], Int) {
         Keyboard.refreshAccessory()
         generation += 1
@@ -361,6 +394,9 @@ enum Snapshotter {
             return CGRect(x: f.minX - origin.x, y: f.minY - origin.y, width: f.width, height: f.height)
         }
 
+        // Inside an element's automationElements: XCUITest sees these, VoiceOver
+        // (and so the accessibility audit) doesn't.
+        var automationDepth = 0
         func add(_ obj: NSObject, type: T, parent: Int, frame: CGRect? = nil) -> Int {
             let f = frame ?? frameOf(obj)
             let traits = obj.accessibilityTraits
@@ -385,6 +421,7 @@ enum Snapshotter {
             n["enabled"] = enabled
             n["selected"] = traits.contains(.selected) || ((obj as? UIControl)?.isSelected ?? false)
             n["hittable"] = Hit.isHittable(obj, frame: f, window: windowBounds)
+            if automationDepth > 0 { n["automationOnly"] = true }
             nodes.append(n)
             refs.append(obj)
             return nodes.count - 1
@@ -416,6 +453,11 @@ enum Snapshotter {
                 let me = add(obj, type: elementType(obj), parent: parent)
                 // XCUITest shows the parts of some controls (a stepper's buttons, a picker's wheels).
                 for c in controlParts(obj) { visit(c, parent: me, depth: depth + 1) }
+                // What XCUITest sees below an element that VoiceOver reads as one
+                // (a combined element's children, with their identifiers).
+                automationDepth += 1
+                for c in automationChildren(obj) { visit(c, parent: me, depth: depth + 1) }
+                automationDepth -= 1
                 return
             }
             var me = parent
@@ -431,6 +473,8 @@ enum Snapshotter {
                     for i in 0..<count { if let e = obj.accessibilityElement(at: i) as? NSObject { children.append(e) } }
                 }
             }
+            // Under an element, a container's parts are what XCUITest sees there.
+            if children.isEmpty, automationDepth > 0 { children = automationChildren(obj) }
             if children.isEmpty, let v = obj as? UIView { children = v.subviews }
             for c in children { visit(c, parent: me, depth: depth + 1) }
         }
@@ -467,6 +511,14 @@ enum Snapshotter {
             if let p = m["parent"] as? Int, p >= 0 { m["parent"] = base + p }
             nodes.append(m)
         }
+        // The Mac names a stepper's buttons "<stepper label>, Increment"; an
+        // iPhone names them "Increment" and "Decrement".
+        for i in nodes.indices where nodes[i]["type"] as? Int == T.button.rawValue {
+            guard let p = nodes[i]["parent"] as? Int, p >= 0, p < nodes.count, nodes[p]["type"] as? Int == T.stepper.rawValue,
+                  let stepper = nodes[p]["label"] as? String, !stepper.isEmpty,
+                  let l = nodes[i]["label"] as? String, l.hasPrefix(stepper + ", ") else { continue }
+            nodes[i]["label"] = String(l.dropFirst(stepper.count + 2))
+        }
         if let kb = Keyboard.node() {
             nodes.append(kb.merging(["ref": refs.count, "parent": -1]) { $1 })
             refs.append(NSObject())
@@ -480,7 +532,28 @@ enum Snapshotter {
                 }
             }
         }
+        parents = Dictionary(nodes.compactMap { n in (n["ref"] as? Int).map { ($0, n["parent"] as? Int ?? -1) } }, uniquingKeysWith: { a, _ in a })
+        types = Dictionary(nodes.compactMap { n in (n["ref"] as? Int).map { ($0, n["type"] as? Int ?? 0) } }, uniquingKeysWith: { a, _ in a })
         return (nodes, generation)
+    }
+
+    /// Activates the first element under `obj` (depth first, through
+    /// automationElements) that takes an activation.
+    static func activateAutomationChild(of obj: NSObject, depth: Int = 0) -> Bool {
+        guard depth < 6 else { return false }
+        for c in automationChildren(obj) {
+            if c.accessibilityTraits.contains(.button) || c.accessibilityTraits.contains(.link), c.accessibilityActivate() { return true }
+            if activateAutomationChild(of: c, depth: depth + 1) { return true }
+        }
+        return false
+    }
+
+    /// UIAccessibilityContainer's `automationElements`, where it differs from
+    /// what VoiceOver gets.
+    static func automationChildren(_ obj: NSObject) -> [NSObject] {
+        guard obj.responds(to: NSSelectorFromString("automationElements")),
+              let list = obj.value(forKey: "automationElements") as? [NSObject] else { return [] }
+        return list.filter { $0 !== obj }
     }
 
     private static func controlParts(_ obj: NSObject) -> [NSObject] {
@@ -580,14 +653,22 @@ enum Idle {
     @discardableResult
     static func wait(timeout: Double) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+        // A flung list glides for up to ~3 s, and where it stops decides what
+        // the next query sees, so a glide gets longer than other animations.
+        let glideDeadline = deadline.addingTimeInterval(4)
         var quiet = 0
-        while Date() < deadline {
+        while Date() < deadline || (gliding && Date() < glideDeadline) {
             RunLoop.main.run(until: Date().addingTimeInterval(0.016))
             if animating() { quiet = 0 } else { quiet += 1 }
             if quiet >= 3 { return true }
         }
         return false
     }
+
+    /// Whether the last check found a scroll view still gliding.
+    private static var gliding = false
+    /// Where each gliding scroll view was at the last check.
+    private static var glideOffsets: [ObjectIdentifier: CGPoint] = [:]
 
     /// When each running animation was first seen, so one that outlives its
     /// own duration (paused, or stuck because nothing renders) stops counting.
@@ -636,6 +717,31 @@ enum Idle {
         }
         for w in UIAutomation.appWindows { root = w.layer; visit(w.layer) }
         firstSeen = current
+        gliding = false
+        // A scroll view still gliding after a swipe: a touch now would only stop it.
+        // Checked even while layers animate (its scroll indicator fades in).
+        do {
+            func glides(_ v: UIView, _ depth: Int) -> Bool {
+                if let sv = v as? UIScrollView, sv.isDecelerating {
+                    // The last points of a glide crawl for a second or more: a
+                    // list moving under ~15 pt/s has under 8 pt left to go.
+                    let id = ObjectIdentifier(sv), offset = sv.contentOffset
+                    defer { glideOffsets[id] = offset }
+                    if let last = glideOffsets[id], hypot(offset.x - last.x, offset.y - last.y) < 0.25 {
+                        // Stopped where it is, the way a finger landing stops it
+                        // (a touch on a scroll view that's still decelerating
+                        // would only stop it, and do nothing else).
+                        let stop = NSSelectorFromString("_stopScrollingAndZoomingAnimations")
+                        if sv.responds(to: stop) { sv.perform(stop) }
+                        if !sv.isDecelerating { return false }
+                    }
+                    lastBusy = "\(type(of: sv)) decelerating"
+                    return true
+                }
+                return depth < 60 && v.subviews.contains { glides($0, depth + 1) }
+            }
+            if UIAutomation.appWindows.contains(where: { glides($0, 0) }) { Idle.gliding = true; return true }
+        }
         // A presentation or dismissal in flight: the next one would be dropped.
         if !busy {
             for w in UIAutomation.appWindows {
@@ -679,6 +785,31 @@ enum Input {
         return nil
     }
 
+    /// The stepper an element is part of (its Increment or Decrement), if any.
+    static func stepper(containing part: NSObject, at point: CGPoint) -> NSObject? {
+        var o: NSObject? = part.value(forKey: "accessibilityContainer") as? NSObject
+        if let v = part as? UIView { o = v.superview }
+        var hops = 0
+        while let cur = o, hops < 4 {
+            if cur is UIStepper || cur.accessibilityTraits.contains(.adjustable) && NSStringFromClass(type(of: cur)).contains("Stepper") { return cur }
+            o = (cur as? UIView)?.superview ?? cur.value(forKey: "accessibilityContainer") as? NSObject
+            hops += 1
+        }
+        return nil
+    }
+
+    /// The UIStepper behind a stepper element.
+    static func stepperControl(_ obj: NSObject) -> UIStepper? {
+        if let s = obj as? UIStepper { return s }
+        guard let v = Snapshotter.view(of: obj) else { return nil }
+        func find(_ v: UIView) -> UIStepper? {
+            if let s = v as? UIStepper { return s }
+            for c in v.subviews { if let s = find(c) { return s } }
+            return nil
+        }
+        return find(v)
+    }
+
     /// The editable text view or field under a point, if any.
     static func textInput(at point: CGPoint) -> UIView? {
         guard let w = topWindow(at: point) ?? UIAutomation.keyWindow else { return nil }
@@ -706,32 +837,47 @@ enum Input {
         return UIAutomation.appWindows.reversed().first { w in w.hitTest(w.convert(point, from: nil), with: nil) != nil && w.windowLevel.rawValue >= 0 }
     }
 
-    static func drag(from a: CGPoint, to b: CGPoint, press: Double, velocity: Double, hold: Double) -> String? {
+    /// A finger moving from `a` to `b` at `velocity` points a second, one move
+    /// a frame (UIKit measures part of a swipe's speed by the clock). With a
+    /// `release` speed the last stretch slows down to it, like a finger easing
+    /// off before it lifts: a scroll view glides on from the speed at lift-off.
+    static func drag(from a: CGPoint, to b: CGPoint, press: Double, velocity: Double, hold: Double, release: Double? = nil) -> String? {
         guard let window = topWindow(at: a) ?? UIAutomation.keyWindow else { return "no window" }
-        let distance = hypot(b.x - a.x, b.y - a.y)
-        let duration = max(0.05, Double(distance) / max(velocity, 1))
-        // A plain drag is replayed fast: its touches carry the pace of a real
-        // finger (scroll physics read the timestamps), the app gets a moment per
-        // step. A press or a hold needs real time (long-press timers).
-        let fast = press < 0.1 && hold == 0
-        let steps = fast ? min(20, max(2, Int(duration / 0.016))) : max(2, Int(duration / 0.016))
-        let step = fast ? duration / Double(steps) : 0.016
-        // Stamped as if the finger started `duration` ago, so the gesture ends
-        // now and later events don't run ahead of the clock.
-        var clock = fast ? max(simless_touch_after(), ProcessInfo.processInfo.systemUptime - duration - step) : simless_touch_clock()
-        guard simless_touch_at(window, a, 0, clock) else { return "touch injection isn't available" }
-        if fast { spin(0.004); clock += step } else { spin(max(press, 0.016)); clock = simless_touch_clock() }
-        for i in 1...steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            _ = simless_touch_at(window, CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t), 1, clock)
-            if fast { spin(0.003); clock += step } else { spin(0.016); clock = simless_touch_clock() }
+        let length = Double(hypot(b.x - a.x, b.y - a.y))
+        let speed = max(velocity, 1)
+        let slow = min(max(release ?? speed, 1), speed)
+        let eased = slow < speed ? length * 0.2 : 0
+        let fastPart = (length - eased) / speed
+        // Where the finger is `t` seconds in.
+        func travelled(_ t: Double) -> Double {
+            t <= fastPart ? t * speed : min(length, length - eased + (t - fastPart) * slow)
+        }
+        let total = fastPart + eased / slow
+        guard simless_touch(window, a, 0) else { return "touch injection isn't available" }
+        spin(max(press, 0.016))
+        func move(_ t: Double) {
+            let f = CGFloat(length > 0 ? travelled(min(t, total)) / length : 1)
+            _ = simless_touch(window, CGPoint(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f), 1)
+            spin(0.016)
+        }
+        if release != nil {
+            // A swipe goes by the clock: on a busy app UIKit gets one move per
+            // frame it draws, like from a real finger, and the speed holds.
+            let began = ProcessInfo.processInfo.systemUptime - 0.016
+            var t = 0.0
+            repeat { t = ProcessInfo.processInfo.systemUptime - began; move(t) } while t < total
+        } else {
+            // A drag is a fixed list of small moves, each handled before the
+            // next. By the clock they came out fewer and larger on a busy app,
+            // and a press-and-drag on a chart in a scroll view stopped selecting.
+            let steps = max(2, Int(total / 0.016))
+            for i in 1...steps { move(total * Double(i) / Double(steps)) }
         }
         if hold > 0 {
             _ = simless_touch(window, b, 2)
             spin(hold)
-            clock = simless_touch_clock()
         }
-        _ = simless_touch_at(window, b, 3, clock)
+        _ = simless_touch(window, b, 3)
         spin(0.03)
         return nil
     }
@@ -747,7 +893,10 @@ enum Input {
         let end = CGPoint(x: start.x + CGFloat(dx) * length, y: start.y + CGFloat(dy) * length)
         // A swipe down at the top of a sheet dismisses it, like on an iPhone.
         if dy > 0, ShareSheet.swipeDown(at: start) || Presentations.dismissSheet(at: start) { return nil }
-        return drag(from: CGPoint(x: start.x - CGFloat(dx) * 4, y: start.y - CGFloat(dy) * 4), to: end, press: 0, velocity: velocity, hold: 0)
+        // A finger eases off before it lifts, so the glide after a swipe
+        // doesn't carry a list more than about a screen.
+        return drag(from: CGPoint(x: start.x - CGFloat(dx) * 4, y: start.y - CGFloat(dy) * 4), to: end, press: 0,
+                    velocity: velocity, hold: 0, release: velocity * 0.4)
     }
 }
 

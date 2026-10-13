@@ -116,7 +116,8 @@ Then grant **SimlessAgent** Full Disk Access (System Settings → Privacy & Secu
 
 ```
 simless init [--no-hook]          set up a repo
-simless up                        build, install this worktree's host, start it
+simless up [--no-tests]           build, install this worktree's host, start it; also builds local packages'
+                                  tests and prepares the test hosts, so the first `simless test` only runs tests
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
@@ -130,7 +131,7 @@ simless test --simulator-only     the tests marked as needing a simulator, and t
 simless calibrate [fixture]       compare renders with an iOS Simulator (boots one; run once per app)
       [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone]
 simless status                    hosts, slots, live-reload availability
-simless down [--all]              stop hosts (they relaunch in ~1 s on next use)
+simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every host)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
 simless agent install             install SimlessAgent (live reload)
 simless skill install             install the Claude Code skill
@@ -141,7 +142,7 @@ simless version                   version, Xcode and macOS
 
 `--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone.
 
-`simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. `simless test all` runs the app's test targets and every local package's, in warm hosts with tests in parallel. A big run is spread over several hosts by how long each target took last time (`--hosts`), because main-actor tests run one at a time per process. A test that crashes the host or runs longer than `--timeout` (default 600 s, like Xcode) is reported with its name and the crash's frames, and a fresh host runs only what didn't finish. A test that ran out of time only because the run was busy is run again alone, and reported as load if it passes. A `--skip` that didn't match anything gets a note with the id formats. Results go to `test-results.json` in the worktree's work folder (`simless status` shows where).
+`simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. `simless test all` runs the app's test targets and every local package's, in warm hosts with tests in parallel. A big run is spread over several hosts by how long each target took last time (`--hosts`), because main-actor tests run one at a time per process. A test that crashes the host or runs longer than `--timeout` (default 600 s, like Xcode) is reported with its name and the crash's frames, and a fresh host runs only what didn't finish. A few failures (up to 30) are run again alone, and reported as load if they pass. A `--skip` that didn't match anything gets a note with the id formats. Results go to `test-results.json` (and `ui-test-results.json`) in the worktree's work folder: every test with its status (passed, failed, crashed, skipped, simulator-only or load), its time and its reason or failure, so a script can merge them without parsing text.
 
 `simless test ui` runs the UI test targets' XCUITest code as it is: `XCUIApplication` with launch arguments and environment, queries, `tap`, `typeText`, swipes, coordinates, alerts, `performAccessibilityAudit`, screenshots. It spreads the tests over several hidden hosts (`--jobs`, default up to 4), and for every failure saves a screenshot and the element tree. See [UI tests](#ui-tests) for what it emulates and what still needs a simulator.
 
@@ -165,7 +166,7 @@ simless version                   version, Xcode and macOS
 - `checks.ignore`: issues containing any of these strings aren't reported. Renders say how many were ignored.
 - `tests.timeout` and `tests.skip`: defaults for `--timeout` and `--skip`.
 - `tests.simulatorOnly`: tests that need a simulator, with the reason. They're skipped and counted apart, and `simless test --simulator-only` lists them. A test skipped with a reason that starts with "simulator only" counts too.
-- `tests.hosts` and `tests.jobs`: test hosts running side by side (default: up to 4 when there are 4 or more targets), and tests running at once in each. `tests.uiJobs` and `tests.uiTimeout`: hosts for UI tests, and seconds one UI test may run.
+- `tests.hosts` and `tests.jobs`: test hosts running side by side (default: up to 4 when there are 4 or more targets), and tests running at once in each. `tests.uiJobs` and `tests.uiTimeout`: hosts for UI tests, and seconds one UI test may run (default 600).
 - `tests.uiSources`: a UI test target's source folder, when it isn't a synchronized folder simless can find.
 - `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against (default: the newest runtime, iPhone 17 Pro).
 - `idiom`: `"phone"` renders phone canvases with the phone idiom (see below).
@@ -202,11 +203,17 @@ simless version                   version, Xcode and macOS
 
 ## Cleanup is automatic
 
-- **Deleted worktrees:** every command removes the host, slot and build cache of any worktree that no longer exists.
-- **Idle hosts:** a host exits after 30 idle minutes (`hostIdleMinutes` in `.simless.json`).
+simless cleans up after itself, so nothing piles up between runs or after a worktree is gone:
+- **Deleted worktrees:** every command removes the hosts, slots and build cache of any worktree that no longer exists.
+- **Unused worktrees:** a worktree that hasn't used simless for two weeks loses its hosts, slots and builds too (its `.simless.json` stays, and `simless up` builds again).
+- **App data:** removing a slot first empties the app's data container. macOS lets no other process touch it, so simless launches the app once to delete its own files. A unit test run starts with an empty `tmp`, so what tests leave there doesn't grow run after run.
+- **Hosts:** a host exits after 30 idle minutes (`hostIdleMinutes`), a standby test host after 10. `simless down` stops this worktree's hosts, test and UI hosts included.
+- **Crash reports** that macOS writes for simless hosts are deleted after a day.
 - **Patches:** only the newest 3 are kept, and patch files are deleted as soon as they're loaded.
-- **Compile cache:** the shared Xcode compilation cache is capped at 12 GB.
+- **Compile cache:** the shared Xcode compilation cache is cleared above 8 GB, and when a build finds it damaged (after a full disk, say), simless clears it and builds again.
 - **Generated files** next to your project are git-excluded and removed by `simless clean`.
+
+`simless status` shows what's running (memory, CPU, and the data each test host keeps) and what's on disk, by worktree, with what `simless clean` frees. `simless clean --all` removes everything simless created.
 
 ## How far to trust results
 
@@ -253,8 +260,9 @@ simless version                   version, Xcode and macOS
 ### UI tests
 
 `simless test ui` runs your XCUITest code against your real app on the Mac, at an iPhone's screen size (or an iPad's with `--device ipad`). Most of what a test does maps directly: queries, taps, typing, swipes and drags, launch arguments and environment, terminating and relaunching, deep links, orientation and appearance. Where the Mac shows things differently from an iPhone, simless shows the iPhone's version in the tree:
-- **Alerts and confirmation dialogs** as iPhone alerts (the Mac would show AppKit panels).
-- **Context menus and `Menu`** as an iPhone menu, opened by a long press or a tap.
+- **Alerts and confirmation dialogs** as an iPhone's alerts and action sheets (the Mac would show AppKit panels).
+- **Context menus and `Menu`** as an iPhone menu, opened by a long press or a tap, with submenus that open on a tap.
+- **A text field's edit menu** (Select, Select All, Paste) on a long press.
 - **The share sheet** as a sheet with Close. Close or a swipe down cancels it. Sharing to a target isn't emulated.
 - **Compact date pickers** as a button with the date or time, which opens wheels for a time.
 - **The keyboard:** the keyboard's notifications, an iPhone keyboard's frame, and the keyboard toolbar above it.
@@ -262,11 +270,13 @@ simless version                   version, Xcode and macOS
 
 `performAccessibilityAudit` runs simless's own checks with Xcode's audit types: hit regions under 24 pt, elements without a description, clipped text (read with Vision), text that doesn't scale with Dynamic Type, and contrast. elementDetection and trait aren't checked.
 
-What needs a simulator: HealthKit permission sheets and data, the StoreKit purchase sheet, the photo and file pickers (unless your app stubs them in UI tests), sharing to a target, and the watch app. Mark those tests in `tests.simulatorOnly`, and `simless test --simulator-only` lists them with the command to run them in one.
+**Permission prompts never reach your screen.** The hosts are real Mac apps, so a request for calendar, notifications, microphone, camera, speech, photos, contacts, location or tracking access would show macOS's dialog, and so would a review request. The runtime answers them itself: access is denied and review requests do nothing. Granting isn't an option, because the app's next access would make macOS ask anyway. Set `SIMLESS_PERMISSIONS=ask` to let the requests through to macOS.
+
+What needs a simulator: HealthKit permission sheets and data, the StoreKit purchase sheet and products from a StoreKit configuration file, the photo and file pickers (unless your app stubs them in UI tests), recording from the microphone, sharing to a target, the Home Screen, and the watch app. The same goes for a test that counts on app code behind `#if targetEnvironment(simulator)`, since simless runs the device branch (a failing run points it out). Mark those tests in `tests.simulatorOnly`, and `simless test --simulator-only` lists them with the command to run them in one.
 
 ### Not checked at all
 
-Pixel-exact rendering, system UI that isn't emulated above (permission prompts, StoreKit sheets, pickers), Siri and widgets themselves (deep links into the app work), and multitasking on iPad.
+Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pickers), Siri and widgets themselves (deep links into the app work), and multitasking on iPad.
 
 ### Other limits
 

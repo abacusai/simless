@@ -72,7 +72,8 @@ enum UITestEngine {
         for file in target.sources {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
             var cls: String?
-            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            // Only what an iPhone simulator run would compile (see PlatformConditions).
+            for line in PlatformConditions.activeLines(text) {
                 if let m = line.firstMatch(of: #/^(?:final\s+)?(?:@\w+\s+)*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b/#) { cls = String(m.1) }
                 else if line.firstMatch(of: #/^(?:final\s+)?(?:public\s+)?(?:struct|class|enum|extension)\s/#) != nil { cls = nil }
                 if let c = cls, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
@@ -100,13 +101,28 @@ enum UITestEngine {
         try mkdirp("\(bundle)/Contents/MacOS")
         let settings = try ws.settings()
         let log = "\(dir)/build-\(target.name).log"
-        let r = try Shell.run(["xcrun", "swiftc", "-emit-library", "-Onone", "-g", "-module-name", TestEngine.moduleName(target.name),
+        // Sources with platform conditions are compiled from a rewritten copy that
+        // keeps the original's file name and line numbers.
+        let rewritten = "\(dir)/sources-\(target.name)"
+        try? FileManager.default.removeItem(atPath: rewritten)
+        try mkdirp(rewritten)
+        var sources: [String] = []
+        for (i, file) in target.sources.enumerated() {
+            guard let text = try? String(contentsOfFile: file, encoding: .utf8), PlatformConditions.needsRewrite(text) else {
+                sources.append(file); continue
+            }
+            let copy = "\(rewritten)/\(i)-\((file as NSString).lastPathComponent)"
+            try ("#sourceLocation(file: \"\(file)\", line: 1)\n" + PlatformConditions.rewrite(text))
+                .write(toFile: copy, atomically: true, encoding: .utf8)
+            sources.append(copy)
+        }
+        let r = try Shell.run(["xcrun", "swiftc", "-D", PlatformConditions.trueFlag, "-emit-library", "-Onone", "-g", "-module-name", TestEngine.moduleName(target.name),
                                "-target", "arm64-apple-macos14.0", "-sdk", sdk, "-swift-version", settings.swiftVersion,
                                "-F", "\(p)/Library/Frameworks", "-I", "\(p)/usr/lib", "-L", "\(p)/usr/lib",
                                "-framework", "XCTest", "-Xlinker", "-bundle",
                                "-Xlinker", "-rpath", "-Xlinker", "\(p)/Library/Frameworks",
                                "-Xlinker", "-rpath", "-Xlinker", "\(p)/usr/lib",
-                               "-o", exe] + target.sources + shim, cwd: ws.root, logPath: log)
+                               "-o", exe] + sources + shim, cwd: ws.root, logPath: log)
         guard r.code == 0 else {
             throw SimlessError("building \(target.name) for simless failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
         }
@@ -128,18 +144,24 @@ enum UITestEngine {
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
         let skips = (config?.skip ?? []) + (args.repeated["--skip"] ?? []) + simulatorOnly.keys.sorted()
-        let timeout = args.values["--timeout"].flatMap(Double.init) ?? config?.uiTimeout ?? 300
+        let timeout = args.values["--timeout"].flatMap(Double.init) ?? config?.uiTimeout ?? 600
 
         // Selection.
         var selected: [TestID] = []
         var bundles: [String: String] = [:]
+        var markedTests: [String: String] = [:]     // simulator-only tests this run would have run
         for target in all {
             let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
             if !wanted { continue }
-            let ids = tests(in: target).filter { id in
-                (filters.isEmpty || filters.contains { f in id.user == f || id.user.hasPrefix(f + "/") || f == target.name
-                    || id.user == f.replacingOccurrences(of: "()", with: "") })
-                && !skips.contains { s in id.user == s.replacingOccurrences(of: "()", with: "") || id.user.hasPrefix(s + "/") || "\(target.name)/\(id.cls)" == s }
+            let asked = tests(in: target).filter { id in
+                filters.isEmpty || filters.contains { f in id.user == f || id.user.hasPrefix(f + "/") || f == target.name
+                    || id.user == f.replacingOccurrences(of: "()", with: "") }
+            }
+            for id in asked {
+                if let mark = simulatorOnly.first(where: { TestEngine.matches(id.user, $0.key) }) { markedTests[id.user] = mark.value }
+            }
+            let ids = asked.filter { id in
+                !skips.contains { s in id.user == s.replacingOccurrences(of: "()", with: "") || id.user.hasPrefix(s + "/") || "\(target.name)/\(id.cls)" == s }
             }
             if ids.isEmpty { continue }
             bundles[target.name] = try build(target, ws: ws)
@@ -186,10 +208,15 @@ enum UITestEngine {
         var passedAlone: [String] = []
         let failedIDs = selected.filter { results.failed[$0.user] != nil }
         if !failedIDs.isEmpty && failedIDs.count <= 10 {
-            Log.step("running \(failedIDs.count) failed UI test(s) again, one at a time, to rule out load")
+            Log.step("running \(failedIDs.count) failed UI test(s) again, one per host, to rule out load")
             let again = Results()
-            Worker(index: slots.count + 1, slot: slots[0], ws: ws, bundles: bundles, tests: failedIDs, timeout: timeout,
-                   artifacts: artifacts, results: again, device: device).run()
+            // One test per host at a time, the hosts side by side.
+            let lanes = min(slots.count, failedIDs.count)
+            DispatchQueue.concurrentPerform(iterations: lanes) { lane in
+                let mine = failedIDs.enumerated().filter { $0.offset % lanes == lane }.map(\.element)
+                Worker(index: slots.count + 1 + lane, slot: slots[lane], ws: ws, bundles: bundles, tests: mine, timeout: timeout,
+                       artifacts: artifacts, results: again, device: device).run()
+            }
             for id in failedIDs where again.passed.contains(id.user) {
                 results.recover(id.user)
                 passedAlone.append(id.user)
@@ -203,20 +230,19 @@ enum UITestEngine {
         for id in passedAlone { print("  note: \(id) failed while the run was busy, and passed alone (load, not a failure)") }
         var parts = ["\(r.passed.count) passed", "\(r.failed.count) failed"]
         if !r.skipped.isEmpty { parts.append("\(r.skipped.count) skipped") }
-        let markedHere = simulatorOnly.keys.filter { k in
-            let target = String(k.split(separator: "/").first ?? "")
-            return all.contains { $0.name == target } && (filters.isEmpty || filters.contains { f in f == target || k == f || k.hasPrefix(f + "/") })
-        }
-        if !markedHere.isEmpty { parts.append("\(markedHere.count) simulator-only (`simless test --simulator-only` lists them)") }
+        if !markedTests.isEmpty { parts.append("\(markedTests.count) simulator-only (`simless test --simulator-only` lists them)") }
         if !r.crashed.isEmpty { parts.append("\(r.crashed.count) crashed") }
         print(parts.joined(separator: ", "))
-        try saveResults(ws: ws, results: r, artifacts: artifacts)
+        try saveResults(ws: ws, results: r, marked: markedTests, load: passedAlone)
         let ok = r.failed.isEmpty && r.crashed.isEmpty
+        if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (screenshots of failures and logs: \(artifacts))")
         if !ok { exit(1) }
     }
 
-    static var defaultJobs: Int { max(1, min(4, ProcessInfo.processInfo.activeProcessorCount / 3)) }
+    /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to
+    /// one per two cores.
+    static var defaultJobs: Int { max(1, min(4, ProcessInfo.processInfo.activeProcessorCount / 2)) }
 
     final class Results: @unchecked Sendable {
         private let lock = NSLock()
@@ -335,9 +361,18 @@ enum UITestEngine {
         return r["seconds"] as? [String: Double] ?? [:]
     }
 
-    static func saveResults(ws: Workspace, results r: Results, artifacts: String) throws {
+    static func saveResults(ws: Workspace, results r: Results, marked: [String: String], load: [String]) throws {
+        // Every test, with what happened to it.
+        var tests: [String: [String: Any]] = [:]
+        for (id, reason) in marked { tests[id] = ["status": "simulator-only", "reason": reason] }
+        for id in r.passed { tests[id] = ["status": load.contains(id) ? "load" : "passed"] }
+        for (id, lines) in r.failed { tests[id] = ["status": "failed", "issues": lines] }
+        for (id, reason) in r.skipped { tests[id] = ["status": TestEngine.isSimulatorOnly(reason) ? "simulator-only" : "skipped", "reason": reason] }
+        for (id, reason) in r.crashed { tests[id] = ["status": "crashed", "reason": reason] }
+        for (id, seconds) in r.seconds { tests[id]?["seconds"] = (seconds * 1000).rounded() / 1000 }
         let out: [String: Any] = ["passed": r.passed.sorted(), "failed": r.failed, "skipped": r.skipped,
-                                  "crashed": r.crashed.map { ["test": $0.0, "reason": $0.1] }, "seconds": r.seconds]
+                                  "crashed": r.crashed.map { ["test": $0.0, "reason": $0.1] }, "seconds": r.seconds,
+                                  "simulatorOnly": marked, "tests": tests]
         try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
             .write(to: URL(fileURLWithPath: "\(ws.work)/ui-test-results.json"))
     }

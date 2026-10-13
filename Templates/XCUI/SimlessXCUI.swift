@@ -413,6 +413,11 @@ class XCUIElement: NSObject, @unchecked Sendable {
             XCTFail("\(what): no element matches \(query.map { "\($0)" } ?? "the query")\(position.map { " at index \($0)" } ?? "")")
             return nil
         }
+        // A first match with no size (a menu Picker's options, kept for
+        // queries) can't take a touch; an open menu's row of the same name can.
+        if (position ?? 0) == 0, n.frame.isEmpty, let shown = query?.matches().first(where: { $0.hittable && !$0.frame.isEmpty }) {
+            return shown
+        }
         return n
     }
 
@@ -702,7 +707,7 @@ class XCUIElementQuery: NSObject, @unchecked Sendable {
 
     // MARK: API
 
-    var count: Int { matches().count }
+    @objc var count: Int { matches().count }
     var element: XCUIElement { XCUIElement(query: self, position: nil) }
     var firstMatch: XCUIElement { XCUIElement(query: self, position: nil) }
     func element(boundBy index: Int) -> XCUIElement { XCUIElement(query: self, position: index) }

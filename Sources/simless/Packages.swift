@@ -126,11 +126,22 @@ extension Packages {
         let products = "\(dd)/Build/Products/Debug-iphoneos"
         // Nothing changed in the package (or the local packages it uses) since
         // these targets were last built: a no-op xcodebuild still costs ~10 s.
-        let stamp = "\(dd)/.simless-built-\(shortHash(targets.sorted().joined(separator: ",")))"
+        // A stamp per built target set: "<newest source time>\n<targets>". Any
+        // build of a superset of these targets that's still current will do.
+        // The build settings' version is part of the name: new flags mean a new build.
+        let stamp = "\(dd)/.simless-built-\(shortHash("2|" + targets.sorted().joined(separator: ",")))"
         let newest = newestSource(p.dir)
-        if let built = try? String(contentsOfFile: stamp, encoding: .utf8), Double(built).map({ $0 >= newest }) == true,
-           targets.allSatisfy({ exists("\(products)/\($0).xctest") }) {
-            return products
+        let stamps = ((try? FileManager.default.contentsOfDirectory(atPath: dd)) ?? []).filter { $0.hasPrefix(".simless-built-") }
+        for file in stamps {
+            // Stamps from older build settings: remove, and build again.
+            guard (try? String(contentsOfFile: "\(dd)/\(file)", encoding: .utf8))?.hasPrefix("v2 ") == true else {
+                try? FileManager.default.removeItem(atPath: "\(dd)/\(file)"); continue
+            }
+            guard let text = try? String(contentsOfFile: "\(dd)/\(file)", encoding: .utf8) else { continue }
+            let lines = text.dropFirst(3).split(separator: "\n", omittingEmptySubsequences: false)
+            guard let built = lines.first.flatMap({ Double($0) }), built >= newest else { continue }
+            let covered = Set(lines.dropFirst().first.map { $0.split(separator: ",").map(String.init) } ?? [])
+            if Set(targets).isSubset(of: covered), targets.allSatisfy({ exists("\(products)/\($0).xctest") }) { return products }
         }
         // Xcode names a package's all-targets scheme "<name>-Package" when it
         // has several products, and after the package when it has one.
@@ -145,18 +156,23 @@ extension Packages {
         try withBuildToken(count: ws.config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)) {
             let t = now()
             Log.step("building \(targets.joined(separator: ", ")) for iOS (log: \(log))")
-            let r = try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
+            let r = try Cleanup.retryingPoisonedCache { try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
                                    "-destination", "generic/platform=iOS", "-derivedDataPath", dd,
                                    "-skipMacroValidation", "-skipPackagePluginValidation",
                                    "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
-                                   "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache"]
-                                  + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log)
+                                   "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
+                                   // Test bundles each link the package's code; without
+                                   // debug info they're a fraction of the size and link
+                                   // faster. Failures name their file and line from the
+                                   // source, crashes their functions from the symbol table.
+                                   "GCC_GENERATE_DEBUGGING_SYMBOLS=NO", "COMPILER_INDEX_STORE_ENABLE=NO"]
+                                  + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log) }
             guard r.code == 0 else {
                 throw SimlessError("building \(p.package)'s tests failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
             }
             Log.step("built in \(secs(t))")
         }
-        try? String(newest).write(toFile: stamp, atomically: true, encoding: .utf8)
+        try? "v2 \(newest)\n\(targets.sorted().joined(separator: ","))".write(toFile: stamp, atomically: true, encoding: .utf8)
         return products
     }
 

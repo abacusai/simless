@@ -154,6 +154,14 @@ enum Patch {
             if seen.insert(line).inserted { out.append("  " + line) }
             if out.count == 20 { break }
         }
+        if log.contains("No space left on device") {
+            return "  the disk is full (No space left on device); free some space and build again (`simless status` shows what simless uses)"
+        }
+        if out.isEmpty {
+            // Errors without a file (the build system's own): the first few.
+            let general = log.split(separator: "\n").filter { $0.hasPrefix("error: ") || $0.hasPrefix("fatal error: ") }.prefix(5).map { "  " + $0 }
+            if !general.isEmpty { return general.joined(separator: "\n") }
+        }
         return out.isEmpty ? "  (no error lines found)" : out.joined(separator: "\n")
     }
 

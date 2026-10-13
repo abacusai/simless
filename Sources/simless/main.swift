@@ -3,13 +3,14 @@
 
 import Foundation
 
-let version = "0.3.0"
+let version = "0.4.0"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
   simless init [--no-hook]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
-  simless up                       build (Designed for iPad), install this worktree's slot, start its host
+  simless up [--no-tests]          build (Designed for iPad), install this worktree's slot, start its host;
+        also builds local packages' tests and prepares the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
         [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
@@ -17,8 +18,15 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless reload [files...]        hot-reload edited view files (default: all edited since `simless up`)
         [--render <fixture|all>] [--no-fallback]
   simless test [Target[/Class[/method]]...|all]   unit tests on the Mac, no simulator
-        local package test targets too; all: every test target
-        [--skip Target[/Class[/method]]]... [--timeout <seconds per test, default 300>]
+        local package test targets too; all: every unit test target
+        [--skip Target[/Class[/method]]]... [--timeout <seconds per test, default 600>]
+        [--hosts <test hosts side by side, default up to 4>] [--jobs <tests at once per host>]
+  simless test ui [UITarget[/Class[/method]]...]   XCUITest UI tests, unchanged, in hidden hosts
+        (naming a UI test target, class or test runs it the same way)
+        [--jobs <hosts, default up to 4>] [--device iphone|ipad|...] [--timeout <seconds per test, default 300>]
+  simless test --simulator-only    list the tests marked as needing a simulator (tests.simulatorOnly)
+        and the xcodebuild command that runs just those
+        results: test-results.json and ui-test-results.json in the work folder (`simless status` shows it)
   simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
         [--dark] [--png <dir>]: also dark mode; save both renders of every screen + a side-by-side report.md
         [--runtime <iOS version, e.g. 26.5>] [--sim-device <name, e.g. "iPhone 16e">]
@@ -217,8 +225,19 @@ func cmdSkill(_ args: Args) throws {
     try mkdirp(dir)
     let dst = "\(dir)/SKILL.md"
     try? FileManager.default.removeItem(atPath: dst)
-    try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SKILL.md", toPath: dst)
-    print("installed Claude Code skill: \(dst)")
+    // A link, not a copy, so the skill keeps up with simless updates.
+    try FileManager.default.createSymbolicLink(atPath: dst, withDestinationPath: "\(Paths.toolRoot)/Templates/SKILL.md")
+    print("installed Claude Code skill: \(dst) (linked to \(Paths.toolRoot)/Templates/SKILL.md)")
+}
+
+/// A note when the installed skill is an older copy than this simless's.
+func skillNote() -> String? {
+    let dst = "\(Paths.home)/.claude/skills/simless/SKILL.md"
+    guard (try? FileManager.default.destinationOfSymbolicLink(atPath: dst)) == nil,
+          let installed = FileManager.default.contents(atPath: dst),
+          let current = FileManager.default.contents(atPath: "\(Paths.toolRoot)/Templates/SKILL.md"),
+          installed != current else { return nil }
+    return "note: the Claude Code skill is from an older simless; `simless skill install` updates it"
 }
 
 func currentSlot(_ ws: Workspace) throws -> SlotRecord {
@@ -248,6 +267,13 @@ func cmdUp(_ args: Args) throws {
     try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
     try ws.snapshotSources()
+    // Local packages' tests build next to the app, so the first `simless test`
+    // doesn't wait for them.
+    let packageBuild = DispatchGroup()
+    if args.flags.contains("--no-tests") == false, !Packages.testTargets(ws: ws).isEmpty {
+        DispatchQueue.global().async(group: packageBuild) { TestEngine.buildPackageTests(ws) }
+    }
+    defer { packageBuild.wait() }
     do { try ws.build() } catch {
         // A failed build must not hide edits from the next `simless reload`.
         if let previousSnapshot { try? previousSnapshot.write(to: URL(fileURLWithPath: ws.snapshotPath)) }
@@ -280,6 +306,11 @@ func cmdUp(_ args: Args) throws {
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")")
+    if let note = skillNote() { print(note) }
+    packageBuild.wait()
+    if !args.flags.contains("--no-tests") {
+        do { try TestEngine.prewarm(ws) } catch { Log.info("note: preparing test hosts failed (\(error)); `simless test` will retry") }
+    }
 }
 
 func cmdRender(_ args: Args) throws {
@@ -424,14 +455,35 @@ func cmdStatus(_ args: Args) throws {
             running += 1
             var line = "\(s.slotID)  :\(s.port)  up    \(role)  \(Int(use.mb)) MB  \(String(format: "%.0f", use.cpu))% CPU"
             if s.kind == nil, let st = s.stats() { line += "  patch \(st["patch"] ?? 0)  renders \(st["renders"] ?? 0)" }
+            // What the app keeps in its data container (only test and UI hosts can say).
+            if s.kind != nil, let c = try? LineClient(port: s.port, timeout: 2), let u = try? c.call(["cmd": "usage"]),
+               let bytes = u["containerBytes"] as? Int {
+                line += "  data \(bytes / 1_048_576) MB"
+            }
             print(line + "  \(s.worktree)")
         } else {
             print("\(s.slotID)  :\(s.port)  down  \(role)  \(s.worktree)")
         }
     }
-    // Disk: slots are APFS clones of the build, so they share most of it.
-    let disk = (try? Shell.run(["/usr/bin/du", "-sk", Paths.cache]).out.split(separator: "\t").first).flatMap { Double($0) } ?? 0
-    print("\(running) host(s) running, \(Int(totalMB)) MB; simless cache \(String(format: "%.1f", disk / 1_048_576)) GB on disk (\(Paths.cache); `simless clean --all` removes it)")
+    print("\(running) host(s) running, \(Int(totalMB)) MB")
+    // Disk, by what it's for and what frees it.
+    func gb(_ path: String) -> Double {
+        guard exists(path) else { return 0 }
+        return ((try? Shell.run(["/usr/bin/du", "-sk", path]).out.split(separator: "\t").first).flatMap { Double($0) } ?? 0) / 1_048_576
+    }
+    let builds = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.cache)/work")) ?? []).map { dir -> (String, Double) in
+        let worktree = (try? String(contentsOfFile: "\(Paths.cache)/work/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
+        return (worktree, gb("\(Paths.cache)/work/\(dir)"))
+    }
+    let cas = gb("\(Paths.cache)/CompilationCache"), slots = gb("\(Paths.cache)/slots")
+    let total = builds.reduce(0) { $0 + $1.1 } + cas + slots
+    print(String(format: "disk: %.1f GB in %@", total, Paths.cache))
+    for (worktree, size) in builds.sorted(by: { $0.1 > $1.1 }) {
+        print(String(format: "  %.1f GB  builds and results for %@ (`simless clean` there frees it)", size, worktree))
+    }
+    print(String(format: "  %.1f GB  shared compilation cache (makes builds in new worktrees fast; cleared above %.0f GB)", cas, Cleanup.compileCacheLimitGB))
+    print(String(format: "  %.1f GB  installed slots, as du counts them (mostly APFS clones of the builds, so less on the disk)", slots))
+    print("  `simless clean --all` frees everything")
     let probe = state.slots.first { $0.kind == nil && $0.stats() != nil }
     print("live reload: \(Agent.liveStatus(probeSlot: probe).map { "off (\($0))" } ?? "on")")
 }
@@ -441,14 +493,19 @@ func cmdDown(_ args: Args) throws {
     if args.flags.contains("--all") {
         slots = GlobalState.load().slots
     } else {
-        slots = [try currentSlot(try Workspace.load())]
+        // This worktree's render host and its test and UI hosts.
+        let ws = try Workspace.load()
+        slots = GlobalState.load().slots.filter { $0.worktree == ws.root }
     }
     // Only stops: the next render/reload relaunches in ~1 s. `simless clean` (or the
     // automatic cleanup when a worktree is deleted) removes slots and caches.
-    for s in slots {
+    var stopped = 0
+    for s in slots where RuntimeHost.hasProcess(s) {
         Slots.stop(s)
+        stopped += 1
         print("stopped \(s.slotID)")
     }
+    if stopped == 0 { print("nothing was running") }
 }
 
 func cmdAgent(_ args: Args) throws {

@@ -14,11 +14,19 @@
 			remoteGlobalIDString = C13732C8E715C9BEE4FA51C9;
 			remoteInfo = SimlessDemo;
 		};
+		4C1E2A7B9D3F5E6071829304 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 98F54143AB4E86B28C3AFEE0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C13732C8E715C9BEE4FA51C9;
+			remoteInfo = SimlessDemo;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		8BCD5BC4CDFDF0918087C782 /* SimlessDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SimlessDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D43E6F042E6A901F12BCDD03 /* SimlessDemoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SimlessDemoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5D2F3B8C0E4A6F7182930415 /* SimlessDemoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SimlessDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -32,9 +40,21 @@
 			path = SimlessDemoTests;
 			sourceTree = "<group>";
 		};
+		6E3A4C9D1F5B708293A41526 /* SimlessDemoUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SimlessDemoUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		7F4B5D0E2A6C8193A4B52637 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		78AE8C6BEB2A40A6D824CCEE = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -57,6 +77,7 @@
 			children = (
 				FBF56003221A421EB69B7F14 /* SimlessDemo */,
 				2D33B54028B085AB2C2FC52F /* SimlessDemoTests */,
+				6E3A4C9D1F5B708293A41526 /* SimlessDemoUITests */,
 				328EC33DF3954DC9B83FA285 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -66,6 +87,7 @@
 			children = (
 				8BCD5BC4CDFDF0918087C782 /* SimlessDemo.app */,
 				D43E6F042E6A901F12BCDD03 /* SimlessDemoTests.xctest */,
+				5D2F3B8C0E4A6F7182930415 /* SimlessDemoUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -114,6 +136,27 @@
 			productReference = D43E6F042E6A901F12BCDD03 /* SimlessDemoTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		80A5C6E1F3B7D8293A4B5C61 /* SimlessDemoUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 91B6D7F2A4C8E93A4B5C6D72;
+			buildPhases = (
+				A2C7E8F3B5D9FA4B5C6D7E83 /* Sources */,
+				7F4B5D0E2A6C8193A4B52637 /* Frameworks */,
+				B3D8F9A4C6EA0B5C6D7E8F94 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C4E9A0B5D7FB1C6D7E8F9A05 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				6E3A4C9D1F5B708293A41526 /* SimlessDemoUITests */,
+			);
+			name = SimlessDemoUITests;
+			productName = SimlessDemoUITests;
+			productReference = 5D2F3B8C0E4A6F7182930415 /* SimlessDemoUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -128,6 +171,10 @@
 						CreatedOnToolsVersion = 26.0;
 					};
 					EB441FB4F42650CB3146523A = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = C13732C8E715C9BEE4FA51C9;
+					};
+					80A5C6E1F3B7D8293A4B5C61 = {
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = C13732C8E715C9BEE4FA51C9;
 					};
@@ -149,11 +196,19 @@
 			targets = (
 				C13732C8E715C9BEE4FA51C9 /* SimlessDemo */,
 				EB441FB4F42650CB3146523A /* SimlessDemoTests */,
+				80A5C6E1F3B7D8293A4B5C61 /* SimlessDemoUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		B3D8F9A4C6EA0B5C6D7E8F94 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		364863F9F2E558B0F50473FC = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -171,6 +226,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		A2C7E8F3B5D9FA4B5C6D7E83 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		971ED9D05B25DB6C4D7680D4 = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -188,6 +250,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		C4E9A0B5D7FB1C6D7E8F9A05 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C13732C8E715C9BEE4FA51C9 /* SimlessDemo */;
+			targetProxy = 4C1E2A7B9D3F5E6071829304 /* PBXContainerItemProxy */;
+		};
 		E9FAD0C6CD43534327C0AF90 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = C13732C8E715C9BEE4FA51C9 /* SimlessDemo */;
@@ -196,6 +263,44 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		D5FAB1C6E80C2D7E8F9A0B16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.abacus.simless.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SimlessDemo;
+			};
+			name = Debug;
+		};
+		E60BC2D7F91D3E8F9A0B1C27 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.abacus.simless.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SimlessDemo;
+			};
+			name = Release;
+		};
 		D08DD63EED508AD30D0CB0B4 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -327,6 +432,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		91B6D7F2A4C8E93A4B5C6D72 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D5FAB1C6E80C2D7E8F9A0B16 /* Debug */,
+				E60BC2D7F91D3E8F9A0B1C27 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		60AA9EB27EE681A82A9AEC1A = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

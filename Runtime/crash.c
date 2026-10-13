@@ -27,6 +27,27 @@ static void simless_crash_handler(int sig, siginfo_t *info, void *context) {
     uintptr_t bottom = top - pthread_get_stacksize_np(self);
     const char *last = NULL;
     int printed = 0;
+    // The top of the stack, for a description when macOS writes no report.
+    uintptr_t top_fp = fp;
+    int shown = 0;
+    if (pc) {
+        Dl_info d;
+        if (dladdr((void *)pc, &d) && d.dli_sname) { write_str("simless-crash-frame: "); write_str(d.dli_sname); write_str("\n"); shown++; }
+    }
+    for (int i = 0; i < 64 && top_fp >= bottom && top_fp < top && shown < 8; i++) {
+        uintptr_t ret = ((uintptr_t *)top_fp)[1];
+        Dl_info d;
+        if (ret && dladdr((void *)ret, &d) && d.dli_sname) {
+            if (!last || strcmp(last, d.dli_sname) != 0) {
+                write_str("simless-crash-frame: "); write_str(d.dli_sname); write_str("\n");
+                last = d.dli_sname; shown++;
+            }
+        }
+        uintptr_t next = ((uintptr_t *)top_fp)[0];
+        if (next <= top_fp) break;
+        top_fp = next;
+    }
+    last = NULL;
     write_str("simless-crash: test frames on the crashed thread:\n");
     for (long i = 0; i < 2000000 && fp >= bottom && fp < top && printed < 12; i++) {
         uintptr_t ret = ((uintptr_t *)fp)[1];
@@ -44,7 +65,7 @@ static void simless_crash_handler(int sig, siginfo_t *info, void *context) {
         if (next <= fp) break;
         fp = next;
     }
-    (void)pc; (void)info;
+    (void)info;
     signal(sig, SIG_DFL);
     raise(sig);
 }

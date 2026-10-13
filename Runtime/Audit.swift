@@ -22,7 +22,10 @@ enum Audit {
     static let dynamicType: UInt64 = 1 << 16, textClipped: UInt64 = 1 << 17
 
     static func run(types: UInt64) -> [[String: Any]] {
-        let (nodes, _) = Snapshotter.take()
+        // Only what VoiceOver reads: elements under another element's
+        // automationElements aren't audited, as in Xcode.
+        let (all, _) = Snapshotter.take()
+        let nodes = all.map { $0["automationOnly"] as? Bool == true ? $0.merging(["frame": [-1e5, -1e5, 0, 0], "hittable": false]) { $1 } : $0 }
         var issues: [[String: Any]] = []
         func issue(_ type: UInt64, _ index: Int, _ compact: String, _ detailed: String) {
             issues.append(["type": Int(truncatingIfNeeded: type), "node": index, "compact": compact, "detailed": detailed])

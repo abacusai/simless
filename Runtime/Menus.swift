@@ -16,6 +16,8 @@ enum Menus {
         let title: String
         let identifier: String
         let destructive: Bool
+        /// A submenu: on an iPhone it's a row that opens its own items.
+        var submenu: UIMenu? { element as? UIMenu }
         init(_ element: UIMenuElement) {
             self.element = element
             title = element.title
@@ -40,6 +42,38 @@ enum Menus {
     }
 
     static var open: (items: [Item], anchor: CGRect, sender: AnyObject?)?
+    /// What the open menu's rows are to XCUITest: buttons, or an edit menu's menu items.
+    private static var itemType = 9
+
+    /// A long press in a text field shows the edit menu (Select, Select All,
+    /// Paste), like on an iPhone. AppKit would only show its own context menu.
+    static func openEditMenu(at point: CGPoint) -> Bool {
+        guard let window = UIAutomation.keyWindow, var view = window.hitTest(point, with: nil) as UIView? else { return false }
+        while !(view is UITextField || view is UITextView) {
+            guard let next = view.superview else { return false }
+            view = next
+        }
+        if let tv = view as? UITextView, !tv.isEditable { return false }
+        if !view.isFirstResponder { view.becomeFirstResponder() }
+        guard let input = view as? (UIView & UITextInput) else { return false }
+        var actions: [UIAction] = []
+        let hasText = !(input.text(in: input.textRange(from: input.beginningOfDocument, to: input.endOfDocument) ?? UITextRange()) ?? "").isEmpty
+        if hasText {
+            actions.append(UIAction(title: "Select") { _ in
+                if let range = input.tokenizer.rangeEnclosingPosition(input.selectedTextRange?.start ?? input.endOfDocument, with: .word, inDirection: .storage(.backward)) {
+                    input.selectedTextRange = range
+                }
+            })
+            actions.append(UIAction(title: "Select All") { _ in input.selectAll(nil) })
+        }
+        if UIPasteboard.general.hasStrings {
+            actions.append(UIAction(title: "Paste") { _ in input.paste(nil) })
+        }
+        guard !actions.isEmpty else { return false }
+        show(UIMenu(children: actions), anchor: view.convert(view.bounds, to: nil), sender: view)
+        itemType = 54   // menuItem
+        return true
+    }
 
     /// The context menu of the view under `point`, if it has one.
     static func openContextMenu(at point: CGPoint) -> Bool {
@@ -94,7 +128,17 @@ enum Menus {
         let sel = NSSelectorFromString(selector)
         guard target.responds(to: sel) else { return }
         typealias F = @convention(c) (AnyObject, Selector, AnyObject, AnyObject, AnyObject?) -> Void
-        unsafeBitCast(target.method(for: sel), to: F.self)(target, sel, interaction, config, nil)
+        unsafeBitCast(target.method(for: sel), to: F.self)(target, sel, interaction, config, Animator())
+    }
+
+    /// The menu's show or hide animation, already done: SwiftUI waits for its
+    /// completion before it acts on a choice (a dialog the choice raises, say).
+    final class Animator: NSObject, UIContextMenuInteractionAnimating {
+        var previewViewController: UIViewController? { nil }
+        func addAnimations(_ animations: @escaping () -> Void) { animations() }
+        func addCompletion(_ completion: @escaping () -> Void) {
+            RunLoop.main.perform(inModes: [.common], block: completion)
+        }
     }
 
     private static func menu(from config: UIContextMenuConfiguration) -> UIMenu? {
@@ -105,14 +149,15 @@ enum Menus {
 
     static func show(_ menu: UIMenu, anchor: CGRect, sender: AnyObject?) {
         var items: [Item] = []
-        debug = menu.children.map { "\(type(of: $0)) \($0.title)" }
         func flatten(_ m: UIMenu) {
             for child in m.children {
-                if let sub = child as? UIMenu { flatten(sub) } else { items.append(Item(child)) }
+                // Inline menus are sections of this one; the rest are rows that open.
+                if let sub = child as? UIMenu, sub.options.contains(.displayInline) || sub.title.isEmpty { flatten(sub) } else { items.append(Item(child)) }
             }
         }
         flatten(menu)
         open = (items, anchor, sender)
+        itemType = 9
     }
 
     static func close() {
@@ -122,7 +167,6 @@ enum Menus {
             notify(c, "contextMenuInteraction:willEndForConfiguration:animator:", i, config)
         }
     }
-    static var debug: [String] = []
 
     /// Frames like an iPhone's menu: 250 pt wide, 44 pt rows, under the anchor if it fits.
     static func frames() -> (menu: CGRect, items: [CGRect])? {
@@ -142,7 +186,7 @@ enum Menus {
                                      "frame": [f.menu.minX, f.menu.minY, f.menu.width, f.menu.height], "enabled": true, "hittable": true]]
         for (i, item) in open.items.enumerated() {
             let r = f.items[i]
-            var n: [String: Any] = ["ref": addRef(item), "parent": 0, "type": 9, "label": item.title,
+            var n: [String: Any] = ["ref": addRef(item), "parent": 0, "type": itemType, "label": item.title,
                                     "frame": [r.minX, r.minY, r.width, r.height], "enabled": true, "hittable": true]
             if !item.identifier.isEmpty { n["id"] = item.identifier }
             out.append(n)
@@ -150,16 +194,20 @@ enum Menus {
         return out
     }
 
-    /// A tap while a menu is open: an item runs and closes it; anywhere else just closes it.
+    /// A tap while a menu is open: an item runs and closes it, a submenu opens
+    /// in its place, anywhere else just closes it.
     static func tap(at point: CGPoint, ref: NSObject?) -> Bool {
         guard let open, let f = frames() else { return false }
-        if let item = ref as? Item {
-            close(); item.perform(sender: open.sender); return true
+        guard let item = (ref as? Item) ?? f.items.firstIndex(where: { $0.contains(point) }).map({ open.items[$0] }) else {
+            close()
+            return true
         }
-        if let i = f.items.firstIndex(where: { $0.contains(point) }) {
-            close(); open.items[i].perform(sender: open.sender); return true
+        if let submenu = item.submenu {
+            show(submenu, anchor: open.anchor, sender: open.sender)
+        } else {
+            close()
+            item.perform(sender: open.sender)
         }
-        close()
         return true
     }
 }

@@ -102,10 +102,10 @@ A **failure** from simless (a test failure, an issue, a wrong label or frame) is
 - **`simless test`** runs app tests from the last full build (not patches), and package tests from current sources. Tests can read repository files but not write them. App-group containers are private folders. iCloud, keychain sharing and push are missing, so tests that depend on them can differ from the simulator.
 - **Device-only tests.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run here. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` (or the `SIMLESS_HEADLESS` environment variable) instead, or skip them with `--skip`.
 
-- **UI tests.** Alerts, menus, the share sheet, compact date pickers and the keyboard are shown the iPhone way in UI tests, since the Mac shows them differently. Sharing to a target isn't emulated, and the audit is simless's own (no elementDetection or trait checks).
+- **UI tests.** Alerts, menus, the share sheet, compact date pickers and the keyboard are shown the iPhone way in UI tests, since the Mac shows them differently. Sharing to a target isn't emulated, and the audit is simless's own (no elementDetection or trait checks). Permission requests are denied without a dialog, so a test that needs the access (recording from the microphone, say) needs a simulator. App code behind `#if targetEnvironment(simulator)` runs its device branch, and a failing run says where such checks are.
 
 simless can't verify:
-- system UI it doesn't emulate: permission prompts, HealthKit and StoreKit sheets, photo and file pickers,
+- system UI it doesn't emulate: permission prompts, HealthKit and StoreKit sheets, photo and file pickers, the Home Screen,
 - the watch app, widgets and Siri themselves (deep links into the app work),
 - pixel-exact iPhone rendering.
 

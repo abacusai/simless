@@ -201,7 +201,37 @@ enum CrashReport {
             Thread.sleep(forTimeInterval: 0.5)
         } while now() < deadline
         if let trap = hostTrap(slot) { return trap + " (no crash report from macOS this time)" }
+        if let frames = handlerFrames(slot) { return frames }
         return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run it in a simulator to see the crash"
+    }
+
+    /// The crashed thread's top frames as SimlessRuntime's crash handler
+    /// printed them to the host's log, described like a crash report.
+    static func handlerFrames(_ slot: SlotRecord) -> String? {
+        let log = (try? String(contentsOfFile: "\(slot.dir)/host.log", encoding: .utf8)) ?? ""
+        let mangled = log.split(separator: "\n").filter { $0.hasPrefix("simless-crash-frame: ") }.map { String($0.dropFirst("simless-crash-frame: ".count)) }
+        guard !mangled.isEmpty else { return nil }
+        let frames = demangle(mangled)
+        let interesting = frames.filter { !$0.hasPrefix("_sigtramp") && !$0.contains("simless_crash") }
+        var seen = Set<String>()
+        let top = interesting.filter { seen.insert($0).inserted }.prefix(3).map { $0.count > 90 ? String($0.prefix(90)) + "…" : $0 }
+        var text = "crashed in " + top.joined(separator: " ← ") + " (no crash report from macOS this time; frames from the host's log)"
+        if interesting.prefix(6).contains(where: { $0.contains("StyleableView._makeViewList") || $0.contains("StyleModifier") || $0.contains("SubstGenericParametersFromMetadata") }) {
+            text += ". This is SwiftUI's Stepper crash on the Mac, not your code; mark the test simulator-only"
+        }
+        return text
+    }
+
+    /// Swift symbols demangled (simplified); anything else (C, Objective-C) as it is.
+    static func demangle(_ symbols: [String]) -> [String] {
+        let swift = symbols.map { $0.hasPrefix("_$") ? String($0.dropFirst()) : $0 }
+        let mangled = swift.filter { $0.hasPrefix("$s") || $0.hasPrefix("$S") }
+        guard !mangled.isEmpty, let out = try? Shell.run(["xcrun", "swift-demangle", "--simplified"] + mangled).out else { return swift }
+        let lines = out.split(separator: "\n").map(String.init)
+        guard lines.count == mangled.count else { return swift }
+        var map: [String: String] = [:]
+        for (m, d) in zip(mangled, lines) { map[m] = d }
+        return swift.map { map[$0] ?? $0 }
     }
 
     /// The last trap message (`Fatal error: ...`) the host printed.

@@ -40,6 +40,44 @@ enum TestEngine {
 
     // MARK: - Command
 
+    /// Test hosts for a run of `targetCount` targets.
+    static func defaultHosts(targetCount: Int, config: Config.Tests?) -> Int {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        return config?.hosts ?? (targetCount >= 4 ? max(2, min(4, cores / 3)) : 1)
+    }
+
+    /// Builds every local package's tests, for `simless up` to run next to
+    /// the app's build. Failures only leave a note: `simless test` reports them.
+    static func buildPackageTests(_ ws: Workspace) {
+        for p in Packages.testTargets(ws: ws) where !p.targets.isEmpty {
+            do { _ = try Packages.buildTests(p, targets: p.targets, ws: ws) }
+            catch { Log.info("note: building \(p.package)'s tests failed; `simless test` will say why") }
+        }
+    }
+
+    /// After `simless up`: the package test bundles signed and the test hosts'
+    /// slots installed, so the first `simless test all` only runs tests.
+    static func prewarm(_ ws: Workspace) throws {
+        let t = now()
+        let settings = try ws.settings()
+        var count = 0
+        for p in Packages.testTargets(ws: ws) where !p.targets.isEmpty {
+            let products = "\(ws.work)/PackageTests/\(p.package)/Build/Products/Debug-iphoneos"
+            let bundles = p.targets.map { "\(products)/\($0).xctest" }.filter(exists)
+            try prepareBundles(bundles, products: products, team: settings.team)
+            count += bundles.count
+        }
+        let appTargets = (try? appTestTargets(ws)) ?? []
+        let hosts = defaultHosts(targetCount: count + appTargets.count, config: ws.config.tests)
+        let errors = Locked<[Error]>([])
+        DispatchQueue.concurrentPerform(iterations: hosts) { i in
+            do { _ = try RuntimeHost.slot(kind: i == 0 ? "test" : "test\(i + 1)", ws: ws) }
+            catch { errors.mutate { $0.append(error) } }
+        }
+        if let e = errors.value.first { throw e }
+        Log.step("test hosts ready in \(secs(t)) (\(hosts) slot(s))")
+    }
+
     static func run(_ args: Args) throws {
         let ws = try Workspace.load()
         let t = now()
@@ -101,7 +139,7 @@ enum TestEngine {
         // one at a time per process, so one host would queue them all behind
         // each other. Targets are spread by how long their tests took last time.
         let cores = ProcessInfo.processInfo.activeProcessorCount
-        let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? config?.hosts ?? (targets.count >= 4 ? max(2, min(4, cores / 3)) : 1)
+        let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? defaultHosts(targetCount: targets.count, config: config)
         let groups = partition(targets, into: max(1, min(wantedHosts, targets.count)), weights: lastTargetSeconds(ws))
         var slots = [firstSlot]
         for i in 1..<max(1, groups.count) { slots.append(try RuntimeHost.slot(kind: "test\(i + 1)", ws: ws)) }
@@ -163,6 +201,7 @@ enum TestEngine {
             result.slow += r.slow
             result.seconds.merge(r.seconds) { a, _ in a }
         }
+        combined.known = sessions.flatMap(\.known)
         let session = combined
         let slot = firstSlot
 
@@ -170,15 +209,19 @@ enum TestEngine {
         for (id, reason) in result.crashes { print("  CRASHED: \(session.userID(id)): \(reason)") }
         for id in result.slow { print("  note: \(session.userID(id)) failed while the run was busy, and passed alone (load, not a failure)") }
         for id in output(skips: skips, result: result, session: session) { print("  note: --skip \(id) didn't match any test that ran") }
-        let simOnly = result.skipped.filter { isSimulatorOnly($0.value) }.count + markedHere.count
+        // Marked tests, counted one by one (a mark can name a whole class).
+        let knownHere = session.known.map(session.userID).filter { id in filters.isEmpty || filters.contains { matches(id, $0) || String(id.split(separator: "/").first ?? "") == $0 } }
+        let markedTests = knownHere.isEmpty ? markedHere.count : knownHere.filter { id in simulatorOnly.keys.contains { matches(id, $0) } }.count
+        let simOnly = result.skipped.filter { isSimulatorOnly($0.value) }.count + markedTests
         let plainSkipped = result.skipped.count - result.skipped.filter { isSimulatorOnly($0.value) }.count
         var parts = ["\(result.passed.count) passed", "\(result.failed.count) failed"]
         if plainSkipped > 0 { parts.append("\(plainSkipped) skipped") }
         if simOnly > 0 { parts.append("\(simOnly) simulator-only (`simless test --simulator-only` lists them)") }
         if !result.crashes.isEmpty { parts.append("\(result.crashes.count) crashed") }
         print(parts.joined(separator: ", "))
-        try saveResults(ws: ws, result: result, session: session)
+        try saveResults(ws: ws, result: result, session: session, filters: filters, marks: simulatorOnly)
         let ok = result.failed.isEmpty && result.crashes.isEmpty
+        if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/host.log, results: \(ws.work)/test-results.json)")
         if !ok { exit(1) }
     }
@@ -288,15 +331,51 @@ enum TestEngine {
             for (k, v) in skipped where list[k] == nil { list[k] = v }
         }
         if list.isEmpty { print("no simulator-only tests (mark them in .simless.json tests.simulatorOnly, or skip them with a reason starting \"simulator only\")"); return }
-        print("\(list.count) test(s) to run on a simulator:")
+        print("\(list.count) test(s) or group(s) to run on a simulator:")
         for (id, reason) in list.sorted(by: { $0.key < $1.key }) { print("  \(id)\(reason.isEmpty ? "" : "  (\(reason))")") }
-        print("\nxcodebuild test -project \(ws.config.project) -scheme \(ws.config.scheme) \\\n  -destination 'platform=iOS Simulator,name=iPhone 17' \\")
-        print(list.keys.sorted().map { "  -only-testing:'\($0)'" }.joined(separator: " \\\n"))
+        // One command per scheme and platform: each target runs with the scheme
+        // that tests it, on a simulator of its platform.
+        let schemes = SimulatorLane.schemes(ws)
+        var groups: [String: (scheme: String, platform: String, ids: [String])] = [:]
+        var orphans: [String] = []
+        for id in list.keys.sorted() {
+            let target = String(id.split(separator: "/").first ?? "")
+            guard let scheme = schemes[target] else { orphans.append(id); continue }
+            let platform = SimulatorLane.platform(target, ws: ws)
+            groups["\(scheme)|\(platform)", default: (scheme, platform, [])].ids.append(id)
+        }
+        for g in groups.values.sorted(by: { $0.scheme < $1.scheme }) {
+            print("\nxcodebuild test -project \(ws.config.project) -scheme \(g.scheme) \\\n  -destination '\(SimulatorLane.destination(g.platform, ws: ws))' \\")
+            print(g.ids.map { "  -only-testing:'\($0)'" }.joined(separator: " \\\n"))
+        }
+        if !orphans.isEmpty {
+            print("\nno shared scheme tests \(orphans.joined(separator: ", ")); share a scheme with its test target in Xcode to get a command")
+        }
     }
 
-    static func saveResults(ws: Workspace, result: Result, session: Session) throws {
+    /// Whether a user id falls under a mark (a test, or a target, class or suite prefix).
+    static func matches(_ id: String, _ mark: String) -> Bool {
+        id == mark || id.hasPrefix(mark + "/") || id == mark + "()" || (mark.hasSuffix("()") && id == String(mark.dropLast(2)))
+    }
+
+    static func saveResults(ws: Workspace, result: Result, session: Session, filters: [String] = [], marks: [String: String] = [:]) throws {
         var simulatorOnly: [String: String] = [:]
         for (id, reason) in result.skipped where isSimulatorOnly(reason) { simulatorOnly[session.userID(id)] = reason }
+        // Every test, with what happened to it.
+        var tests: [String: [String: Any]] = [:]
+        for id in session.known.map(session.userID) where filters.isEmpty || filters.contains(where: { matches(id, $0) || String(id.split(separator: "/").first ?? "") == $0 }) {
+            if let mark = marks.first(where: { matches(id, $0.key) }) {
+                simulatorOnly[id] = mark.value
+                tests[id] = ["status": "simulator-only", "reason": mark.value]
+            }
+        }
+        for id in result.passed { tests[session.userID(id)] = ["status": result.slow.contains(id) ? "load" : "passed"] }
+        for (id, lines) in result.failed { tests[session.userID(id)] = ["status": "failed", "issues": lines] }
+        for (id, reason) in result.skipped {
+            tests[session.userID(id)] = ["status": isSimulatorOnly(reason) ? "simulator-only" : "skipped", "reason": reason]
+        }
+        for c in result.crashes { tests[session.userID(c.id)] = ["status": "crashed", "reason": c.reason] }
+        for (id, seconds) in result.seconds { tests[session.userID(id)]?["seconds"] = (seconds * 1000).rounded() / 1000 }
         let out: [String: Any] = [
             "passed": result.passed.count,
             "passedTests": result.passed.map { session.userID($0) }.sorted(),
@@ -304,6 +383,7 @@ enum TestEngine {
             "crashed": result.crashes.map { ["test": session.userID($0.id), "reason": $0.reason] },
             "skipped": Dictionary(uniqueKeysWithValues: result.skipped.map { (session.userID($0.key), $0.value) }),
             "simulatorOnly": simulatorOnly,
+            "tests": tests,
             "slowest": result.seconds.sorted { $0.value > $1.value }.prefix(20).map { ["test": session.userID($0.key), "seconds": $0.value] },
             "targetSeconds": result.seconds.reduce(into: [String: Double]()) { acc, e in
                 acc[String(session.userID(e.key).split(separator: "/").first ?? ""), default: 0] += e.value
@@ -323,6 +403,8 @@ final class Session {
     let targets: [TestEngine.Target]
     let timeout: Double
     let width: Int?
+    /// Every test in this session's bundles (runtime ids), from its first load.
+    var known: [String] = []
 
     init(ws: Workspace, slot: SlotRecord, targets: [TestEngine.Target], timeout: Double, width: Int?) {
         self.ws = ws
@@ -371,14 +453,20 @@ final class Session {
         }
         env["SIMLESS_SANDBOX_TOKENS"] = dirs.compactMap(Sandbox.readToken).joined(separator: "\n")
         env["SIMLESS_IDLE"] = String(ws.idleMinutes * 60)
+        // What earlier runs' tests left in tmp goes when the host starts.
+        env["SIMLESS_CLEAN_TMP"] = "1"
         return env
     }
 
     /// A fresh host: the standby one if it's up and untouched, else a new launch.
     private func freshHost() throws -> LineClient {
         // Only a standby host this simless started (its token matches) and that hasn't run anything.
-        let token = try? String(contentsOfFile: "\(slot.dir)/standby-token", encoding: .utf8)
-        if let c = try? LineClient(port: slot.port, timeout: 2), let h = try? c.call(["cmd": "hello"]),
+        // The token file also names the runtime build the standby host loaded: a
+        // newer simless means a fresh host.
+        let saved = (try? String(contentsOfFile: "\(slot.dir)/standby-token", encoding: .utf8))?.split(separator: "\n").map(String.init) ?? []
+        let token = saved.first
+        let sameRuntime = saved.count > 1 && saved[1] == String(mtime("\(slot.dir)/SimlessRuntime.dylib"))
+        if sameRuntime, let c = try? LineClient(port: slot.port, timeout: 2), let h = try? c.call(["cmd": "hello"]),
            (h["loaded"] as? [String] ?? []).isEmpty, let token, h["token"] as? String == token {
             // The standby host's output becomes this run's log.
             try? FileManager.default.removeItem(atPath: "\(slot.dir)/host.log")
@@ -402,9 +490,12 @@ final class Session {
     func standby() {
         RuntimeHost.terminateAll(slot)
         let token = UUID().uuidString
-        try? token.write(toFile: "\(slot.dir)/standby-token", atomically: true, encoding: .utf8)
+        try? "\(token)\n\(mtime("\(slot.dir)/SimlessRuntime.dylib"))".write(toFile: "\(slot.dir)/standby-token", atomically: true, encoding: .utf8)
         let env = RuntimeHost.baseEnvironment(slot).merging(environment()) { $1 }
-            .merging(["SIMLESS_RUNTIME_PORT": String(slot.port), "SIMLESS_HOST_TOKEN": token]) { $1 }
+            .merging(["SIMLESS_RUNTIME_PORT": String(slot.port), "SIMLESS_HOST_TOKEN": token,
+                      // A standby host runs the app's idle work (animations, timers) for
+                      // nothing; it goes away after 10 minutes without a run.
+                      "SIMLESS_IDLE": String(min(ws.idleMinutes, 10) * 60)]) { $1 }
         guard let app = try? RuntimeHost.installedApp(slot) else { return }
         var cmd = ["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/standby.log", "--stdout", "\(slot.dir)/standby.log"]
         for (k, v) in env.sorted(by: { $0.key < $1.key }) { cmd += ["--env", "\(k)=\(v)"] }
@@ -477,9 +568,7 @@ final class Session {
         let log = (try? String(contentsOfFile: "\(slot.dir)/host.log", encoding: .utf8)) ?? ""
         let mangled = log.split(separator: "\n").filter { $0.hasPrefix("simless-test-frame: ") }.map { String($0.dropFirst("simless-test-frame: ".count)) }
         guard !mangled.isEmpty else { return [] }
-        let names = mangled.map { $0.hasPrefix("_$") ? String($0.dropFirst()) : $0 }
-        guard let out = try? Shell.run(["xcrun", "swift-demangle", "--simplified"] + names).out else { return names }
-        return out.split(separator: "\n").map(String.init)
+        return CrashReport.demangle(mangled)
     }
 
     /// The running test whose function is on the crashed thread's stack, if exactly one is.
@@ -517,6 +606,11 @@ final class Session {
                 let client = try freshHost()
                 client.setTimeout(300)
                 load = try client.call(["cmd": "load", "bundles": bundles])
+                // Every test the bundles hold, once, so results can name the ones
+                // that didn't run (simulator-only marks name suites too).
+                if known.isEmpty, let list = try? client.call(["cmd": "list"]) {
+                    known = (list["swift"] as? [String] ?? []) + (list["xctest"] as? [String] ?? [])
+                }
                 break
             } catch where attempt == 1 {
                 RuntimeHost.terminateAll(slot)

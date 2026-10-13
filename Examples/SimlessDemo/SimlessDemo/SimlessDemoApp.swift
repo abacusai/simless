@@ -13,7 +13,12 @@ struct SimlessDemoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            // UI tests open one of the behaviour labs directly.
+            if let lab = UserDefaults.standard.string(forKey: "SimlessDemoLab") {
+                BehaviorLab(name: lab)
+            } else {
+                RootView()
+            }
         }
     }
 }

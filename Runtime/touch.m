@@ -75,30 +75,10 @@ static IOHIDEventRef simless_hid_event(CGPoint p, UITouchPhase phase) {
 
 static NSTimeInterval lastTimestamp;
 
-/// The timestamp for the next touch event: now, or just after the last one
-/// when a fast-forwarded gesture ran ahead of the clock.
-NSTimeInterval simless_touch_clock(void) {
-    return MAX(NSProcessInfo.processInfo.systemUptime, lastTimestamp + 0.0005);
-}
-
-/// The earliest timestamp the next touch event may carry.
-NSTimeInterval simless_touch_after(void) {
-    return lastTimestamp + 0.0005;
-}
-
-BOOL simless_touch_at(UIWindow *window, CGPoint point, int phase, NSTimeInterval timestamp);
-
 /// One phase of a one-finger touch at `point` in `window` coordinates.
 /// phase: 0 began, 1 moved, 2 stationary, 3 ended, 4 cancelled.
 /// Returns NO if UIKit lacks a method this needs.
 BOOL simless_touch(UIWindow *window, CGPoint point, int phase) {
-    return simless_touch_at(window, point, phase, simless_touch_clock());
-}
-
-/// Like simless_touch, with the event's timestamp given: a gesture can be
-/// replayed faster than real time and still carry its real pace (scroll views
-/// measure a swipe's velocity from these timestamps).
-BOOL simless_touch_at(UIWindow *window, CGPoint point, int phase, NSTimeInterval timestamp) {
     UIApplication *app = UIApplication.sharedApplication;
     if (![app respondsToSelector:@selector(_touchesEvent)]) return NO;
     UITouchPhase p = (UITouchPhase)phase;
@@ -117,7 +97,8 @@ BOOL simless_touch_at(UIWindow *window, CGPoint point, int phase, NSTimeInterval
         if (p == UITouchPhaseMoved && [current respondsToSelector:@selector(setIsTap:)]) [current setIsTap:NO];
     }
     [current setPhase:p];
-    NSTimeInterval now = MAX(timestamp, lastTimestamp + 0.0005);
+    // Event times only go forward, even for two events in the same instant.
+    NSTimeInterval now = MAX(NSProcessInfo.processInfo.systemUptime, lastTimestamp + 0.0005);
     lastTimestamp = now;
     [current setTimestamp:now];
     IOHIDEventRef hid = simless_hid_event(point, p);

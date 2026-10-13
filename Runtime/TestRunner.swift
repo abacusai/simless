@@ -212,7 +212,18 @@ final class XCTestObserver: NSObject {
     private var starts: [String: Double] = [:]
     private var failed: Set<String> = []
 
-    init(connection: Connection) { self.connection = connection }
+    private var skipReasons: [String: String] = [:]
+
+    /// XCTest's internal observation of an XCTSkip, with its message.
+    @objc(testCase:didRecordSkipWithDescription:sourceCodeContext:)
+    func testCase(_ testCase: NSObject, didRecordSkipWithDescription description: NSString, sourceCodeContext: NSObject?) {
+        skipReasons[XCTestSide.id(testCase)] = description as String
+    }
+
+    init(connection: Connection) {
+        self.connection = connection
+        SkipMessages.install()
+    }
 
     @objc func testCaseWillStart(_ testCase: NSObject) {
         let id = XCTestSide.id(testCase)
@@ -236,11 +247,31 @@ final class XCTestObserver: NSObject {
 
     @objc func testCaseDidFinish(_ testCase: NSObject) {
         let id = XCTestSide.id(testCase)
-        let run = testCase.value(forKey: "testRun") as? NSObject
-        let skipped = run?.value(forKey: "hasBeenSkipped") as? Bool ?? false
-        var reason = ""
-        if skipped, let skip = run?.value(forKey: "skip") as? NSObject {
-            reason = (skip.value(forKey: "message") as? String) ?? (skip.value(forKey: "summary") as? String) ?? ""
+        // Key-value lookups only for keys the object has: an unknown key throws an
+        // Objective-C exception, which would take the host down.
+        func value(_ o: NSObject?, _ key: String) -> Any? {
+            guard let o, o.responds(to: NSSelectorFromString(key)) else { return nil }
+            return o.value(forKey: key)
+        }
+        let run = value(testCase, "testRun") as? NSObject
+        let skipped = value(run, "hasBeenSkipped") as? Bool ?? false
+        var reason = skipReasons[id] ?? ""
+        if skipped && reason.isEmpty, let run { reason = SkipMessages.message(for: run) ?? "" }
+        if skipped && reason.isEmpty {
+            if let context = value(run, "skippedTestContext") as? NSObject {
+                reason = (value(context, "message") as? String) ?? (value(context, "explanation") as? String) ?? ""
+            }
+        }
+        if skipped && reason.isEmpty {
+            for holder in [run, testCase] {
+                for key in ["skip", "skipIssue", "_skip"] {
+                    if let skip = value(holder, key) as? NSObject {
+                        reason = (value(skip, "message") as? String) ?? (value(skip, "summary") as? String) ?? (value(skip, "compactDescription") as? String) ?? ""
+                    }
+                    if !reason.isEmpty { break }
+                }
+                if !reason.isEmpty { break }
+            }
         }
         let result = skipped ? "skipped" : (failed.contains(id) ? "failed" : "passed")
         let seconds = starts[id].map { CFAbsoluteTimeGetCurrent() - $0 } ?? 0
@@ -262,4 +293,37 @@ func onMainRunLoop<T>(_ body: @escaping () -> T) -> T {
     CFRunLoopWakeUp(CFRunLoopGetMain())
     done.wait()
     return result!
+}
+
+/// XCTSkip's message: XCTest hands it to the test run and keeps no getter for
+/// it, so the run's recordSkip method is wrapped to note it.
+enum SkipMessages {
+    private static var installed = false
+    private static var messages: [ObjectIdentifier: String] = [:]
+    private static let lock = NSLock()
+
+    static func install() {
+        guard !installed, let cls = NSClassFromString("XCTestCaseRun") else { return }
+        installed = true
+        let sel = NSSelectorFromString("recordSkipWithDescription:sourceCodeContext:")
+        guard let m = class_getInstanceMethod(cls, sel) else { return }
+        typealias Record = @convention(c) (AnyObject, Selector, NSString?, AnyObject?) -> Void
+        let original = unsafeBitCast(method_getImplementation(m), to: Record.self)
+        let block: @convention(block) (AnyObject, NSString?, AnyObject?) -> Void = { run, description, context in
+            if let description {
+                lock.lock(); messages[ObjectIdentifier(run)] = description as String; lock.unlock()
+            }
+            original(run, sel, description, context)
+        }
+        method_setImplementation(m, imp_implementationWithBlock(block))
+    }
+
+    static func message(for run: NSObject) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        // XCTest words it "Test skipped - <message>"; the message is what matters
+        // (one starting "simulator only" marks a simulator-only test).
+        return messages.removeValue(forKey: ObjectIdentifier(run)).map {
+            $0.hasPrefix("Test skipped - ") ? String($0.dropFirst("Test skipped - ".count)) : $0
+        }
+    }
 }

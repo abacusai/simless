@@ -100,6 +100,11 @@ enum RuntimeHost {
         throw SimlessError("\(slot.slotID) did not start within \(Int(timeout))s; log: \(slot.dir)/host.log")
     }
 
+    /// Any process of the slot, answering or not.
+    static func hasProcess(_ slot: SlotRecord) -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID).isEmpty
+    }
+
     static func isRunning(_ slot: SlotRecord) -> Bool {
         guard let c = try? LineClient(port: slot.port, timeout: 1) else { return false }
         return (try? c.call(["cmd": "hello"])) != nil

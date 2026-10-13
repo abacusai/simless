@@ -22,9 +22,6 @@ import UIKit
 let runtimeVersion = 1
 
 @_silgen_name("simless_install_crash_handler") func simless_install_crash_handler()
-@_silgen_name("simless_touch_at") func simless_touch_at(_ window: UIWindow, _ point: CGPoint, _ phase: Int32, _ timestamp: TimeInterval) -> Bool
-@_silgen_name("simless_touch_clock") func simless_touch_clock() -> TimeInterval
-@_silgen_name("simless_touch_after") func simless_touch_after() -> TimeInterval
 @_silgen_name("simless_touch") func simless_touch(_ window: UIWindow, _ point: CGPoint, _ phase: Int32) -> Bool
 
 func runtimeLog(_ s: String) {
@@ -34,7 +31,17 @@ func runtimeLog(_ s: String) {
 @_cdecl("simless_runtime_start")
 public func simlessRuntimeStart() {
     let env = ProcessInfo.processInfo.environment
+    // simless removing a slot: the app empties its own data container (macOS
+    // lets nothing else touch it) and quits before anything else runs.
+    if env["SIMLESS_WIPE"] == "1" {
+        Housekeeping.empty(NSHomeDirectory())
+        exit(0)
+    }
+    // A test run starts with an empty tmp, so what tests leave there doesn't pile up.
+    if env["SIMLESS_CLEAN_TMP"] == "1" { Housekeeping.empty(NSTemporaryDirectory()) }
     raiseOpenFileLimit()
+    // No macOS permission or review dialogs from a host (SIMLESS_PERMISSIONS=ask lets them through).
+    if env["SIMLESS_PERMISSIONS"] != "ask" { Permissions.install() }
     consumeSandboxTokens(env["SIMLESS_SANDBOX_TOKENS"])
     if let slot = env["SIMLESS_SLOT_ID"], let original = env["SIMLESS_ORIGINAL_BUNDLE_ID"] {
         BundleIDs.restore(slot: slot, original: original)
@@ -83,27 +90,78 @@ func consumeSandboxTokens(_ joined: String?) {
 
 // MARK: - Bundle ids
 
-/// The slot renames app extensions and the watch app under its own id
-/// (installd requires that prefix). Tests that read their ids get the
-/// original ones back. The app's own id stays the slot's.
+/// The slot renames the app, its extensions and the watch app under its own
+/// id (installd requires that prefix). Tests that read their ids get the
+/// original ones back: from `bundleIdentifier`, and in Info.plist values
+/// (a watch app's companion id). In the render host the app keeps the slot's id.
 enum BundleIDs {
     static var slot = ""
     static var original = ""
+    /// Whether the app's own bundle reports its original id too (test and UI hosts).
+    static var includeMain = ProcessInfo.processInfo.environment["SIMLESS_RUNTIME_PORT"] != nil
+
+    /// The original id for one of the slot's ids, or nil for any other id.
+    static func originalID(_ id: String) -> String? {
+        if id == slot { return includeMain ? original : nil }
+        guard id.hasPrefix(slot + ".") else { return nil }
+        return original + id.dropFirst(slot.count)
+    }
+
+    /// The slot's id for an original one.
+    static func slotID(_ id: String) -> String? {
+        if id == original { return includeMain ? slot : nil }
+        guard id.hasPrefix(original + ".") else { return nil }
+        return slot + id.dropFirst(original.count)
+    }
 
     static func restore(slot: String, original: String) {
         self.slot = slot
         self.original = original
+        // bundleIdentifier
         let sel = NSSelectorFromString("bundleIdentifier")
-        guard let m = class_getInstanceMethod(Bundle.self, sel) else { return }
-        let old = method_getImplementation(m)
-        typealias Getter = @convention(c) (AnyObject, Selector) -> NSString?
-        let call = unsafeBitCast(old, to: Getter.self)
-        let block: @convention(block) (AnyObject) -> NSString? = { bundle in
-            guard let id = call(bundle, sel) as String? else { return nil }
-            guard (bundle as? Bundle) !== Bundle.main, id.hasPrefix(BundleIDs.slot + ".") else { return id as NSString }
-            return (BundleIDs.original + id.dropFirst(BundleIDs.slot.count)) as NSString
+        if let m = class_getInstanceMethod(Bundle.self, sel) {
+            typealias Getter = @convention(c) (AnyObject, Selector) -> NSString?
+            let call = unsafeBitCast(method_getImplementation(m), to: Getter.self)
+            let block: @convention(block) (AnyObject) -> NSString? = { bundle in
+                guard let id = call(bundle, sel) as String? else { return nil }
+                return (originalID(id) ?? id) as NSString
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
         }
-        method_setImplementation(m, imp_implementationWithBlock(block))
+        // Bundle(identifier:) with an id the app now reports (asset catalogs look bundles up that way).
+        let find = NSSelectorFromString("bundleWithIdentifier:")
+        if let m = class_getClassMethod(Bundle.self, find) {
+            typealias Find = @convention(c) (AnyObject, Selector, NSString) -> AnyObject?
+            let call = unsafeBitCast(method_getImplementation(m), to: Find.self)
+            let block: @convention(block) (AnyObject, NSString) -> AnyObject? = { cls, id in
+                call(cls, find, id) ?? slotID(id as String).flatMap { call(cls, find, $0 as NSString) }
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        // Info.plist values: the plists were rewritten with the slot's ids.
+        let info = NSSelectorFromString("infoDictionary")
+        if let m = class_getInstanceMethod(Bundle.self, info) {
+            typealias Info = @convention(c) (AnyObject, Selector) -> NSDictionary?
+            let call = unsafeBitCast(method_getImplementation(m), to: Info.self)
+            let block: @convention(block) (AnyObject) -> NSDictionary? = { bundle in
+                guard let d = call(bundle, info) as? [String: Any] else { return nil }
+                var out = d
+                for (k, v) in d { if let s = v as? String, let o = originalID(s) { out[k] = o } }
+                return out as NSDictionary
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        let object = NSSelectorFromString("objectForInfoDictionaryKey:")
+        if let m = class_getInstanceMethod(Bundle.self, object) {
+            typealias Object = @convention(c) (AnyObject, Selector, NSString) -> AnyObject?
+            let call = unsafeBitCast(method_getImplementation(m), to: Object.self)
+            let block: @convention(block) (AnyObject, NSString) -> AnyObject? = { bundle, key in
+                let v = call(bundle, object, key)
+                if let s = v as? String, let o = originalID(s) { return o as NSString }
+                return v
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
     }
 }
 
@@ -210,6 +268,8 @@ final class Connection {
 
     private func handle(_ cmd: String, _ req: [String: Any]) {
         switch cmd {
+        case "usage":
+            send(["ok": true, "containerBytes": Housekeeping.containerBytes()])
         case "hello":
             send(["ok": true, "pid": Int(getpid()), "runtime": runtimeVersion, "loaded": TestBundles.loaded,
                   "token": ProcessInfo.processInfo.environment["SIMLESS_HOST_TOKEN"] ?? ""])
@@ -252,5 +312,25 @@ enum TestBundles {
             }
         }
         return errors
+    }
+}
+
+/// The host's own files, which only the app itself may touch.
+enum Housekeeping {
+    /// Removes everything inside `dir`, keeping `dir`.
+    static func empty(_ dir: String) {
+        let fm = FileManager.default
+        for item in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
+            try? fm.removeItem(atPath: (dir as NSString).appendingPathComponent(item))
+        }
+    }
+
+    /// Bytes under the app's data container.
+    static func containerBytes() -> Int {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
+        var total = 0
+        for case let f as URL in e { total += (try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0 }
+        return total
     }
 }

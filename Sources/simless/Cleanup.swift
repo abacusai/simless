@@ -5,13 +5,16 @@ import Foundation
 
 /// simless cleans up after itself:
 /// - every command first collects garbage left by worktrees that no longer exist
-///   (agents delete their worktrees when done): host, slot, build cache;
+///   (agents delete their worktrees when done), or that haven't used simless
+///   for two weeks: host, slot, the app's data container, build cache;
+/// - crash reports of its hosts go after a day, and a test run starts with an
+///   empty tmp in the app's container;
 /// - hosts exit on their own after 30 idle minutes;
 /// - only the newest few patches are kept; the shared compile cache is capped.
 enum Cleanup {
     static let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     static let keepPatches = 3
-    static let compileCacheLimitGB = 12.0
+    static let compileCacheLimitGB = 8.0
 
     /// Stops the host, unregisters the install, deletes the slot directory.
     static func removeSlot(_ slot: SlotRecord) {
@@ -23,9 +26,44 @@ enum Cleanup {
     private static func removeSlotDir(_ dir: String) {
         let installed = "\(dir)/Debug-iphoneos/.XCInstall"
         for app in (try? FileManager.default.contentsOfDirectory(atPath: installed)) ?? [] where app.hasSuffix(".app") {
+            wipeContainer(app: "\(installed)/\(app)", runtime: "\(dir)/SimlessRuntime.dylib")
             _ = try? Shell.run([lsregister, "-u", "\(installed)/\(app)"], useXcode: false)
         }
+        removeCrashReports(slotID: (dir as NSString).lastPathComponent, olderThan: 0)
         try? FileManager.default.removeItem(atPath: dir)
+    }
+
+    /// Empties the slot app's data container. macOS protects app containers
+    /// from other processes, so the app does it itself: launched with
+    /// SIMLESS_WIPE=1, SimlessRuntime deletes its files and quits.
+    static func wipeContainer(app: String, runtime: String) {
+        guard exists(runtime) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-W", "-g", "-j", "-n", "--env", "DYLD_INSERT_LIBRARIES=\(runtime)", "--env", "SIMLESS_WIPE=1", app]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return }
+        let deadline = now() + 20
+        while p.isRunning && now() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        if p.isRunning { p.terminate() }
+    }
+
+    /// Crash reports macOS wrote for simless hosts (a slot's, or every slot's),
+    /// older than `age` seconds.
+    static func removeCrashReports(slotID: String? = nil, olderThan age: TimeInterval) {
+        let dir = "\(Paths.home)/Library/Logs/DiagnosticReports"
+        for file in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where file.hasSuffix(".ips") {
+            let path = "\(dir)/\(file)"
+            guard Date().timeIntervalSinceReferenceDate - mtime(path) > age,
+                  let handle = FileHandle(forReadingAtPath: path) else { continue }
+            let head = String(decoding: handle.readData(ofLength: 600), as: UTF8.self)
+            try? handle.close()
+            guard let r = head.range(of: #""bundleID":"([^"]+)""#, options: .regularExpression) else { continue }
+            let id = head[r].dropFirst("\"bundleID\":\"".count).dropLast()
+            let ours = slotID.map { id == $0 } ?? (id.range(of: #"\.simless\d+(-[a-z0-9]+)?$"#, options: .regularExpression) != nil)
+            if ours { try? FileManager.default.removeItem(atPath: path) }
+        }
     }
 
     /// Cheap enough to run on every invocation.
@@ -46,6 +84,24 @@ enum Cleanup {
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: Paths.slots)) ?? [] where !known.contains(dir) {
                 removeSlotDir("\(Paths.slots)/\(dir)")
             }
+            // Worktrees that exist but haven't used simless for two weeks: their
+            // hosts, slots and builds go (`simless up` makes them again).
+            let stale = state.slots.filter { slot in
+                let work = Paths.workDir(forWorktree: slot.worktree)
+                let used = exists("\(work)/last-used") ? mtime("\(work)/last-used") : mtime(work)
+                return used > 0 && Date().timeIntervalSinceReferenceDate - used > 14 * 86_400
+            }
+            for slot in stale {
+                Log.step("cleaning up \(slot.slotID): \(slot.worktree) hasn't used simless for two weeks")
+                removeSlot(slot)
+                try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: slot.worktree))
+            }
+            if !stale.isEmpty {
+                state.slots.removeAll { s in stale.contains { $0.slotID == s.slotID } }
+                try state.save()
+            }
+            // Crash reports of simless hosts, after a day.
+            removeCrashReports(olderThan: 86_400)
             // Build caches of worktrees that no longer exist.
             let work = "\(Paths.cache)/work"
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
@@ -72,6 +128,17 @@ enum Cleanup {
                 try? fm.removeItem(atPath: "\(dir)/\(f)")
             }
         }
+    }
+
+    /// Runs a build, and if it failed on a damaged compilation cache (an
+    /// entry left half-written, by a full disk for one), clears the cache and
+    /// builds once more.
+    static func retryingPoisonedCache(_ build: () throws -> Shell.Result) rethrows -> Shell.Result {
+        let r = try build()
+        guard r.code != 0, r.out.contains("cache poisoned") || r.out.contains("caching backend error") else { return r }
+        Log.step("the shared compilation cache is damaged; clearing it and building again")
+        try? FileManager.default.removeItem(atPath: "\(Paths.cache)/CompilationCache")
+        return try build()
     }
 
     /// The shared compile cache only speeds up first builds; drop it when large.
@@ -102,6 +169,7 @@ enum Cleanup {
         if all {
             let state = GlobalState.load()
             for slot in state.slots { removeSlot(slot) }
+            removeCrashReports(olderThan: 0)
             // Every worktree simless built for (slot records and build-cache owner
             // markers), so generated project variants go too.
             let work = "\(Paths.cache)/work"

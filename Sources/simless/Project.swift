@@ -65,7 +65,10 @@ struct Workspace {
 
     static func load() throws -> Workspace {
         guard let root = findRoot() else { throw SimlessError("no \(configName) found; run `simless init` in your app's repository") }
-        return try load(at: root)
+        let ws = try load(at: root)
+        // When this worktree last used simless, for evicting caches nobody uses.
+        if exists(ws.work) { FileManager.default.createFile(atPath: "\(ws.work)/last-used", contents: nil) }
+        return ws
     }
 
     static func load(at root: String) throws -> Workspace {
@@ -199,15 +202,19 @@ struct Workspace {
         try withBuildToken(count: tokens) {
             let t = now()
             Log.step("building \(config.scheme) for Designed-for-iPad (log: \(buildLog))")
-            let r = try Shell.run(["xcodebuild", "build-for-testing",
+            let r = try Cleanup.retryingPoisonedCache {
+                try Shell.run(["xcodebuild", "build-for-testing",
                              "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
                              "-destination", Self.dfiDestination, "-derivedDataPath", derivedData,
                              "-skipMacroValidation", "-skipPackagePluginValidation",
                              "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
                              // One content-addressed cache for every worktree: a new
                              // worktree's first build reuses what the others compiled.
-                             "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache"],
+                             "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
+                             // Nothing searches the index of these builds.
+                             "COMPILER_INDEX_STORE_ENABLE=NO"],
                             cwd: root, logPath: buildLog)
+            }
             guard r.code == 0 else {
                 throw SimlessError("build failed (log: \(buildLog)):\n" + Patch.compilerErrors(r.out))
             }

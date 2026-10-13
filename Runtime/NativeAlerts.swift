@@ -59,6 +59,19 @@ enum NativeAlerts {
         while alertPresented() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     }
 
+    /// The alert controller UIKit turned into `p`, for what AppKit's alert
+    /// doesn't carry: whether it's an action sheet, and the actions' identifiers.
+    private static func controller(for p: Pending) -> UIAlertController? {
+        for w in UIAutomation.appWindows {
+            var vc = w.rootViewController
+            while let cur = vc {
+                if let a = cur as? UIAlertController, (a.title ?? "") == p.title || a.message == p.title { return a }
+                vc = cur.presentedViewController
+            }
+        }
+        return nil
+    }
+
     private static func alertPresented() -> Bool {
         for w in UIAutomation.appWindows {
             var vc = w.rootViewController
@@ -81,7 +94,10 @@ enum NativeAlerts {
             let height = textHeight + Double(buttons.count) * 44
             let x = (c.w - width) / 2, y = (c.h - height) / 2
             let alertIndex = out.count
-            out.append(["ref": addRef(p.alert), "parent": -1, "type": 7, "label": p.title, "id": p.title,
+            let controller = controller(for: p)
+            // A confirmation dialog is an action sheet on an iPhone.
+            let type = controller?.preferredStyle == .actionSheet ? 5 : 7
+            out.append(["ref": addRef(p.alert), "parent": -1, "type": type, "label": p.title, "id": p.title,
                         "frame": [x, y, width, height], "enabled": true, "hittable": true])
             out.append(["ref": addRef(p.alert), "parent": alertIndex, "type": 48, "label": p.title,
                         "frame": [x + 16, y + 12, width - 32, 22], "enabled": true, "hittable": true])
@@ -90,7 +106,11 @@ enum NativeAlerts {
                             "frame": [x + 16, y + 40, width - 32, 36], "enabled": true, "hittable": true])
             }
             for (i, title) in buttons.enumerated() {
-                out.append(["ref": addRef(Button(p, i)), "parent": alertIndex, "type": 9, "label": title, "id": title,
+                // The identifier the app gave the action (SwiftUI passes a button's on), else its title.
+                let action = controller?.actions.first { $0.title == title }
+                let given = action.flatMap { $0.responds(to: NSSelectorFromString("accessibilityIdentifier")) ? $0.value(forKey: "accessibilityIdentifier") as? String : nil }
+                let id = given.flatMap { $0.isEmpty ? nil : $0 } ?? title
+                out.append(["ref": addRef(Button(p, i)), "parent": alertIndex, "type": 9, "label": title, "id": id,
                             "frame": [x, y + textHeight + Double(i) * 44, width, 44], "enabled": true, "hittable": true])
             }
         }
