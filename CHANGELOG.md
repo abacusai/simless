@@ -3,6 +3,26 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## 0.5.0 (2026-10-14)
+
+The goal for this one was making simless trustworthy enough to decide whether code can merge, on the same production app as 0.4.0 plus the demo app and a second app.
+
+On the first app, the full unit suite (2,210 tests) gives the same results as the simulator in 5.2 to 5.5 min once built, against 6.3 min of simulator test time. From nothing (no build, empty caches) it takes 8.5 min against 8.2 min for the simulator's build and tests. That last number is set by one CPU-heavy test target that the Mac's Swift runtime runs about twice as slow as the simulator's. Plain CPU work runs at the simulator's speed: the demo app now has a benchmark for it. All 108 UI tests that don't need a simulator pass, on iPhone and iPad, in 7.6 min against 19.2 min on 5 simulator clones. 5 back-to-back runs of both suites on one commit passed with the same tests every time, and two worktrees ran the unit and UI suites at once without timeouts.
+
+- **The exit code is the truth.** `simless test` exits non-zero when a selected test failed, crashed, ran out of time or never ran, and when a selection matches no test at all. Tests that are marked simulator-only, `--skip`ped or in a UI test target the scheme doesn't build are listed, but don't count against the run.
+- **Results a merge script can gate on.** Both results files start with `ok`, `selected`, `notRun` and `flaky`, and every test has one status: passed, failed, crashed, skipped, flaky, not-run, simulator-only, excluded or not-built. A test that only passed when it ran again alone is `flaky` now, not plain passed.
+- **Every UI test target is listed.** A UI test target the scheme doesn't build (a watch app's, say) shows up with its tests, simulator-only when marked, so nothing a merge has to run elsewhere goes missing.
+- **Selection from a file.** `simless test --from <file>` (or `-` for stdin) takes test ids one per line, in the format the results use. Unit and UI ids can be mixed: both run, with one exit code.
+- **Every run starts from a fresh install's data**, like a simulator's clones. Before a UI run and before each unit test host starts, the app's data container is emptied and its saved preferences are cleared (macOS keeps those in memory, so deleting the files alone gave the next launch its old values). Before this, a counter the app kept in `UserDefaults` grew run after run until UI tests hit a weekly limit on the 4th run of the same commit. And before a UI test quits the app, the app now syncs its settings, so what it saved is there when the test launches it again.
+- **A broken install is installed again.** An install macOS had stopped opening failed every test on its host with "No such file or directory". The launch that empties the data now checks each slot too, a slot that won't open gets installed again, and tests whose app never launched always run again.
+- **iPhone and iPad in one run.** `tests.uiDevices` adds devices and the tests that run on each (`{"ipad": ["AppUITests/IPadUITests"]}`), and `simless test ui --device iphone,ipad` runs everything on both. The results are merged: a test passes when it passed on one device and failed on none, so iPad-only tests stop getting skipped by accident. Each device keeps its own screenshots and logs.
+- **The simulator-only lane runs on exactly what's configured.** The command uses a simulator named like `calibrate.device` on `calibrate.runtime` (for watchOS too). When that runtime or device isn't there, it says which, prints the command that installs or creates it, and exits 1, instead of falling back to another session's simulator.
+- **Faster cold start.** Package tests build in the app's build folder with the app build's settings, so a cold `simless up` no longer compiles a big local package twice. The runtime compiles during the app build, and the test hosts get ready while the render host starts. App builds skip debug info, which nothing reads.
+- **Hosts are spread by how long each target really takes.** The time from a target's first test to its last one decides where it runs, and a target that takes half again as long as any other gets a host to itself. These times are kept per repository, so a new worktree or a run after `simless clean` spreads well from the start.
+- **Several sessions at once.** Test runs in different worktrees share the Mac's cores instead of each sizing itself for the whole Mac, and `simless status` shows the runs going on and the share each gets.
+- **Disk stays bounded across worktrees.** Everything simless keeps is capped at 25 GB (`SIMLESS_DISK_LIMIT_GB`). Over that, `simless up` removes the builds and slots of the worktrees that used simless least recently, never one in use in the last hour, and then the shared compilation cache.
+- **Small fixes.** `simless test ui <selection>` works, skipped UI tests keep their reason and time, the help says 600 s for UI tests, and `simless up` no longer leaves a `.build` folder in your local packages.
+
 ## 0.4.0 (2026-10-13)
 
 Fixes from running 0.3.0 on the same production app, plus a second app to keep it generic. Every fix has a small SwiftUI repro in the demo app's UI tests and was checked on both apps.

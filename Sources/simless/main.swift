@@ -3,14 +3,14 @@
 
 import Foundation
 
-let version = "0.4.0"
+let version = "0.5.0"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
   simless init [--no-hook]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
   simless up [--no-tests]          build (Designed for iPad), install this worktree's slot, start its host;
-        also builds local packages' tests and prepares the test hosts (--no-tests skips that)
+        also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
         [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
@@ -21,17 +21,22 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
         local package test targets too; all: every unit test target
         [--skip Target[/Class[/method]]]... [--timeout <seconds per test, default 600>]
         [--hosts <test hosts side by side, default up to 4>] [--jobs <tests at once per host>]
+        [--from <file|->]: test ids from a file or stdin, one per line, as the results JSON writes them
+        (unit and UI ids can be mixed: both run, one exit code)
   simless test ui [UITarget[/Class[/method]]...]   XCUITest UI tests, unchanged, in hidden hosts
         (naming a UI test target, class or test runs it the same way)
-        [--jobs <hosts, default up to 4>] [--device iphone|ipad|...] [--timeout <seconds per test, default 300>]
+        [--jobs <hosts, default up to 4>] [--device iphone|ipad|iphone,ipad] [--timeout <seconds per test, default 600>]
   simless test --simulator-only    list the tests marked as needing a simulator (tests.simulatorOnly)
-        and the xcodebuild command that runs just those
-        results: test-results.json and ui-test-results.json in the work folder (`simless status` shows it)
+        and the xcodebuild command that runs just those on calibrate.device and calibrate.runtime
+        (exits 1 and says what to install or create when that simulator isn't there)
+        exit code 0 only when every selected test ran and passed (simulator-only ones aside)
+        results: test-results.json and ui-test-results.json in the work folder (`simless status` shows it),
+        every test with its status: passed, failed, crashed, skipped, flaky, not-run, simulator-only, excluded, not-built
   simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
         [--dark] [--png <dir>]: also dark mode; save both renders of every screen + a side-by-side report.md
         [--runtime <iOS version, e.g. 26.5>] [--sim-device <name, e.g. "iPhone 16e">]
-  simless status                   slots, hosts, live-reload availability
-  simless down [--all]             stop this worktree's host (or every host); relaunches on next use
+  simless status                   hosts, test runs going on and their share of the Mac, disk use
+  simless down [--all]             stop this worktree's hosts, render, test and UI (or every worktree's); they start again on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
   simless skill install            install the Claude Code skill so agents know how to use simless
   simless agent install            build + start SimlessAgent (enables ~1.5 s live reload; needs Full Disk Access)
@@ -51,7 +56,7 @@ struct Args {
 
     init(_ raw: [String]) {
         let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
-                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device", "--jobs"]
+                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
@@ -267,28 +272,53 @@ func cmdUp(_ args: Args) throws {
     try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
     try ws.snapshotSources()
-    // Local packages' tests build next to the app, so the first `simless test`
-    // doesn't wait for them.
+    // Local packages' tests: the scheme's build-for-testing usually builds them
+    // with the app. Sources as of now, for marking those bundles current.
+    let packages = Packages.testTargets(ws: ws)
+    let packageSources = Dictionary(packages.map { ($0.package, Packages.newestSource($0.dir)) }, uniquingKeysWith: { a, _ in a })
     let packageBuild = DispatchGroup()
-    if args.flags.contains("--no-tests") == false, !Packages.testTargets(ws: ws).isEmpty {
-        DispatchQueue.global().async(group: packageBuild) { TestEngine.buildPackageTests(ws) }
-    }
     defer { packageBuild.wait() }
+    DispatchQueue.global().async(group: packageBuild) { RuntimeBuild.prebuild() }
     do { try ws.build() } catch {
         // A failed build must not hide edits from the next `simless reload`.
         if let previousSnapshot { try? previousSnapshot.write(to: URL(fileURLWithPath: ws.snapshotPath)) }
         else { try? FileManager.default.removeItem(atPath: ws.snapshotPath) }
         throw error
     }
+    // Package tests the app build made are current; the rest build now, in the
+    // app's build folder, while the host starts.
+    if !args.flags.contains("--no-tests") {
+        for p in packages {
+            let built = Packages.markBuilt(p, newest: packageSources[p.package] ?? 0, ws: ws)
+            let missing = p.targets.filter { !built.contains($0) }
+            if !missing.isEmpty {
+                DispatchQueue.global().async(group: packageBuild) {
+                    do { _ = try Packages.buildTests(p, targets: missing, ws: ws) }
+                    catch { Log.info("note: building \(p.package)'s tests failed; `simless test` will say why") }
+                }
+            }
+        }
+    }
+    // The render slot's record says what build is current before anything
+    // else looks: the test slots prepared next compare themselves with it.
     let settings = try ws.settings()
     var slot = try GlobalState.slot(bundleBase: settings.bundleID, worktree: ws.root)
-    let embedded = ws.config.embeddedBundles ?? true
-    try Slots.prepare(slot, ws: ws, settings: settings, embedded: embedded)
     // The fresh build contains every edit; earlier patches must not be re-applied.
     slot.builtAt = buildStart
     slot.patch = 0
     slot.lastPatch = nil
     try GlobalState.update(slot)
+    // The test hosts get ready while the render host installs and starts.
+    let testsReady = DispatchGroup()
+    if !args.flags.contains("--no-tests") {
+        DispatchQueue.global().async(group: testsReady) {
+            packageBuild.wait()
+            do { try TestEngine.prewarm(ws) } catch { Log.info("note: preparing test hosts failed (\(error)); `simless test` will retry") }
+        }
+    }
+    defer { testsReady.wait() }
+    let embedded = ws.config.embeddedBundles ?? true
+    try Slots.prepare(slot, ws: ws, settings: settings, embedded: embedded)
     do {
         try Slots.install(slot, ws: ws)
     } catch where embedded {
@@ -307,10 +337,8 @@ func cmdUp(_ args: Args) throws {
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")")
     if let note = skillNote() { print(note) }
-    packageBuild.wait()
-    if !args.flags.contains("--no-tests") {
-        do { try TestEngine.prewarm(ws) } catch { Log.info("note: preparing test hosts failed (\(error)); `simless test` will retry") }
-    }
+    testsReady.wait()
+    Cleanup.enforceDiskLimit(keeping: ws)
 }
 
 func cmdRender(_ args: Args) throws {
@@ -466,6 +494,13 @@ func cmdStatus(_ args: Args) throws {
         }
     }
     print("\(running) host(s) running, \(Int(totalMB)) MB")
+    // Test runs going on now, and the share of the Mac each gets.
+    let runs = Budget.running()
+    if !runs.isEmpty {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        print("test runs: \(runs.count), each with about \(cores / runs.count) of \(cores) cores")
+        for r in runs { print("  \(r.kind == "ui" ? "UI tests" : "unit tests")  \(r.hosts) host(s)  \(secs(r.started))  \(r.worktree)") }
+    }
     // Disk, by what it's for and what frees it.
     func gb(_ path: String) -> Double {
         guard exists(path) else { return 0 }

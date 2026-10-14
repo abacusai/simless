@@ -2,7 +2,7 @@
 
 The [demo app](../Examples/SimlessDemo) has seven screens built from common SwiftUI patterns. Each one was rendered twice, in light and dark mode:
 
-- **iOS Simulator:** an iPhone 17 Pro running iOS 27.0, which is what the legacy workflow screenshots;
+- **iOS Simulator:** an iPhone 17 Pro running iOS 27.0, which is what the legacy workflow screenshots.
 - **simless:** the same app running natively on the Mac as a hidden host (macOS 27.0.1, Xcode 27.0).
 
 `simless calibrate` then compared the two accessibility trees element by element.
@@ -18,7 +18,7 @@ The [demo app](../Examples/SimlessDemo) has seven screens built from common Swif
 | Login | Text fields, a toggle, a button | ✓ light, ✓ dark | None |
 | Login.error | The same with an inline error | ✓ light, ✓ dark | Text renders ~4% wider (same lines) |
 | Feed | Long `List` with sections in a `NavigationStack` | ✗ | Each row is 2 pt taller, accumulating down the list |
-| Settings | Grouped `Form` with toggles, a picker, a stepper | ✗ | Toggle rows are 6 pt taller; "on" toggles use the Mac's accent color |
+| Settings | Grouped `Form` with toggles, a picker, a stepper | ✗ | Toggle rows are 6 pt taller, "on" toggles use the Mac's accent color |
 | Profile | Wrapped bio, equal-width stats, wrapping tags, `Menu` | ✗ | The bio wraps onto a third line; the `Menu` exposes no label |
 
 ## Matching screens
@@ -65,8 +65,8 @@ Text renders a few percent wider on the Mac. Usually that changes nothing, but t
 
 - **Trust:** what's on the screen, its order, labels and identifiers, and layout built from stacks, padding and fixed sizes. Those matched across every screen.
 - **Treat as approximate:**
-  - exact line breaks in long or centered text;
-  - heights of platform-styled rows (`List`, `Form`);
+  - exact line breaks in long or centered text.
+  - heights of platform-styled rows (`List`, `Form`).
   - anything positioned below such rows.
 - **Not visible in a tree:** colors that come from the system accent color. Check those in the simulator.
 - **Accessibility flags on `Menu` and other platform-backed controls:** confirm them with `simless calibrate` before fixing.

@@ -34,7 +34,10 @@ public func simlessRuntimeStart() {
     // simless removing a slot: the app empties its own data container (macOS
     // lets nothing else touch it) and quits before anything else runs.
     if env["SIMLESS_WIPE"] == "1" {
-        Housekeeping.empty(NSHomeDirectory())
+        // Preferences go through cfprefsd: deleting its files behind its back
+        // made the next launch's settings vanish.
+        Housekeeping.resetDefaults()
+        Housekeeping.empty(NSHomeDirectory(), keepFolders: 2, keeping: ["Preferences"])
         exit(0)
     }
     // A test run starts with an empty tmp, so what tests leave there doesn't pile up.
@@ -317,12 +320,40 @@ enum TestBundles {
 
 /// The host's own files, which only the app itself may touch.
 enum Housekeeping {
-    /// Removes everything inside `dir`, keeping `dir`.
-    static func empty(_ dir: String) {
+    /// Removes everything inside `dir`, keeping `dir`. With `keepFolders`,
+    /// folders down to that depth stay, empty: an app container's skeleton
+    /// (Library, Library/Caches, tmp, ...) has to be there for macOS to
+    /// launch the app again.
+    static func empty(_ dir: String, keepFolders depth: Int = 0, keeping kept: Set<String> = []) {
         let fm = FileManager.default
-        for item in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
-            try? fm.removeItem(atPath: (dir as NSString).appendingPathComponent(item))
+        for item in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !kept.contains(item) {
+            let path = (dir as NSString).appendingPathComponent(item)
+            var isDir: ObjCBool = false
+            let isLink = (try? fm.destinationOfSymbolicLink(atPath: path)) != nil
+            if depth > 0, !isLink, fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                empty(path, keepFolders: depth - 1, keeping: kept)
+            } else {
+                try? fm.removeItem(atPath: path)
+            }
         }
+    }
+
+    /// Clears every preferences domain the app saved (its own, and suites):
+    /// cfprefsd keeps them in memory, so deleting the plist files alone would
+    /// hand the next launch its old values.
+    static func resetDefaults() {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(atPath: NSHomeDirectory()) else { return }
+        var domains: Set<String> = []
+        for case let path as String in e where path.hasSuffix(".plist") && (path as NSString).deletingLastPathComponent.hasSuffix("Preferences") {
+            domains.insert(((path as NSString).lastPathComponent as NSString).deletingPathExtension)
+        }
+        if let own = Bundle.main.bundleIdentifier { domains.insert(own) }
+        for domain in domains {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+            CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        }
+        UserDefaults.standard.synchronize()
     }
 
     /// Bytes under the app's data container.

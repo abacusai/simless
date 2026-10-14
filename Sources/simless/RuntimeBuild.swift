@@ -8,10 +8,31 @@ import Foundation
 /// identity, and cached until simless or Xcode changes.
 enum RuntimeBuild {
     static func dylib(team: String) throws -> String {
+        let unsigned = try compiled()
+        let dir = (unsigned as NSString).deletingLastPathComponent
+        let out = "\(dir)/signed-\(shortHash(team))/SimlessRuntime.dylib"
+        if exists(out) { return out }
+        return try withLock("runtime-build") {
+            if exists(out) { return out }
+            try mkdirp((out as NSString).deletingLastPathComponent)
+            try? FileManager.default.removeItem(atPath: out + ".tmp")
+            try FileManager.default.copyItem(atPath: unsigned, toPath: out + ".tmp")
+            try Signing.sign(out + ".tmp", identity: try Signing.identity(team: team).0)
+            try FileManager.default.moveItem(atPath: out + ".tmp", toPath: out)
+            return out
+        }
+    }
+
+    /// Compiles the runtime ahead of time (`simless up` does it next to the
+    /// app's build, since it needs nothing from it).
+    static func prebuild() { _ = try? compiled() }
+
+    /// The runtime compiled for this simless and Xcode, not yet signed.
+    static func compiled() throws -> String {
         let sources = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Runtime")) ?? [])
             .filter { $0.hasSuffix(".swift") || $0.hasSuffix(".c") || $0.hasSuffix(".m") }.sorted().map { "\(Paths.toolRoot)/Runtime/\($0)" }
         let xcode = (try? Shell.run(["xcodebuild", "-version"]).out) ?? ""
-        let stamp = shortHash(([version, xcode, team] + sources.map { "\($0) \(mtime($0))" }).joined(separator: "|"))
+        let stamp = shortHash(([version, xcode] + sources.map { "\($0) \(mtime($0))" }).joined(separator: "|"))
         let dir = "\(Paths.cache)/runtime/\(stamp)"
         let out = "\(dir)/SimlessRuntime.dylib"
         if exists(out) { return out }
@@ -29,9 +50,9 @@ enum RuntimeBuild {
             }
             try Shell.check(["xcrun", "swiftc", "-emit-library", "-O", "-module-name", "SimlessRuntime",
                              "-target", "arm64-apple-ios17.0", "-sdk", sdk, "-swift-version", "5",
-                             "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup", "-framework", "IOKit", "-o", out]
+                             "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup", "-framework", "IOKit", "-o", out + ".tmp"]
                             + sources.filter { $0.hasSuffix(".swift") } + objects, what: "build SimlessRuntime")
-            try Signing.sign(out, identity: try Signing.identity(team: team).0)
+            try FileManager.default.moveItem(atPath: out + ".tmp", toPath: out)
             Log.step("built SimlessRuntime in \(secs(t))")
             // Older builds of the runtime are no use once this one exists.
             for old in (try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.cache)/runtime")) ?? [] where old != stamp {

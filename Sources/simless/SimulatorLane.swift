@@ -54,40 +54,58 @@ enum SimulatorLane {
 
     /// `platform=<X> Simulator,name=<device>,OS=<version>` on the newest
     /// runtime installed for the platform (or `calibrate.runtime` for iOS).
-    static func destination(_ platform: String, ws: Workspace) -> String {
-        let fallback = platform == "watchOS" ? "Apple Watch Series 11 (46mm)" : (ws.config.calibrate?.device ?? Calibrate.simDeviceType)
+    /// Where a platform's simulator-only tests run, or what's missing for it.
+    enum Destination {
+        case ready(String)
+        case missing(String)
+    }
+
+    /// The configured device type (`calibrate.device`, or an Apple Watch for
+    /// watchOS) on the configured runtime (`calibrate.runtime`, else the newest
+    /// installed one). Only a simulator named exactly like the device type
+    /// counts: another session's simulator, booted or renamed, never stands in.
+    static func destination(_ platform: String, ws: Workspace) -> Destination {
+        let deviceType = platform == "watchOS" ? "Apple Watch Series 11 (46mm)" : (ws.config.calibrate?.device ?? Calibrate.simDeviceType)
         guard let out = try? Shell.run(["xcrun", "simctl", "list", "-j", "devices", "available"], stdoutOnly: true).out,
               let json = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
               let devices = json["devices"] as? [String: [[String: Any]]] else {
-            return "platform=\(platform) Simulator,name=\(fallback)"
+            return .missing("`xcrun simctl list` didn't answer, so there's no simulator to check")
         }
         // Runtime keys look like com.apple.CoreSimulator.SimRuntime.iOS-26-5.
         let prefix = "com.apple.CoreSimulator.SimRuntime.\(platform)-"
         func version(_ key: String) -> [Int] { key.dropFirst(prefix.count).split(separator: "-").compactMap { Int($0) } }
-        var runtimes = devices.keys.filter { $0.hasPrefix(prefix) && !(devices[$0] ?? []).isEmpty }
-            .sorted { version($0).lexicographicallyPrecedes(version($1)) }
-        if platform == "iOS", let wanted = ws.config.calibrate?.runtime {
+        let installed = devices.keys.filter { $0.hasPrefix(prefix) }.sorted { version($0).lexicographicallyPrecedes(version($1)) }
+        let wanted = ws.config.calibrate?.runtime
+        let runtime: String
+        if let wanted {
             let w = wanted.split(separator: ".").compactMap { Int($0) }
-            let matching = runtimes.filter { Array(version($0).prefix(w.count)) == w }
-            if !matching.isEmpty { runtimes = matching }
-        }
-        guard !runtimes.isEmpty else { return "platform=\(platform) Simulator,name=\(fallback)" }
-        // A simulator named like the device type, newest runtime first; else any
-        // simulator of that type; else any of the platform's devices.
-        let type = fallback.replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
-        let kind = platform == "watchOS" ? "Apple-Watch" : platform == "iOS" ? "iPhone" : ""
-        func pick(_ ok: ([String: Any]) -> Bool) -> (String, String)? {
-            for r in runtimes.reversed() {
-                if let d = (devices[r] ?? []).first(where: ok), let name = d["name"] as? String { return (r, name) }
+            guard let r = installed.last(where: { Array(version($0).prefix(w.count)) == w }) else {
+                return .missing("no \(platform) \(wanted) simulator runtime is installed (calibrate.runtime). Install it with "
+                    + "`xcodebuild -downloadPlatform \(platform) -buildVersion \(wanted)`, or set calibrate.runtime to an installed one: "
+                    + (installed.isEmpty ? "none installed" : installed.map { version($0).map(String.init).joined(separator: ".") }.joined(separator: ", ")))
             }
-            return nil
+            runtime = r
+        } else {
+            guard let r = installed.last else {
+                return .missing("no \(platform) simulator runtime is installed. Install one with `xcodebuild -downloadPlatform \(platform)`")
+            }
+            runtime = r
         }
-        let chosen = pick { ($0["name"] as? String) == fallback }
-            ?? pick { ($0["deviceTypeIdentifier"] as? String ?? "").hasSuffix("." + type) }
-            ?? pick { ($0["deviceTypeIdentifier"] as? String ?? "").contains("." + kind) }
-        guard let (runtime, name) = chosen else { return "platform=\(platform) Simulator,name=\(fallback)" }
         let os = version(runtime).map(String.init).joined(separator: ".")
-        return "platform=\(platform) Simulator,name=\(name),OS=\(os)"
+        guard (devices[runtime] ?? []).contains(where: { ($0["name"] as? String) == deviceType }) else {
+            let type = deviceTypeID(deviceType) ?? "com.apple.CoreSimulator.SimDeviceType.\(deviceType.replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: ""))"
+            return .missing("no simulator named \"\(deviceType)\" on \(platform) \(os). Create it with "
+                + "`xcrun simctl create \"\(deviceType)\" \(type) \(runtime)`")
+        }
+        return .ready("platform=\(platform) Simulator,name=\(deviceType),OS=\(os)")
+    }
+
+    /// The simctl identifier of a device type by its name.
+    static func deviceTypeID(_ name: String) -> String? {
+        guard let out = try? Shell.run(["xcrun", "simctl", "list", "-j", "devicetypes"], stdoutOnly: true).out,
+              let json = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
+              let types = json["devicetypes"] as? [[String: Any]] else { return nil }
+        return types.first { ($0["name"] as? String) == name }?["identifier"] as? String
     }
 
     private static func matches(_ text: String, _ pattern: String) -> [String] {

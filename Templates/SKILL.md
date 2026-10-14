@@ -64,11 +64,14 @@ simless test all --skip MyAppTests/DeviceOnlyTests   # every test target, minus 
 simless test ui                              # the XCUITest UI tests, no simulator
 simless test MyAppUITests/LoginUITests       # one UI test class (or Target/Class/testMethod)
 simless test --simulator-only                # what's marked as needing a simulator, and how to run it
+simless test --from changed-tests.txt        # test ids from a file (or - for stdin), unit and UI mixed
 ```
 
 `simless test` prints failures and crashes (with the trap's file and message) as they happen, and a progress line every 10 s. A test that runs past `--timeout` (default 600 s per test, like Xcode) fails, and one that hangs stops the run with its name. Skip it with `--skip`, and tell the user it needs a device. If simless says a `--skip` didn't match, fix the id (Swift Testing: `Target/Suite/test()`, XCTest: `Target/Class/testMethod`).
 
-`simless test ui` runs the UI tests' XCUITest code unchanged in hidden hosts. A failure prints the test's message and saves a screenshot and the element tree (the run's last line says where); read them before changing anything. A test that needs a real simulator (HealthKit sheets, StoreKit, the photo or file picker, the watch app) goes in `tests.simulatorOnly` in `.simless.json` with the reason, after you've confirmed with the user. Then tell the user to run what `simless test --simulator-only` lists in a simulator.
+The exit code is 0 only when every selected test ran and passed. The results files (`test-results.json`, `ui-test-results.json`, in the work folder `simless status` shows) give every test one status. `flaky` means it failed in the full run and passed alone: say so to the user rather than calling it green. `not-run` means it was selected but never ran, and fails the run.
+
+`simless test ui` runs the UI tests' XCUITest code unchanged in hidden hosts. A failure prints the test's message and saves a screenshot and the element tree (the run's last line says where); read them before changing anything. A test that needs a real simulator (HealthKit sheets, StoreKit, the photo or file picker, the watch app) goes in `tests.simulatorOnly` in `.simless.json` with the reason, after you've confirmed with the user. Then tell the user to run what `simless test --simulator-only` lists in a simulator. If it says a simulator or runtime is missing, pass on its create or install command, don't pick another simulator. `--device iphone,ipad` runs UI tests on both, and `tests.uiDevices` lists the tests that only run on another device (an iPad-only class, say).
 
 Reading a render:
 

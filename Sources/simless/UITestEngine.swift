@@ -16,6 +16,9 @@ enum UITestEngine {
     struct UITarget {
         let name: String
         let sources: [String]
+        /// In the scheme's build. A UI test target that isn't (a watch app's,
+        /// say) can't run here, but its tests are still listed.
+        var built = true
     }
 
     struct TestID: Hashable {
@@ -28,19 +31,22 @@ enum UITestEngine {
 
     /// UI test targets in the build (the .xctestrun's UI test bundles), with
     /// their sources (synchronized folders, or a folder named like the target).
-    static func targets(_ ws: Workspace) -> [UITarget] {
-        guard let file = (try? FileManager.default.contentsOfDirectory(atPath: ws.products))?.first(where: { $0.hasSuffix(".xctestrun") }),
-              let data = FileManager.default.contents(atPath: "\(ws.products)/\(file)"),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return [] }
-        var entries: [[String: Any]] = []
-        if let configs = plist["TestConfigurations"] as? [[String: Any]] {
-            entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-        } else {
-            entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
+    static func targets(_ ws: Workspace, includingUnbuilt: Bool = false) -> [UITarget] {
+        var names = Set<String>()
+        if let file = (try? FileManager.default.contentsOfDirectory(atPath: ws.products))?.first(where: { $0.hasSuffix(".xctestrun") }),
+           let data = FileManager.default.contents(atPath: "\(ws.products)/\(file)"),
+           let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+            var entries: [[String: Any]] = []
+            if let configs = plist["TestConfigurations"] as? [[String: Any]] {
+                entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
+            } else {
+                entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
+            }
+            names = Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
         }
-        let names = Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
-        return names.sorted().compactMap { name in
+        let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
+        return (names.union(unbuilt)).sorted().compactMap { name in
             let dirs = synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
                 + (ws.config.tests?.uiSources?[name].map { ["\(ws.root)/\($0)"] } ?? [])
             let folders = dirs.isEmpty ? ["\(ws.projectDir)/\(name)"].filter { exists($0) } : dirs
@@ -48,8 +54,20 @@ enum UITestEngine {
                 guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
                 return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
             }.sorted()
-            return sources.isEmpty ? nil : UITarget(name: name, sources: sources)
+            return sources.isEmpty ? nil : UITarget(name: name, sources: sources, built: !unbuilt.contains(name))
         }
+    }
+
+    /// Every UI test target in the project, built or not.
+    static func uiTestTargets(pbx: String) -> Set<String> {
+        var out = Set<String>()
+        for block in pbx.components(separatedBy: "isa = PBXNativeTarget;").dropFirst() {
+            let body = block.components(separatedBy: "\n\t\t};").first ?? ""
+            guard body.contains("com.apple.product-type.bundle.ui-testing"),
+                  let name = body.firstMatch(of: #/\n\t\t\tname = "?([^";]+)"?;/#) else { continue }
+            out.insert(String(name.1))
+        }
+        return out
     }
 
     /// Paths of the PBXFileSystemSynchronizedRootGroups a target lists.
@@ -137,9 +155,71 @@ enum UITestEngine {
 
     // MARK: - Run
 
-    static func run(_ args: Args, ws: Workspace, filters: [String]) throws {
+    /// UI tests on every device asked for, one after another, with one
+    /// results file for all. `--device iphone,ipad` runs everything on each;
+    /// tests.uiDevices adds devices that run only the tests listed for them.
+    static func runDevices(_ args: Args, ws: Workspace, filters: [String]) throws -> Bool {
+        var plan: [(device: String, filters: [String])] = []
+        if let asked = args.values["--device"] {
+            plan = asked.split(separator: ",").map { (String($0), filters) }
+        } else {
+            plan = [(ws.config.device, filters)]
+            for (device, ids) in (ws.config.tests?.uiDevices ?? [:]).sorted(by: { $0.key < $1.key }) where device != ws.config.device {
+                // The device's own tests, narrowed to what this run selected.
+                let wanted = ids.isEmpty ? filters : filters.isEmpty ? ids
+                    : ids.filter { id in filters.contains { f in TestEngine.matches(id, f) || TestEngine.matches(f, id) } }
+                        + filters.filter { f in ids.contains { TestEngine.matches(f, $0) } }
+                if ids.isEmpty || !wanted.isEmpty { plan.append((device, Array(Set(wanted)).sorted())) }
+            }
+        }
+        guard plan.count > 1 else { return try run(args, ws: ws, filters: plan.first?.filters ?? filters) }
+        let path = "\(ws.work)/ui-test-results.json"
+        var ok = true
+        var perDevice: [String: [String: Any]] = [:]
+        for (device, selection) in plan {
+            var one = args
+            one.values["--device"] = device
+            print("\n== UI tests on \(device)\(selection.isEmpty ? "" : ": \(selection.count) selection(s)") ==")
+            ok = try run(one, ws: ws, filters: selection) && ok
+            if let d = FileManager.default.contents(atPath: path), let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                perDevice[device] = r
+                try? d.write(to: URL(fileURLWithPath: "\(ws.work)/ui-test-results-\(device).json"))
+            }
+        }
+        try saveMatrix(perDevice, to: path)
+        print("\(ok ? "PASSED" : "FAILED") on \(plan.map(\.device).joined(separator: " and ")) (results: \(path))")
+        return ok
+    }
+
+    /// One status per test across devices: a failure anywhere fails it, else
+    /// a pass anywhere passes it (a test can skip itself on a phone and run on an iPad).
+    static func saveMatrix(_ perDevice: [String: [String: Any]], to path: String) throws {
+        let rank = ["failed": 6, "crashed": 6, "not-run": 5, "flaky": 4, "passed": 3, "simulator-only": 2, "not-built": 1, "excluded": 1, "skipped": 0]
+        var tests: [String: [String: Any]] = [:]
+        for (device, r) in perDevice {
+            for (id, entry) in (r["tests"] as? [String: [String: Any]]) ?? [:] {
+                var merged = tests[id] ?? ["devices": [String: Any]()]
+                var devices = merged["devices"] as? [String: Any] ?? [:]
+                devices[device] = entry
+                merged["devices"] = devices
+                let status = entry["status"] as? String ?? "skipped"
+                let current = merged["status"] as? String
+                // Failures win, then a pass over a skip.
+                if (rank[status] ?? 0) >= (current.flatMap { rank[$0] } ?? -1) { merged["status"] = status }
+                tests[id] = merged
+            }
+        }
+        let bad = tests.filter { ["failed", "crashed", "not-run"].contains($0.value["status"] as? String ?? "") }.keys.sorted()
+        let out: [String: Any] = ["ok": bad.isEmpty && perDevice.values.allSatisfy { $0["ok"] as? Bool ?? false },
+                                  "devices": perDevice.keys.sorted(), "failing": bad, "tests": tests,
+                                  "flaky": tests.filter { $0.value["status"] as? String == "flaky" }.keys.sorted()]
+        try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: path))
+    }
+
+    static func run(_ args: Args, ws: Workspace, filters: [String]) throws -> Bool {
         let t = now()
-        let all = targets(ws)
+        let every = targets(ws, includingUnbuilt: true)
+        let all = every.filter(\.built)
         guard !all.isEmpty else { throw SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
@@ -150,6 +230,20 @@ enum UITestEngine {
         var selected: [TestID] = []
         var bundles: [String: String] = [:]
         var markedTests: [String: String] = [:]     // simulator-only tests this run would have run
+        var excluded: [String] = []                 // --skip and tests.skip
+        var unbuiltTests: [String] = []             // in a UI test target the scheme doesn't build
+        var named: [String] = []                    // ...and asked for by name
+        for target in every where !target.built {
+            let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
+            if !wanted { continue }
+            for id in tests(in: target) {
+                if let mark = simulatorOnly.first(where: { TestEngine.matches(id.user, $0.key) }) { markedTests[id.user] = mark.value }
+                else {
+                    unbuiltTests.append(id.user)
+                    if !filters.isEmpty { named.append(id.user) }
+                }
+            }
+        }
         for target in all {
             let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
             if !wanted { continue }
@@ -160,19 +254,35 @@ enum UITestEngine {
             for id in asked {
                 if let mark = simulatorOnly.first(where: { TestEngine.matches(id.user, $0.key) }) { markedTests[id.user] = mark.value }
             }
-            let ids = asked.filter { id in
-                !skips.contains { s in id.user == s.replacingOccurrences(of: "()", with: "") || id.user.hasPrefix(s + "/") || "\(target.name)/\(id.cls)" == s }
+            let skipped = { (id: TestID) in
+                skips.contains { s in id.user == s.replacingOccurrences(of: "()", with: "") || id.user.hasPrefix(s + "/") || "\(target.name)/\(id.cls)" == s }
             }
+            let ids = asked.filter { !skipped($0) }
+            excluded += asked.filter { skipped($0) && markedTests[$0.user] == nil }.map(\.user)
             if ids.isEmpty { continue }
             bundles[target.name] = try build(target, ws: ws)
             selected += ids
         }
-        guard !selected.isEmpty else { throw SimlessError("no UI tests match \(filters.joined(separator: " "))") }
+        if selected.isEmpty {
+            // Nothing to run here is only fine when everything asked for is simulator-only.
+            if !markedTests.isEmpty && named.isEmpty {
+                try saveResults(ws: ws, results: Results(), selected: [], marked: markedTests, load: [], excluded: excluded, unbuilt: unbuiltTests)
+                print("0 run here, \(markedTests.count) simulator-only (`simless test --simulator-only` lists them)")
+                print("PASSED in \(secs(t))")
+                return true
+            }
+            if !named.isEmpty { throw SimlessError("\(named[0]) is in a UI test target the scheme doesn't build, so it can't run here") }
+            throw SimlessError("no UI tests match \(filters.joined(separator: " "))")
+        }
 
         // Workers: one host each, tests spread by their last durations (longest
         // first onto the least busy host), each host keeping the source order.
         let durations = loadDurations(ws)
-        let jobs = min(selected.count, args.values["--jobs"].flatMap(Int.init) ?? config?.uiJobs ?? defaultJobs)
+        let share = Budget.share(ws)
+        let jobs = min(selected.count, args.values["--jobs"].flatMap(Int.init) ?? config?.uiJobs ?? max(1, Int(Double(defaultJobs) * share)))
+        if share < 1 { Log.step("sharing the Mac with \(Int((1 / share).rounded()) - 1) other test run(s): \(jobs) UI host(s) instead of \(defaultJobs)") }
+        Budget.start(ws, kind: "ui", hosts: jobs)
+        defer { Budget.finish(ws) }
         var assigned = Array(repeating: [Int](), count: jobs)
         var load = Array(repeating: 0.0, count: jobs)
         for i in selected.indices.sorted(by: { (durations[selected[$0].user] ?? 10) > (durations[selected[$1].user] ?? 10) }) {
@@ -187,8 +297,29 @@ enum UITestEngine {
         Log.step("running \(selected.count) UI test(s) on \(jobs) host(s)\(device == "iphone" ? "" : " as \(device)")")
         var slots: [SlotRecord] = []
         for i in 1...jobs { slots.append(try RuntimeHost.slot(kind: "ui\(i)", ws: ws)) }
+        // Every run starts from a fresh install's data, like a simulator's
+        // clones: what earlier runs saved (counters, history, settings) would
+        // make results depend on how often the suite ran before.
+        // That launch also checks the slot: an install macOS won't open anymore
+        // is installed again, rather than failing every test it gets.
+        let settings = try ws.settings()
+        DispatchQueue.concurrentPerform(iterations: slots.count) { i in
+            let slot = slots[i]
+            Slots.terminateAll(slot)
+            let runtime = "\(slot.dir)/SimlessRuntime.dylib"
+            guard let app = try? RuntimeHost.installedApp(slot), !Cleanup.wipeContainer(app: app, runtime: runtime) else { return }
+            Log.step("\(slot.slotID)'s app wouldn't launch, installing it again")
+            do {
+                try Slots.prepare(slot, ws: ws, settings: settings, embedded: ws.config.embeddedBundles ?? true)
+                try Slots.install(slot, ws: ws)
+                if let app = try? RuntimeHost.installedApp(slot) { Cleanup.wipeContainer(app: app, runtime: runtime) }
+            } catch {
+                Log.info("note: installing \(slot.slotID) again failed (\(error))")
+            }
+        }
 
-        let artifacts = "\(ws.work)/ui-artifacts"
+        // One folder per device, so a second device's run keeps the first one's screenshots.
+        let artifacts = "\(ws.work)/ui-artifacts" + (args.values["--device"].map { $0 == ws.config.device ? "" : "-\($0)" } ?? "")
         try? FileManager.default.removeItem(atPath: artifacts)
         try mkdirp(artifacts)
         let results = Results()
@@ -206,8 +337,12 @@ enum UITestEngine {
         // A few failures get one more run, alone on a quiet Mac: a timed gesture
         // or a wait can lose only because every host was busy.
         var passedAlone: [String] = []
-        let failedIDs = selected.filter { results.failed[$0.user] != nil }
-        if !failedIDs.isEmpty && failedIDs.count <= 10 {
+        // Tests whose app never launched always run again (a host's whole
+        // share can fail that way), the rest when there are few.
+        let launchFailures = selected.filter { (results.failed[$0.user] ?? []).contains { $0.contains("could not launch the app") } }
+        let others = selected.filter { results.failed[$0.user] != nil && !launchFailures.contains($0) }
+        let failedIDs = launchFailures + (others.count <= 10 ? others : [])
+        if !failedIDs.isEmpty {
             Log.step("running \(failedIDs.count) failed UI test(s) again, one per host, to rule out load")
             let again = Results()
             // One test per host at a time, the hosts side by side.
@@ -227,17 +362,25 @@ enum UITestEngine {
         // Report.
         let r = results
         for (id, reason) in r.crashed { print("  CRASHED: \(id): \(reason)") }
-        for id in passedAlone { print("  note: \(id) failed while the run was busy, and passed alone (load, not a failure)") }
+        for id in passedAlone { print("  flaky: \(id) failed while the run was busy, and passed alone (load, or a flaky test)") }
+        let notRun = try saveResults(ws: ws, results: r, selected: selected.map(\.user), marked: markedTests, load: passedAlone,
+                                     excluded: excluded, unbuilt: unbuiltTests)
         var parts = ["\(r.passed.count) passed", "\(r.failed.count) failed"]
         if !r.skipped.isEmpty { parts.append("\(r.skipped.count) skipped") }
         if !markedTests.isEmpty { parts.append("\(markedTests.count) simulator-only (`simless test --simulator-only` lists them)") }
         if !r.crashed.isEmpty { parts.append("\(r.crashed.count) crashed") }
+        if !passedAlone.isEmpty { parts.append("\(passedAlone.count) flaky") }
+        if !notRun.isEmpty { parts.append("\(notRun.count) didn't run") }
         print(parts.joined(separator: ", "))
-        try saveResults(ws: ws, results: r, marked: markedTests, load: passedAlone)
-        let ok = r.failed.isEmpty && r.crashed.isEmpty
+        for id in notRun.prefix(20) { print("  NOT RUN: \(id)") }
+        if !unbuiltTests.isEmpty {
+            let targets = Set(unbuiltTests.map { String($0.split(separator: "/")[0]) }).sorted()
+            print("  note: \(targets.joined(separator: ", ")) isn't in the scheme's build, so its \(unbuiltTests.count) test(s) are listed as not built")
+        }
+        let ok = r.failed.isEmpty && r.crashed.isEmpty && notRun.isEmpty
         if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (screenshots of failures and logs: \(artifacts))")
-        if !ok { exit(1) }
+        return ok
     }
 
     /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to
@@ -254,7 +397,7 @@ enum UITestEngine {
         func pass(_ id: String, _ s: Double) { lock.lock(); passed.append(id); seconds[id] = s; lock.unlock() }
         func fail(_ id: String, _ line: String) { lock.lock(); failed[id, default: []].append(line); lock.unlock() }
         func failedTest(_ id: String, _ s: Double) { lock.lock(); seconds[id] = s; if failed[id] == nil { failed[id] = ["failed"] }; lock.unlock() }
-        func skip(_ id: String, _ why: String) { lock.lock(); skipped[id] = why; lock.unlock() }
+        func skip(_ id: String, _ why: String, _ s: Double) { lock.lock(); skipped[id] = why; seconds[id] = s; lock.unlock() }
         func crash(_ id: String, _ why: String) { lock.lock(); crashed.append((id, why)); lock.unlock() }
         /// A failure that didn't happen again alone.
         func recover(_ id: String) { lock.lock(); failed.removeValue(forKey: id); passed.append(id); lock.unlock() }
@@ -310,6 +453,8 @@ enum UITestEngine {
             let byName = Dictionary(batch.map { ("\($0.cls)/\($0.method)", $0) }, uniquingKeysWith: { a, _ in a })
             let caseRe = try! NSRegularExpression(pattern: #"Test Case '-\[(?:[\w.]+\.)?(\w+) (\w+)\]' (started|passed|failed|skipped)(?: \((\d+\.\d+) seconds\))?"#)
             let failRe = try! NSRegularExpression(pattern: #"^(.*?):(\d+): error: -\[(?:[\w.]+\.)?(\w+) (\w+)\] : (.*)$"#)
+            let skipRe = try! NSRegularExpression(pattern: #"-\[(?:[\w.]+\.)?(\w+) (\w+)\] : Test skipped(?: - (.*))?$"#)
+            var skipReasons: [String: String] = [:]
             let r = try? Shell.stream(["xcrun", "xctest", "-XCTest", selection, bundle], cwd: ws.root, logPath: log, env: env, onLine: { raw in
                 let line = visibleText(raw)
                 let range = NSRange(line.startIndex..., in: line)
@@ -321,6 +466,9 @@ enum UITestEngine {
                     print("  \(id.user): \(text)")
                     fflush(stdout)
                 }
+                if let m = skipRe.firstMatch(in: line, range: range), let c = Range(m.range(at: 1), in: line), let t = Range(m.range(at: 2), in: line) {
+                    skipReasons["\(line[c])/\(line[t])"] = Range(m.range(at: 3), in: line).map { String(line[$0]) } ?? "skipped"
+                }
                 if let m = caseRe.firstMatch(in: line, range: range), let c = Range(m.range(at: 1), in: line),
                    let t = Range(m.range(at: 2), in: line), let e = Range(m.range(at: 3), in: line), let id = byName["\(line[c])/\(line[t])"] {
                     let secs = Range(m.range(at: 4), in: line).flatMap { Double(line[$0]) } ?? 0
@@ -328,7 +476,9 @@ enum UITestEngine {
                     case "started": current = (id, now())
                     case "passed": self.results.pass(id.user, secs); done.insert(id); current = nil
                     case "failed": self.results.failedTest(id.user, secs); done.insert(id); current = nil
-                    default: self.results.skip(id.user, ""); done.insert(id); current = nil
+                    default:
+                        self.results.skip(id.user, skipReasons["\(id.cls)/\(id.method)"] ?? "skipped", secs)
+                        done.insert(id); current = nil
                     }
                 }
             }, tick: {
@@ -361,19 +511,31 @@ enum UITestEngine {
         return r["seconds"] as? [String: Double] ?? [:]
     }
 
-    static func saveResults(ws: Workspace, results r: Results, marked: [String: String], load: [String]) throws {
+    /// Writes ui-test-results.json; returns the selected tests that never ran.
+    @discardableResult
+    static func saveResults(ws: Workspace, results r: Results, selected: [String], marked: [String: String], load: [String],
+                            excluded: [String], unbuilt: [String]) throws -> [String] {
         // Every test, with what happened to it.
         var tests: [String: [String: Any]] = [:]
         for (id, reason) in marked { tests[id] = ["status": "simulator-only", "reason": reason] }
-        for id in r.passed { tests[id] = ["status": load.contains(id) ? "load" : "passed"] }
+        for id in excluded { tests[id] = ["status": "excluded", "reason": "--skip or tests.skip"] }
+        for id in unbuilt { tests[id] = ["status": "not-built", "reason": "its target isn't in the scheme's build"] }
+        for id in r.passed {
+            tests[id] = load.contains(id) ? ["status": "flaky", "reason": "failed in the full run, passed when run again alone"] : ["status": "passed"]
+        }
         for (id, lines) in r.failed { tests[id] = ["status": "failed", "issues": lines] }
         for (id, reason) in r.skipped { tests[id] = ["status": TestEngine.isSimulatorOnly(reason) ? "simulator-only" : "skipped", "reason": reason] }
         for (id, reason) in r.crashed { tests[id] = ["status": "crashed", "reason": reason] }
         for (id, seconds) in r.seconds { tests[id]?["seconds"] = (seconds * 1000).rounded() / 1000 }
-        let out: [String: Any] = ["passed": r.passed.sorted(), "failed": r.failed, "skipped": r.skipped,
+        let notRun = selected.filter { tests[$0] == nil }.sorted()
+        for id in notRun { tests[id] = ["status": "not-run", "reason": "selected, but it never ran"] }
+        let ok = r.failed.isEmpty && r.crashed.isEmpty && notRun.isEmpty
+        let out: [String: Any] = ["ok": ok, "selected": selected.count, "notRun": notRun, "flaky": load.sorted(),
+                                  "passed": r.passed.sorted(), "failed": r.failed, "skipped": r.skipped,
                                   "crashed": r.crashed.map { ["test": $0.0, "reason": $0.1] }, "seconds": r.seconds,
                                   "simulatorOnly": marked, "tests": tests]
         try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
             .write(to: URL(fileURLWithPath: "\(ws.work)/ui-test-results.json"))
+        return notRun
     }
 }

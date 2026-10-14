@@ -262,4 +262,10 @@ final class BehaviorUITests: XCTestCase {
         cancel.tap()
         XCTAssertEqual(app.staticTexts["lab.chosen"].label, "Kept")
     }
+
+    /// A skipped test keeps its reason in the results.
+    @MainActor
+    func testASkipKeepsItsReason() throws {
+        try XCTSkipUnless(false, "The lab only covers this on an iPad")
+    }
 }

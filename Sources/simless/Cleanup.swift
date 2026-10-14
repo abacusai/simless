@@ -36,17 +36,20 @@ enum Cleanup {
     /// Empties the slot app's data container. macOS protects app containers
     /// from other processes, so the app does it itself: launched with
     /// SIMLESS_WIPE=1, SimlessRuntime deletes its files and quits.
-    static func wipeContainer(app: String, runtime: String) {
-        guard exists(runtime) else { return }
+    /// Returns false when the app wouldn't launch at all.
+    @discardableResult
+    static func wipeContainer(app: String, runtime: String) -> Bool {
+        guard exists(runtime) else { return true }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         p.arguments = ["-W", "-g", "-j", "-n", "--env", "DYLD_INSERT_LIBRARIES=\(runtime)", "--env", "SIMLESS_WIPE=1", app]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return }
+        guard (try? p.run()) != nil else { return false }
         let deadline = now() + 20
         while p.isRunning && now() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-        if p.isRunning { p.terminate() }
+        if p.isRunning { p.terminate(); return true }
+        return p.terminationStatus == 0
     }
 
     /// Crash reports macOS wrote for simless hosts (a slot's, or every slot's),
@@ -139,6 +142,53 @@ enum Cleanup {
         Log.step("the shared compilation cache is damaged; clearing it and building again")
         try? FileManager.default.removeItem(atPath: "\(Paths.cache)/CompilationCache")
         return try build()
+    }
+
+    /// Everything simless keeps, across worktrees, in GB (SIMLESS_DISK_LIMIT_GB overrides).
+    static var diskLimitGB: Double { ProcessInfo.processInfo.environment["SIMLESS_DISK_LIMIT_GB"].flatMap(Double.init) ?? 25 }
+
+    static func sizeGB(_ path: String) -> Double {
+        guard exists(path), let out = try? Shell.run(["/usr/bin/du", "-sk", path], useXcode: false).out,
+              let kb = Double(out.split(separator: "\t").first ?? "") else { return 0 }
+        return kb / 1_048_576
+    }
+
+    /// Keeps the whole cache under the limit: the builds and slots of the
+    /// worktrees that used simless least recently go first (`simless up` there
+    /// makes them again), then the shared compilation cache. The current
+    /// worktree's are kept.
+    static func enforceDiskLimit(keeping current: Workspace) {
+        let limit = diskLimitGB
+        var total = sizeGB(Paths.cache)
+        guard total > limit else { return }
+        _ = try? withLock("state") {
+            var state = GlobalState.load()
+            let work = "\(Paths.cache)/work"
+            let dirs = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []).map { "\(work)/\($0)" }
+                // Not one in use: another session may be testing there right now.
+                .filter { $0 != current.work && Date().timeIntervalSinceReferenceDate - lastUsed($0) > 3600 }
+                .sorted { lastUsed($0) < lastUsed($1) }
+            for dir in dirs where total > limit {
+                let owner = (try? String(contentsOfFile: "\(dir)/worktree.txt", encoding: .utf8)) ?? dir
+                let slots = state.slots.filter { Paths.workDir(forWorktree: $0.worktree) == dir }
+                let freed = sizeGB(dir) + slots.reduce(0) { $0 + sizeGB("\(Paths.slots)/\($1.slotID)") }
+                for slot in slots { removeSlot(slot) }
+                state.slots.removeAll { s in slots.contains { $0.slotID == s.slotID } }
+                try? FileManager.default.removeItem(atPath: dir)
+                total -= freed
+                Log.step(String(format: "disk: simless was over %.0f GB, freed %.1f GB of builds for %@ (used least recently)", limit, freed, owner))
+            }
+            try state.save()
+        }
+        if total > limit {
+            let freed = sizeGB("\(Paths.cache)/CompilationCache")
+            try? FileManager.default.removeItem(atPath: "\(Paths.cache)/CompilationCache")
+            Log.step(String(format: "disk: simless was over %.0f GB, cleared the shared compilation cache (%.1f GB)", limit, freed))
+        }
+    }
+
+    private static func lastUsed(_ workDir: String) -> Double {
+        exists("\(workDir)/last-used") ? mtime("\(workDir)/last-used") : mtime(workDir)
     }
 
     /// The shared compile cache only speeds up first builds; drop it when large.

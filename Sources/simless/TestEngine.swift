@@ -36,23 +36,17 @@ enum TestEngine {
         var timedOut: [String] = []
         var slow: [String] = []                    // timed out under load, passed alone
         var seconds: [String: Double] = [:]
+        /// Per target, when its first test started and its last one ended:
+        /// its wall time, which is what spreading targets over hosts needs.
+        var spans: [String: (start: Double, end: Double)] = [:]
     }
 
     // MARK: - Command
 
     /// Test hosts for a run of `targetCount` targets.
-    static func defaultHosts(targetCount: Int, config: Config.Tests?) -> Int {
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        return config?.hosts ?? (targetCount >= 4 ? max(2, min(4, cores / 3)) : 1)
-    }
-
-    /// Builds every local package's tests, for `simless up` to run next to
-    /// the app's build. Failures only leave a note: `simless test` reports them.
-    static func buildPackageTests(_ ws: Workspace) {
-        for p in Packages.testTargets(ws: ws) where !p.targets.isEmpty {
-            do { _ = try Packages.buildTests(p, targets: p.targets, ws: ws) }
-            catch { Log.info("note: building \(p.package)'s tests failed; `simless test` will say why") }
-        }
+    static func defaultHosts(targetCount: Int, config: Config.Tests?, share: Double = 1) -> Int {
+        let cores = Double(ProcessInfo.processInfo.activeProcessorCount) * share
+        return config?.hosts ?? (targetCount >= 4 ? max(1, min(4, Int(cores / 3))) : 1)
     }
 
     /// After `simless up`: the package test bundles signed and the test hosts'
@@ -62,7 +56,7 @@ enum TestEngine {
         let settings = try ws.settings()
         var count = 0
         for p in Packages.testTargets(ws: ws) where !p.targets.isEmpty {
-            let products = "\(ws.work)/PackageTests/\(p.package)/Build/Products/Debug-iphoneos"
+            let products = ws.productsIphoneos
             let bundles = p.targets.map { "\(products)/\($0).xctest" }.filter(exists)
             try prepareBundles(bundles, products: products, team: settings.team)
             count += bundles.count
@@ -78,11 +72,47 @@ enum TestEngine {
         Log.step("test hosts ready in \(secs(t)) (\(hosts) slot(s))")
     }
 
-    static func run(_ args: Args) throws {
+    /// `simless test`: unit tests, UI tests, or both when a selection names
+    /// both. Exits non-zero unless everything selected ran and passed.
+    static func run(_ given: Args) throws {
+        var args = given
         let ws = try Workspace.load()
+        if args.flags.contains("--simulator-only") { try printSimulatorOnly(ws); return }
+        // Ids from a file (or stdin with "-"), one per line, as the results JSON writes them.
+        if let from = args.values["--from"] {
+            let text = from == "-" ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+                : try String(contentsOfFile: from, encoding: .utf8)
+            let ids = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            if ids.isEmpty { throw SimlessError("--from \(from) has no test ids") }
+            args.positional += ids
+        }
+        // UI tests: `simless test ui [selection]`, or UI test targets named.
+        let uiTargets = UITestEngine.targets(ws, includingUnbuilt: true).map(\.name)
+        let isUI = { (f: String) in uiTargets.contains(String(f.split(separator: "/").first ?? "")) }
+        var positional = args.positional
+        let uiOnly = positional.first == "ui"
+        if uiOnly { positional.removeFirst() }
+        let uiPart = uiOnly ? positional : positional.filter(isUI)
+        let unitPart = uiOnly ? [] : positional.filter { !isUI($0) }
+        if uiOnly, let wrong = uiPart.first(where: { !isUI($0) }) {
+            throw SimlessError("\(wrong) isn't in a UI test target; UI test targets: \(uiTargets.joined(separator: ", "))")
+        }
+        var ok = true
+        let runsUnit = !uiOnly && (positional.isEmpty || !unitPart.isEmpty)
+        if runsUnit {
+            var unitArgs = args
+            unitArgs.positional = unitPart
+            ok = try runUnit(unitArgs, ws: ws) && ok
+        }
+        if uiOnly || !uiPart.isEmpty {
+            ok = try UITestEngine.runDevices(args, ws: ws, filters: uiPart) && ok
+        }
+        if !ok { exit(1) }
+    }
+
+    static func runUnit(_ args: Args, ws: Workspace) throws -> Bool {
         let t = now()
         let config = ws.config.tests
-        if args.flags.contains("--simulator-only") { try printSimulatorOnly(ws); return }
 
         let timeoutArg = args.values["--timeout"]
         let timeout = timeoutArg.flatMap(Double.init) ?? config?.timeout ?? 600
@@ -91,13 +121,6 @@ enum TestEngine {
         }
         let edited = ws.changedSources()
         if !edited.isEmpty { Log.info("note: \(edited.count) file(s) edited since `simless up`; app tests run the last full build (package tests are rebuilt)") }
-
-        // UI tests: `simless test ui`, or a UI test target named.
-        let uiTargets = UITestEngine.targets(ws).map(\.name)
-        if args.positional == ["ui"] { return try UITestEngine.run(args, ws: ws, filters: []) }
-        if !args.positional.isEmpty, args.positional.allSatisfy({ uiTargets.contains(String($0.split(separator: "/").first ?? "")) }) {
-            return try UITestEngine.run(args, ws: ws, filters: args.positional)
-        }
 
         // What to run.
         let packages = Packages.testTargets(ws: ws)
@@ -138,8 +161,11 @@ enum TestEngine {
         // Several hosts, each a process of its own: tests on the main actor run
         // one at a time per process, so one host would queue them all behind
         // each other. Targets are spread by how long their tests took last time.
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? defaultHosts(targetCount: targets.count, config: config)
+        // Test runs in other worktrees get their share of the cores too.
+        let share = Budget.share(ws)
+        let cores = max(2, Int(Double(ProcessInfo.processInfo.activeProcessorCount) * share))
+        if share < 1 { Log.step("sharing the Mac with \(Int((1 / share).rounded()) - 1) other test run(s): using \(cores) of \(ProcessInfo.processInfo.activeProcessorCount) cores") }
+        let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? defaultHosts(targetCount: targets.count, config: config, share: share)
         let groups = partition(targets, into: max(1, min(wantedHosts, targets.count)), weights: lastTargetSeconds(ws))
         var slots = [firstSlot]
         for i in 1..<max(1, groups.count) { slots.append(try RuntimeHost.slot(kind: "test\(i + 1)", ws: ws)) }
@@ -156,6 +182,8 @@ enum TestEngine {
             return Session(ws: ws, slot: slots[i], targets: own, timeout: timeout, width: width)
         }
         let combined = Session(ws: ws, slot: firstSlot, targets: targets, timeout: timeout, width: width)
+        Budget.start(ws, kind: "unit", hosts: sessions.count)
+        defer { Budget.finish(ws) }
         let results = Locked<[TestEngine.Result]>([])
         let errors = Locked<[Error]>([])
         DispatchQueue.concurrentPerform(iterations: sessions.count) { i in
@@ -200,6 +228,7 @@ enum TestEngine {
             result.timedOut += r.timedOut
             result.slow += r.slow
             result.seconds.merge(r.seconds) { a, _ in a }
+            result.spans.merge(r.spans) { a, _ in a }
         }
         combined.known = sessions.flatMap(\.known)
         let session = combined
@@ -207,7 +236,7 @@ enum TestEngine {
 
         // Report.
         for (id, reason) in result.crashes { print("  CRASHED: \(session.userID(id)): \(reason)") }
-        for id in result.slow { print("  note: \(session.userID(id)) failed while the run was busy, and passed alone (load, not a failure)") }
+        for id in result.slow { print("  flaky: \(session.userID(id)) failed while the run was busy, and passed alone (load, or a flaky test)") }
         for id in output(skips: skips, result: result, session: session) { print("  note: --skip \(id) didn't match any test that ran") }
         // Marked tests, counted one by one (a mark can name a whole class).
         let knownHere = session.known.map(session.userID).filter { id in filters.isEmpty || filters.contains { matches(id, $0) || String(id.split(separator: "/").first ?? "") == $0 } }
@@ -218,12 +247,18 @@ enum TestEngine {
         if plainSkipped > 0 { parts.append("\(plainSkipped) skipped") }
         if simOnly > 0 { parts.append("\(simOnly) simulator-only (`simless test --simulator-only` lists them)") }
         if !result.crashes.isEmpty { parts.append("\(result.crashes.count) crashed") }
+        if !result.slow.isEmpty { parts.append("\(result.slow.count) flaky") }
+        let outcome = try saveResults(ws: ws, result: result, session: session, filters: filters, marks: simulatorOnly,
+                                      excluded: (config?.skip ?? []) + (args.repeated["--skip"] ?? []))
+        if !outcome.notRun.isEmpty { parts.append("\(outcome.notRun.count) didn't run") }
         print(parts.joined(separator: ", "))
-        try saveResults(ws: ws, result: result, session: session, filters: filters, marks: simulatorOnly)
-        let ok = result.failed.isEmpty && result.crashes.isEmpty
+        for id in outcome.notRun.prefix(20) { print("  NOT RUN: \(id)") }
+        if outcome.notRun.count > 20 { print("  … and \(outcome.notRun.count - 20) more (test-results.json lists them)") }
+        if outcome.selected == 0 { print("  NOTHING RAN: no test matched \(filters.isEmpty ? "the run" : filters.joined(separator: " "))") }
+        let ok = result.failed.isEmpty && result.crashes.isEmpty && outcome.notRun.isEmpty && outcome.selected > 0
         if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (log: \(slot.dir)/host.log, results: \(ws.work)/test-results.json)")
-        if !ok { exit(1) }
+        return ok
     }
 
     /// Skips the user named whose test ran anyway (exact ids, so a test with
@@ -238,9 +273,20 @@ enum TestEngine {
 
     /// How long each target's tests took in the last run (the sum of its tests' times).
     static func lastTargetSeconds(_ ws: Workspace) -> [String: Double] {
-        guard let d = FileManager.default.contents(atPath: "\(ws.work)/test-results.json"),
-              let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
-        return r["targetSeconds"] as? [String: Double] ?? [:]
+        for path in ["\(ws.work)/test-results.json", historyPath(ws)] {
+            if let d = FileManager.default.contents(atPath: path),
+               let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let seconds = r["targetSeconds"] as? [String: Double], !seconds.isEmpty { return seconds }
+        }
+        return [:]
+    }
+
+    /// Target times kept per repository (by its origin, else its folder), outside
+    /// the build cache: they survive `simless clean`, and a new worktree of the
+    /// same repository spreads its first run well too.
+    static func historyPath(_ ws: Workspace) -> String {
+        let origin = (try? Shell.check(["git", "-C", ws.root, "remote", "get-url", "origin"]))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(Paths.support)/history/\(shortHash((origin.flatMap { $0.isEmpty ? nil : $0 } ?? ws.root) + "|" + ws.config.project)).json"
     }
 
     /// Targets spread over `count` groups, the longest first onto the lightest group.
@@ -248,9 +294,17 @@ enum TestEngine {
         guard count > 1 else { return [targets] }
         let known = weights.values.sorted()
         let typical = known.isEmpty ? 1 : known[known.count / 2]
+        let sorted = targets.sorted { (weights[$0.name] ?? typical, $1.name) > (weights[$1.name] ?? typical, $0.name) }
+        // A target that takes half again as long as any other sets the run's
+        // length on its own: it gets a host to itself, so nothing else
+        // competes with it for that host's cores.
+        if count >= 3, sorted.count > count, let first = sorted.first, let w0 = weights[first.name],
+           let w1 = weights[sorted[1].name], w0 >= 1.5 * w1 {
+            return [[first]] + partition(Array(sorted.dropFirst()), into: count - 1, weights: weights)
+        }
         var groups = Array(repeating: [Target](), count: count)
         var load = Array(repeating: 0.0, count: count)
-        for t in targets.sorted(by: { (weights[$0.name] ?? typical, $1.name) > (weights[$1.name] ?? typical, $0.name) }) {
+        for t in sorted {
             let i = load.indices.min { load[$0] < load[$1] }!
             groups[i].append(t)
             load[i] += weights[t.name] ?? typical
@@ -344,13 +398,22 @@ enum TestEngine {
             let platform = SimulatorLane.platform(target, ws: ws)
             groups["\(scheme)|\(platform)", default: (scheme, platform, [])].ids.append(id)
         }
+        var missing = false
         for g in groups.values.sorted(by: { $0.scheme < $1.scheme }) {
-            print("\nxcodebuild test -project \(ws.config.project) -scheme \(g.scheme) \\\n  -destination '\(SimulatorLane.destination(g.platform, ws: ws))' \\")
-            print(g.ids.map { "  -only-testing:'\($0)'" }.joined(separator: " \\\n"))
+            switch SimulatorLane.destination(g.platform, ws: ws) {
+            case .ready(let destination):
+                print("\nxcodebuild test -project \(ws.config.project) -scheme \(g.scheme) \\\n  -destination '\(destination)' \\")
+                print(g.ids.map { "  -only-testing:'\($0)'" }.joined(separator: " \\\n"))
+            case .missing(let why):
+                missing = true
+                print("\nMISSING for -scheme \(g.scheme) (\(g.ids.count) test(s) or group(s)): \(why)")
+            }
         }
         if !orphans.isEmpty {
-            print("\nno shared scheme tests \(orphans.joined(separator: ", ")); share a scheme with its test target in Xcode to get a command")
+            missing = true
+            print("\nMISSING: no shared scheme tests \(orphans.joined(separator: ", ")). Share a scheme with its test target in Xcode to get a command")
         }
+        if missing { exit(1) }
     }
 
     /// Whether a user id falls under a mark (a test, or a target, class or suite prefix).
@@ -358,25 +421,54 @@ enum TestEngine {
         id == mark || id.hasPrefix(mark + "/") || id == mark + "()" || (mark.hasSuffix("()") && id == String(mark.dropLast(2)))
     }
 
-    static func saveResults(ws: Workspace, result: Result, session: Session, filters: [String] = [], marks: [String: String] = [:]) throws {
+    /// What a merge check needs beyond pass and fail.
+    struct Outcome { var selected = 0; var notRun: [String] = []; var flaky: [String] = [] }
+
+    /// Writes test-results.json. `excluded`: --skip and tests.skip patterns,
+    /// which aren't expected to run.
+    @discardableResult
+    static func saveResults(ws: Workspace, result: Result, session: Session, filters: [String] = [], marks: [String: String] = [:],
+                            excluded: [String] = []) throws -> Outcome {
         var simulatorOnly: [String: String] = [:]
         for (id, reason) in result.skipped where isSimulatorOnly(reason) { simulatorOnly[session.userID(id)] = reason }
         // Every test, with what happened to it.
         var tests: [String: [String: Any]] = [:]
-        for id in session.known.map(session.userID) where filters.isEmpty || filters.contains(where: { matches(id, $0) || String(id.split(separator: "/").first ?? "") == $0 }) {
+        let selected = session.known.map(session.userID).filter { id in
+            filters.isEmpty || filters.contains(where: { matches(id, $0) || String(id.split(separator: "/").first ?? "") == $0 })
+        }
+        for id in selected {
             if let mark = marks.first(where: { matches(id, $0.key) }) {
                 simulatorOnly[id] = mark.value
                 tests[id] = ["status": "simulator-only", "reason": mark.value]
+            } else if excluded.contains(where: { matches(id, $0) }) {
+                tests[id] = ["status": "excluded", "reason": "--skip or tests.skip"]
             }
         }
-        for id in result.passed { tests[session.userID(id)] = ["status": result.slow.contains(id) ? "load" : "passed"] }
+        // Passed only when run again alone: flaky, not plain green.
+        for id in result.passed {
+            tests[session.userID(id)] = result.slow.contains(id)
+                ? ["status": "flaky", "reason": "failed in the full run, passed when run again alone"] : ["status": "passed"]
+        }
         for (id, lines) in result.failed { tests[session.userID(id)] = ["status": "failed", "issues": lines] }
         for (id, reason) in result.skipped {
             tests[session.userID(id)] = ["status": isSimulatorOnly(reason) ? "simulator-only" : "skipped", "reason": reason]
         }
         for c in result.crashes { tests[session.userID(c.id)] = ["status": "crashed", "reason": c.reason] }
         for (id, seconds) in result.seconds { tests[session.userID(id)]?["seconds"] = (seconds * 1000).rounded() / 1000 }
+        // Selected and expected, but nothing came back: the run didn't cover it.
+        var outcome = Outcome(selected: selected.count)
+        for id in selected where tests[id] == nil {
+            tests[id] = ["status": "not-run", "reason": "selected, but it never ran"]
+            outcome.notRun.append(id)
+        }
+        outcome.notRun.sort()
+        outcome.flaky = result.slow.map(session.userID).sorted()
+        let ok = result.failed.isEmpty && result.crashes.isEmpty && outcome.notRun.isEmpty && !selected.isEmpty
         let out: [String: Any] = [
+            "ok": ok,
+            "selected": selected.count,
+            "notRun": outcome.notRun,
+            "flaky": outcome.flaky,
             "passed": result.passed.count,
             "passedTests": result.passed.map { session.userID($0) }.sorted(),
             "failed": Dictionary(uniqueKeysWithValues: result.failed.map { (session.userID($0.key), $0.value) }),
@@ -385,12 +477,19 @@ enum TestEngine {
             "simulatorOnly": simulatorOnly,
             "tests": tests,
             "slowest": result.seconds.sorted { $0.value > $1.value }.prefix(20).map { ["test": session.userID($0.key), "seconds": $0.value] },
-            "targetSeconds": result.seconds.reduce(into: [String: Double]()) { acc, e in
-                acc[String(session.userID(e.key).split(separator: "/").first ?? ""), default: 0] += e.value
-            },
+            // Wall time per target. Tests run side by side, so their sum says little.
+            "targetSeconds": result.spans.mapValues { (($0.end - $0.start) * 10).rounded() / 10 },
         ]
         try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
             .write(to: URL(fileURLWithPath: "\(ws.work)/test-results.json"))
+        // A full run's target times, for the next run's spread (even after a clean).
+        if filters.isEmpty, !result.spans.isEmpty {
+            let history = historyPath(ws)
+            try? mkdirp((history as NSString).deletingLastPathComponent)
+            try? JSONSerialization.data(withJSONObject: ["targetSeconds": out["targetSeconds"] ?? [:]])
+                .write(to: URL(fileURLWithPath: history))
+        }
+        return outcome
     }
 }
 
@@ -459,6 +558,14 @@ final class Session {
     }
 
     /// A fresh host: the standby one if it's up and untouched, else a new launch.
+    /// Every run starts from a fresh install's data, like a simulator's clone:
+    /// files, preferences and caches earlier runs saved would make results
+    /// depend on how often the tests ran before.
+    private func wipe() {
+        guard let app = try? RuntimeHost.installedApp(slot) else { return }
+        Cleanup.wipeContainer(app: app, runtime: "\(slot.dir)/SimlessRuntime.dylib")
+    }
+
     private func freshHost() throws -> LineClient {
         // Only a standby host this simless started (its token matches) and that hasn't run anything.
         // The token file also names the runtime build the standby host loaded: a
@@ -474,6 +581,8 @@ final class Session {
             return c
         }
         let t = now()
+        RuntimeHost.terminateAll(slot)
+        wipe()
         do {
             try RuntimeHost.launch(slot, env: environment())
         } catch let error as SimlessError where error.description.contains("cannot be opened") {
@@ -489,6 +598,7 @@ final class Session {
     /// Leaves a fresh host starting in the background for the next run.
     func standby() {
         RuntimeHost.terminateAll(slot)
+        wipe()
         let token = UUID().uuidString
         try? "\(token)\n\(mtime("\(slot.dir)/SimlessRuntime.dylib"))".write(toFile: "\(slot.dir)/standby-token", atomically: true, encoding: .utf8)
         let env = RuntimeHost.baseEnvironment(slot).merging(environment()) { $1 }
@@ -640,6 +750,8 @@ final class Session {
                 switch event {
                 case "started":
                     running[id] = now()
+                    let target = String(userID(id).split(separator: "/").first ?? "")
+                    if result.spans[target] == nil { result.spans[target] = (now(), now()) }
                 case "issue":
                     guard e["failure"] as? Bool == true else { break }
                     let line = "\(e["location"] as? String ?? ""): \(e["message"] as? String ?? "")"
@@ -649,6 +761,8 @@ final class Session {
                     if (e["message"] as? String ?? "").contains("Time limit was exceeded") { result.timedOut.append(id) }
                 case "ended":
                     running.removeValue(forKey: id)
+                    let target = String(userID(id).split(separator: "/").first ?? "")
+                    if let span = result.spans[target] { result.spans[target] = (span.start, max(span.end, now())) }
                     finished.insert(id)
                     result.seconds[id] = e["seconds"] as? Double
                     switch e["result"] as? String {

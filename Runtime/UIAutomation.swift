@@ -12,7 +12,7 @@ enum UIAutomation {
     static let commands: Set<String> = [
         "ui.ready", "ui.snapshot", "ui.idle", "ui.tap", "ui.drag", "ui.swipe", "ui.type", "ui.scrollToVisible",
         "ui.pickerWheel", "ui.slider", "ui.screenshot", "ui.orientation", "ui.background", "ui.foreground",
-        "ui.state", "ui.openURL", "ui.externalURLs", "ui.audit", "ui.appearance",
+        "ui.state", "ui.openURL", "ui.externalURLs", "ui.audit", "ui.appearance", "ui.flush",
     ]
     static func handles(_ cmd: String) -> Bool { commands.contains(cmd) }
 
@@ -34,6 +34,12 @@ enum UIAutomation {
         case "ui.snapshot":
             let (nodes, generation) = Snapshotter.take()
             return ["ok": true, "nodes": nodes, "generation": generation]
+        case "ui.flush":
+            // Before the test quits the app: settings it saved must reach
+            // cfprefsd, which on the Mac takes them a moment later.
+            UserDefaults.standard.synchronize()
+            CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+            return ["ok": true]
         case "ui.idle":
             let settled = Idle.wait(timeout: req["timeout"] as? Double ?? 2)
             return ["ok": true, "settled": settled, "busy": settled ? "" : Idle.lastBusy]

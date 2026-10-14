@@ -102,6 +102,7 @@ final class SimlessUIHost: @unchecked Sendable {
     var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: slotID).isEmpty }
 
     func terminate() {
+        if isRunning { _ = call(["cmd": "ui.flush"]) }
         disconnect()
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: slotID) { app.forceTerminate() }
         let deadline = Date().addingTimeInterval(5)
@@ -122,21 +123,28 @@ final class SimlessUIHost: @unchecked Sendable {
         launchEnv["SIMLESS_UI_ORIENTATION"] = orientation.isLandscape ? "landscape" : "portrait"
         if appearance != .unspecified { launchEnv["SIMLESS_UI_APPEARANCE"] = String(appearance.rawValue) }
         var cmd = ["-g", "-j"]
-        if let log = env["SIMLESS_UI_LOG"] { cmd += ["--stderr", log, "--stdout", log] }
+        if let log = env["SIMLESS_UI_LOG"] {
+            // `open` fails with "No such file or directory" when the log's folder is gone.
+            try? FileManager.default.createDirectory(atPath: (log as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            cmd += ["--stderr", log, "--stdout", log]
+        }
         for (k, v) in launchEnv.sorted(by: { $0.key < $1.key }) { cmd += ["--env", "\(k)=\(v)"] }
         cmd.append(appPath)
         if !arguments.isEmpty { cmd += ["--args"] + arguments }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        p.arguments = cmd
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = errPipe
-        do { try p.run() } catch { return "could not launch the app: \(error)" }
-        p.waitUntilExit()
-        if p.terminationStatus != 0 {
-            return "could not launch the app: " + String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        func open() -> String? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            p.arguments = cmd
+            let errPipe = Pipe()
+            p.standardError = errPipe
+            p.standardOutput = errPipe
+            do { try p.run() } catch { return "\(error)" }
+            p.waitUntilExit()
+            return p.terminationStatus == 0 ? nil : String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         }
+        // simless checks every slot's install before a run, so a failure here is rare.
+        let failure = open()
+        if let failure { return "could not launch the app: \(failure)" }
         let deadline = Date().addingTimeInterval(60 * timeScale)
         while Date() < deadline {
             if let r = call(["cmd": "ui.ready"]), r["ready"] as? Bool == true { return nil }

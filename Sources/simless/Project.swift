@@ -34,8 +34,10 @@ struct Config: Codable {
         var jobs: Int?                // Swift Testing tests running at once per host
         var hosts: Int?               // test hosts running side by side (default: up to 4 for 4+ targets)
         var uiJobs: Int?              // UI test hosts running side by side (default: up to 4)
-        var uiTimeout: Double?        // seconds one UI test may run (default 300)
+        var uiTimeout: Double?        // seconds one UI test may run (default 600)
         var uiSources: [String: String]?  // UI test target -> source folder, when it isn't a synchronized folder
+        var uiDevices: [String: [String]]?  // more devices for UI tests and what runs on each,
+                                            // e.g. {"ipad": ["AppUITests/IPadUITests"]} ([] for everything)
     }
     struct Calibration: Codable {
         var runtime: String?          // iOS version of the simulator, e.g. "26.5" (default: newest installed)
@@ -52,6 +54,26 @@ struct Workspace {
     let config: Config
 
     static let configName = ".simless.json"
+    /// Settings every build of the app and its packages' tests shares, so
+    /// they reuse each other's work in one build folder.
+    static let buildSettings = [
+        "-skipMacroValidation", "-skipPackagePluginValidation",
+        "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
+        // One content-addressed cache for every worktree: a new
+        // worktree's first build reuses what the others compiled.
+        "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
+        // Nothing searches the index of these builds, and nothing reads their
+        // debug info: failures name their file and line from the source,
+        // crashes their functions from the symbol table. Without it builds are
+        // faster and test bundles a fraction of the size.
+        "COMPILER_INDEX_STORE_ENABLE=NO", "GCC_GENERATE_DEBUGGING_SYMBOLS=NO",
+    ]
+
+    /// One xcodebuild at a time in this worktree's build folder.
+    func withBuildFolder<T>(_ body: () throws -> T) throws -> T {
+        try withLock("build-\(shortHash(root))", body)
+    }
+
     static let dfiDestination = "platform=macOS,arch=arm64,variant=Designed for iPad"
 
     static func findRoot(from start: String = FileManager.default.currentDirectoryPath) -> String? {
@@ -199,27 +221,20 @@ struct Workspace {
         // Lets garbage collection find build caches whose worktree is gone.
         try root.write(toFile: "\(work)/worktree.txt", atomically: true, encoding: .utf8)
         let tokens = config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)
-        try withBuildToken(count: tokens) {
+        try withBuildFolder { try withBuildToken(count: tokens) {
             let t = now()
             Log.step("building \(config.scheme) for Designed-for-iPad (log: \(buildLog))")
             let r = try Cleanup.retryingPoisonedCache {
                 try Shell.run(["xcodebuild", "build-for-testing",
                              "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
-                             "-destination", Self.dfiDestination, "-derivedDataPath", derivedData,
-                             "-skipMacroValidation", "-skipPackagePluginValidation",
-                             "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
-                             // One content-addressed cache for every worktree: a new
-                             // worktree's first build reuses what the others compiled.
-                             "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
-                             // Nothing searches the index of these builds.
-                             "COMPILER_INDEX_STORE_ENABLE=NO"],
+                             "-destination", Self.dfiDestination, "-derivedDataPath", derivedData] + Self.buildSettings,
                             cwd: root, logPath: buildLog)
             }
             guard r.code == 0 else {
                 throw SimlessError("build failed (log: \(buildLog)):\n" + Patch.compilerErrors(r.out))
             }
             Log.step("built in \(secs(t))")
-        }
+        } }
         try captureSettings(project: project)
     }
 

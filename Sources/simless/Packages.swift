@@ -17,6 +17,14 @@ struct PackageModule: Codable {
 }
 
 enum Packages {
+    /// The package's manifest as JSON. SwiftPM's scratch folder goes to a
+    /// temporary place, not a `.build` in the user's package.
+    static func dumpPackage(_ dir: String) throws -> String {
+        let scratch = "\(Paths.cache)/swiftpm/\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        return try Shell.check(["swift", "package", "--scratch-path", scratch, "dump-package"], cwd: dir, stdoutOnly: true)
+    }
+
     /// Modules of every local package in the config, cached per Package.swift mtime.
     static func modules(ws: Workspace) -> [PackageModule] {
         var result: [PackageModule] = []
@@ -42,7 +50,7 @@ enum Packages {
     }
 
     private static func describe(packageDir: String, manifest: String) throws -> [PackageModule] {
-        let out = try Shell.check(["swift", "package", "dump-package"], cwd: packageDir, stdoutOnly: true)
+        let out = try dumpPackage(packageDir)
         guard let json = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
               let targets = json["targets"] as? [[String: Any]] else { throw SimlessError("unexpected dump-package output") }
 
@@ -107,7 +115,7 @@ extension Packages {
             if let d = FileManager.default.contents(atPath: cache), let cached = try? JSONDecoder().decode(PackageTests.self, from: d) {
                 return cached
             }
-            guard let out = try? Shell.check(["swift", "package", "dump-package"], cwd: dir, stdoutOnly: true),
+            guard let out = try? dumpPackage(dir),
                   let json = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
                   let targets = json["targets"] as? [[String: Any]] else { return nil }
             let tests = PackageTests(package: json["name"] as? String ?? (rel as NSString).lastPathComponent, dir: dir,
@@ -120,21 +128,26 @@ extension Packages {
 
     /// Builds the given test targets of a package for iOS devices. Returns the
     /// products directory, which holds `<target>.xctest` and resource bundles.
+    ///
+    /// They build in the app's own build folder, for the same destination and
+    /// with the same settings, so the package's modules the app build already
+    /// compiled are reused instead of compiled a second time.
     static func buildTests(_ p: PackageTests, targets: [String], ws: Workspace) throws -> String {
-        let dd = "\(ws.work)/PackageTests/\(p.package)"
+        let dd = stampDir(p, ws: ws)
+        try mkdirp(dd)
         let log = "\(ws.work)/package-tests-\(p.package).log"
-        let products = "\(dd)/Build/Products/Debug-iphoneos"
+        let products = ws.productsIphoneos
         // Nothing changed in the package (or the local packages it uses) since
         // these targets were last built: a no-op xcodebuild still costs ~10 s.
         // A stamp per built target set: "<newest source time>\n<targets>". Any
         // build of a superset of these targets that's still current will do.
         // The build settings' version is part of the name: new flags mean a new build.
-        let stamp = "\(dd)/.simless-built-\(shortHash("2|" + targets.sorted().joined(separator: ",")))"
+        let stamp = "\(dd)/.simless-built-\(shortHash("3|" + targets.sorted().joined(separator: ",")))"
         let newest = newestSource(p.dir)
         let stamps = ((try? FileManager.default.contentsOfDirectory(atPath: dd)) ?? []).filter { $0.hasPrefix(".simless-built-") }
         for file in stamps {
             // Stamps from older build settings: remove, and build again.
-            guard (try? String(contentsOfFile: "\(dd)/\(file)", encoding: .utf8))?.hasPrefix("v2 ") == true else {
+            guard (try? String(contentsOfFile: "\(dd)/\(file)", encoding: .utf8))?.hasPrefix("v3 ") == true else {
                 try? FileManager.default.removeItem(atPath: "\(dd)/\(file)"); continue
             }
             guard let text = try? String(contentsOfFile: "\(dd)/\(file)", encoding: .utf8) else { continue }
@@ -153,27 +166,36 @@ extension Packages {
                 .flatMap { ($0["workspace"] as? [String: Any])?["schemes"] as? [String] }
         } ?? []
         let scheme = schemes.first { $0 == "\(p.package)-Package" } ?? schemes.first { $0 == p.package } ?? schemes.first ?? p.package
-        try withBuildToken(count: ws.config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)) {
+        try ws.withBuildFolder {
+          try withBuildToken(count: ws.config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)) {
             let t = now()
             Log.step("building \(targets.joined(separator: ", ")) for iOS (log: \(log))")
             let r = try Cleanup.retryingPoisonedCache { try Shell.run(["xcodebuild", "build-for-testing", "-scheme", scheme, "-configuration", "Debug",
-                                   "-destination", "generic/platform=iOS", "-derivedDataPath", dd,
-                                   "-skipMacroValidation", "-skipPackagePluginValidation",
-                                   "CODE_SIGNING_ALLOWED=NO", "COMPILATION_CACHE_ENABLE_CACHING=YES",
-                                   "COMPILATION_CACHE_CAS_PATH=\(Paths.cache)/CompilationCache",
-                                   // Test bundles each link the package's code; without
-                                   // debug info they're a fraction of the size and link
-                                   // faster. Failures name their file and line from the
-                                   // source, crashes their functions from the symbol table.
-                                   "GCC_GENERATE_DEBUGGING_SYMBOLS=NO", "COMPILER_INDEX_STORE_ENABLE=NO"]
-                                  + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log) }
+                                   "-destination", Workspace.dfiDestination, "-derivedDataPath", ws.derivedData]
+                                  + Workspace.buildSettings + targets.map { "-only-testing:\($0)" }, cwd: p.dir, logPath: log) }
             guard r.code == 0 else {
                 throw SimlessError("building \(p.package)'s tests failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
             }
             Log.step("built in \(secs(t))")
+          }
         }
-        try? "v2 \(newest)\n\(targets.sorted().joined(separator: ","))".write(toFile: stamp, atomically: true, encoding: .utf8)
+        try? "v3 \(newest)\n\(targets.sorted().joined(separator: ","))".write(toFile: stamp, atomically: true, encoding: .utf8)
         return products
+    }
+
+    /// Where a package's build stamps live.
+    static func stampDir(_ p: PackageTests, ws: Workspace) -> String { "\(ws.work)/PackageTests/\(p.package)" }
+
+    /// The app's build (the scheme's build-for-testing) already made these
+    /// test bundles from sources as of `newest`: no package build needed.
+    static func markBuilt(_ p: PackageTests, newest: Double, ws: Workspace) -> [String] {
+        let built = p.targets.filter { exists("\(ws.productsIphoneos)/\($0).xctest") }
+        guard !built.isEmpty else { return [] }
+        let dir = stampDir(p, ws: ws)
+        try? mkdirp(dir)
+        let stamp = "\(dir)/.simless-built-\(shortHash("3|" + built.sorted().joined(separator: ",")))"
+        try? "v3 \(newest)\n\(built.sorted().joined(separator: ","))".write(toFile: stamp, atomically: true, encoding: .utf8)
+        return built
     }
 
     /// The newest modification time of the package's own files and of the
