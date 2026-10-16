@@ -3,6 +3,11 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Hosts start with Xcode 27.1 on macOS 27.** Every host crashed at launch: the runtime's `infoDictionary` swap handed back an immutable copy, and Foundation now writes into that dictionary when Metal looks up its plugin as the first window opens (`-[_SwiftDeferredNSDictionary setObject:forKey:]: unrecognized selector`). It hands back the bundle's own dictionary when no id changes, and a mutable copy when one does.
+- **App-hosted test bundles load with Xcode 27.1.** Xcode 27.1's `libXCTestSwiftSupport` links `_Testing_Foundation`, which xcodebuild doesn't open the app's sandbox to, so the test bundle failed to load ("file system sandbox blocked open()") and no host started. Slots now carry a copy in the app's `Frameworks` folder, with its symlinks followed, since the installer refuses a versioned framework's links.
+
 ## 0.5.0 (2026-10-14)
 
 The goal for this one was making simless trustworthy enough to decide whether code can merge, on the same production app as 0.4.0 plus the demo app and a second app.

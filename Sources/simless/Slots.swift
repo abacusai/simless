@@ -23,6 +23,7 @@ enum Slots {
         try Shell.check(["/bin/cp", "-c", "-R", "\(ws.productsIphoneos)/\(settings.wrapperName)", app], what: "clone app")
 
         let fm = FileManager.default
+        try stageTestFrameworks(in: app)
         let nested = embeddedBundles(in: app)
         if embedded {
             // Their ids must start with the app's, which is now the slot's.
@@ -76,6 +77,29 @@ enum Slots {
         try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         Log.step("slot \(slot.slotID) prepared in \(secs(t))")
+    }
+
+    /// Test frameworks that Xcode's XCTest support links but xcodebuild doesn't open
+    /// the app's sandbox to. Since Xcode 27.1, libXCTestSwiftSupport links
+    /// `_Testing_Foundation`, and a "Designed for iPad" app can read Xcode's copy
+    /// only where xcodebuild opens the sandbox for it, which it doesn't for this one,
+    /// so the test bundle fails to load. The app's own Frameworks folder, which dyld
+    /// also searches, is always readable: a clone there is signed with the app.
+    static let stagedTestFrameworks = ["_Testing_Foundation.framework"]
+
+    private static func stageTestFrameworks(in app: String) throws {
+        let frameworks = "\(RuntimeBuild.developerDir)/Platforms/MacOSX.platform/Developer/Library/Frameworks"
+        let destination = "\(app)/Frameworks"
+        for name in stagedTestFrameworks where FileManager.default.fileExists(atPath: "\(frameworks)/\(name)") {
+            try mkdirp(destination)
+            try? FileManager.default.removeItem(atPath: "\(destination)/\(name)")
+            // A macOS framework is versioned, with symlinks the app installer refuses
+            // ("Too many levels of symbolic links"): copy with every link followed, so
+            // the binary sits both where dyld looks (Versions/A) and where the
+            // installer looks (the top level).
+            try Shell.check(["/bin/cp", "-c", "-R", "-L", "\(frameworks)/\(name)", "\(destination)/\(name)"], what: "stage \(name)")
+            try? FileManager.default.removeItem(atPath: "\(destination)/\(name)/Versions/Current")
+        }
     }
 
     /// Copies the build's .xctestrun with the test host's bundle id swapped for
