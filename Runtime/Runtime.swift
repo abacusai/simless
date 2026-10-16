@@ -146,11 +146,19 @@ enum BundleIDs {
         if let m = class_getInstanceMethod(Bundle.self, info) {
             typealias Info = @convention(c) (AnyObject, Selector) -> NSDictionary?
             let call = unsafeBitCast(method_getImplementation(m), to: Info.self)
+            // Foundation writes into the dictionary it gets back (since macOS 27,
+            // `_NSBundleGetPrincipalClassFromInfoDict` caches the principal class in
+            // it, which Metal reaches when the first window opens), so this hands back
+            // the bundle's own dictionary when no id changes, and a mutable copy when
+            // one does. An immutable copy crashed every host at launch.
             let block: @convention(block) (AnyObject) -> NSDictionary? = { bundle in
-                guard let d = call(bundle, info) as? [String: Any] else { return nil }
-                var out = d
-                for (k, v) in d { if let s = v as? String, let o = originalID(s) { out[k] = o } }
-                return out as NSDictionary
+                guard let d = call(bundle, info) else { return nil }
+                var changes: [(key: Any, id: String)] = []
+                for (k, v) in d { if let s = v as? String, let o = originalID(s) { changes.append((k, o)) } }
+                guard !changes.isEmpty else { return d }
+                let out = NSMutableDictionary(dictionary: d)
+                for change in changes { out[change.key] = change.id }
+                return out
             }
             method_setImplementation(m, imp_implementationWithBlock(block))
         }
