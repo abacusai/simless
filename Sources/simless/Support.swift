@@ -224,17 +224,22 @@ func withLock<T>(_ name: String, _ body: () throws -> T) throws -> T {
 
 /// Takes one of `count` build tokens so concurrent agents don't all compile at once.
 func withBuildToken<T>(count: Int, _ body: () throws -> T) throws -> T {
+    try withToken("build", count: count, body)
+}
+
+/// Takes one of `count` tokens named `name`, so at most `count` of those run at once.
+func withToken<T>(_ name: String, count: Int, _ body: () throws -> T) throws -> T {
     try mkdirp(Paths.locks)
     while true {
         for i in 0..<count {
-            let fd = open("\(Paths.locks)/build-\(i).lock", O_CREAT | O_RDWR, 0o644)
+            let fd = open("\(Paths.locks)/\(name)-\(i).lock", O_CREAT | O_RDWR, 0o644)
             if fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 {
                 defer { flock(fd, LOCK_UN); close(fd) }
                 return try body()
             }
             if fd >= 0 { close(fd) }
         }
-        Log.debug("all \(count) build slots busy; waiting")
+        Log.debug("all \(count) \(name) tokens busy; waiting")
         Thread.sleep(forTimeInterval: 0.5)
     }
 }

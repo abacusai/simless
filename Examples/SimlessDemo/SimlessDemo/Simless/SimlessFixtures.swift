@@ -16,5 +16,6 @@ func simlessFixtures(_ r: SimlessRegistry) {
     r.add("Login") { LoginView() }
     r.add("Login.error") { LoginView(showError: true) }
     r.add("Profile") { ProfileView(profile: DemoData.profile) }
+    r.add("Tabs") { TabsView() }
 }
 #endif

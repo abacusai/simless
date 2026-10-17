@@ -8,6 +8,21 @@
 - **Hosts start with Xcode 27.1 on macOS 27.** Every host crashed at launch: the runtime's `infoDictionary` swap handed back an immutable copy, and Foundation now writes into that dictionary when Metal looks up its plugin as the first window opens (`-[_SwiftDeferredNSDictionary setObject:forKey:]: unrecognized selector`). It hands back the bundle's own dictionary when no id changes, and a mutable copy when one does.
 - **App-hosted test bundles load with Xcode 27.1.** Xcode 27.1's `libXCTestSwiftSupport` links `_Testing_Foundation`, which xcodebuild doesn't open the app's sandbox to, so the test bundle failed to load ("file system sandbox blocked open()") and no host started. Slots now carry a copy in the app's `Frameworks` folder, with its symlinks followed, since the installer refuses a versioned framework's links.
 
+## 0.5.1 (2026-10-17)
+
+This one makes simless safe to gate merges on: a run can no longer pass with tests missing. Measured on the same production app as before, now on Xcode 27.1, plus the demo app and a second app.
+
+The whole unit suite (2,280 tests) now takes 473 s from nothing (`simless clean --all`, then `up` and `test all`) against 491 s for the simulator's build and tests, and 327 to 390 s once built against 375 s of simulator test time. All 106 UI tests that don't need a simulator pass on iPhone and iPad in 450 to 561 s, against 1,150 s on 5 simulator clones. 3 back-to-back runs of both suites on one commit gave identical results, every target present.
+
+- **No more false green from a package's test run.** Package tests build in the app's build folder since 0.5.0, and a package test run left its own `.xctestrun` next to the app's. Three places took whichever sorted first, so after one, `simless test all` silently dropped the app's hosted test targets and still passed, `simless test ui` found no UI test targets, and `simless up` couldn't install. simless now picks the app scheme's file by name (or by the app's test target in it). The demo app has a local package with two products to reproduce it.
+- **A test target that doesn't run fails the run**, whatever the cause. `simless test all` checks the app scheme's test targets (that exist) and every local package's, and a target with no test in the run is `not-run` and exits 1. A UI test target that's in the scheme but missing from the build counts the same way.
+- **The two-device UI results have the same fields as one device's**: `ok`, `selected`, `notRun` and `flaky`.
+- **Windows tests make get the device's safe areas.** In a unit test host, a window a test puts on the scene has an iPhone's size and insets (62 pt on top, 34 at the bottom), not the Mac window's 20 pt, and its content is laid out within them.
+- **A tab view that adapts to a sidebar starts with its tab bar on an iPad**, like iPadOS, instead of an open sidebar. Checked against an iPad simulator with `simless calibrate`.
+- **Same number of hosts every run.** Test hosts are planned from the Mac's core count rather than the cores macOS reports available at that moment, from the timing history of full runs rather than the last run's (a run of a few tests left times for a few targets), and every run says how many hosts it uses and why.
+- **Slots install side by side** (up to 3 at once), so a cold `simless up` has its test hosts ready in 26 s instead of 38 s after the build.
+- **`simless down --all` says what it stops**, worktree by worktree, and leaves the hosts of a worktree whose test run is still going.
+
 ## 0.5.0 (2026-10-14)
 
 The goal for this one was making simless trustworthy enough to decide whether code can merge, on the same production app as 0.4.0 plus the demo app and a second app.

@@ -39,10 +39,10 @@ Measured on a production SwiftUI app (~280 Swift files, several large Swift pack
 | Memory held by 5 agents (steady state) | 11.2 GB, 1,071 processes | **0.15 GB, 6 processes** | **~75×** |
 | Peak load average, 5 agents starting cold | ~1,010 | **~82** | 12× |
 | Unit tests (2 classes) | 13.1 s | **5.6 s** | 2.3× |
-| Unit tests, whole suite (2,210 tests), nothing built, empty caches | 8.2 min | **8.5 min** | 1.0× |
-| Unit tests, whole suite, already built | 6.3 min | **5.2 to 5.5 min** | 1.2× |
+| Unit tests, whole suite (2,280 tests), nothing built, empty caches | 8.2 min | **7.9 min** | 1.0× |
+| Unit tests, whole suite, already built | 6.3 min | **5.5 to 6.5 min** | 1.1× |
 | 20 named tests, nothing rebuilt | 25.5 s | **about 1 s** | 25× |
-| UI tests (108 XCUITests, iPhone and iPad, 5 simulator clones vs. 4 hidden hosts) | 19.2 min | **7.6 min** | 2.5× |
+| UI tests (106 XCUITests, iPhone and iPad, 5 simulator clones vs. 4 hidden hosts) | 19.2 min | **7.5 to 9.4 min** | 2.3× |
 
 Legacy gets slower with every agent you add, simless stays at ~2 s per edit. The test rows are from a second production app (about 2,200 unit tests across 41 targets, most of them in a local Swift package), against an iPhone 17 simulator on iOS 26.5, with the same results test by test. The whole unit suite's time is set by one CPU-heavy test target that the Mac's Swift runtime runs slower than the simulator does (see [Unit tests](#unit-tests)). Full method, caveats and reproduction steps: [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -133,7 +133,8 @@ simless test --simulator-only     the tests marked as needing a simulator, and t
 simless calibrate [fixture]       compare renders with an iOS Simulator (boots one, run once per app)
       [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone]
 simless status                    hosts, test runs going on and their share of the Mac, disk use
-simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every host)
+simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every worktree's,
+                                  said before it stops them, except where a test run is going on)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
 simless agent install             install SimlessAgent (live reload)
 simless skill install             install the Claude Code skill
@@ -152,7 +153,7 @@ simless version                   version, Xcode and macOS
 
 ### Using simless as a merge check
 
-`simless test` exits 0 only when every selected test ran and passed. It exits non-zero when a test failed, crashed, ran out of time or never ran, and when a selection matches no test at all. Tests marked simulator-only, `--skip`ped ones and those in a UI test target the scheme doesn't build are listed but don't count against the run.
+`simless test` exits 0 only when every selected test ran and passed. It exits non-zero when a test failed, crashed, ran out of time or never ran, when a selection matches no test at all, and when a test target the run had to cover produced no tests. For `simless test all` those are the app scheme's unit test targets and every local package's test targets. Tests marked simulator-only, `--skip`ped ones and those in a UI test target the scheme doesn't build are listed but don't count against the run.
 
 Results go to `test-results.json` and `ui-test-results.json` in the worktree's work folder (`simless status` shows where). Each starts with `ok`, `selected`, `notRun` and `flaky`, and then lists every test with its time, its reason or failure, and one status:
 
@@ -160,7 +161,7 @@ Results go to `test-results.json` and `ui-test-results.json` in the worktree's w
 |---|---|
 | `passed`, `failed`, `crashed`, `skipped` | what it says. A crash includes running out of time |
 | `flaky` | failed in the full run and passed when run again alone. Doesn't fail the run, but a merge script can |
-| `not-run` | selected, but nothing came back for it. Fails the run |
+| `not-run` | selected, but nothing came back for it. Fails the run. A whole test target that didn't run (its bundle didn't load, or the build left it out) gets one `not-run` entry under its name |
 | `simulator-only` | marked in `tests.simulatorOnly`, or skipped with a reason that starts with "simulator only" |
 | `excluded` | matched `--skip` or `tests.skip` |
 | `not-built` | in a UI test target the scheme doesn't build (a watch app's, say) |
@@ -287,8 +288,9 @@ Agents often work in parallel worktrees. Each worktree has its own hosts, slots 
 - **Device-only tests run.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` instead, or on the `SIMLESS_HEADLESS` environment variable, which is set only in simless runs.
 - **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice`, file-system locations, the sandbox.
 - **Last full build.** App tests run against the last full build, not against hot-reload patches. `simless test` warns when sources have changed since then. Package tests are built from the current sources.
+- **Windows tests make** on the connected scene have the emulated device's size and safe areas (62 pt on top on an iPhone), and their content is laid out within them.
 - **Bundle ids.** The app, its extensions and the watch app report their original bundle ids to tests, not the slot's, in `bundleIdentifier` and in Info.plist values such as a watch app's companion id.
-- **The Mac's Swift runtime.** Tests run at the Mac's own speed: a CPU-bound benchmark in the demo app takes the same time as in an iOS 26.5 simulator. But the Mac's Swift runtime isn't the simulator's, and unoptimized generic code (a debug build's string matching, say) can run slower. In one app a test took 180 s under simless and as a plain macOS program alike, and about 95 s in the simulator. A test like that sets the floor for a whole run, so split it if you can.
+- **The Mac's Swift runtime.** Tests run at the Mac's own speed: a CPU-bound benchmark in the demo app takes the same time as in an iOS 26.5 simulator. But the Mac's Swift runtime isn't the simulator's, and unoptimized generic code (a debug build's string matching, say) can run slower. In one app a test took 180 s under simless and as a plain macOS program alike, and about 95 s in the simulator. simless can't swap the Mac's runtime, so a target with tests like that sets the floor for a whole `simless test all`: it gets a host of its own, and the run can't end sooner than it does. Split such tests into smaller ones (or into their own target) to bring the whole run down.
 - **Mac frameworks.** Vision, for one, reads text differently on the Mac (a superscript "10^9" came out as "1019"). Mark tests that compare such output exactly as simulator-only.
 
 ### UI tests

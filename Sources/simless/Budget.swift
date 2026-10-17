@@ -16,7 +16,7 @@ enum Budget {
         var hosts: Int
     }
 
-    static var cores: Int { ProcessInfo.processInfo.activeProcessorCount }
+    static var cores: Int { ProcessInfo.processInfo.processorCount }
 
     /// Test runs going on in other worktrees right now.
     static func others(than ws: Workspace) -> [Run] {

@@ -497,7 +497,7 @@ func cmdStatus(_ args: Args) throws {
     // Test runs going on now, and the share of the Mac each gets.
     let runs = Budget.running()
     if !runs.isEmpty {
-        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let cores = ProcessInfo.processInfo.processorCount
         print("test runs: \(runs.count), each with about \(cores / runs.count) of \(cores) cores")
         for r in runs { print("  \(r.kind == "ui" ? "UI tests" : "unit tests")  \(r.hosts) host(s)  \(secs(r.started))  \(r.worktree)") }
     }
@@ -524,23 +524,32 @@ func cmdStatus(_ args: Args) throws {
 }
 
 func cmdDown(_ args: Args) throws {
-    let slots: [SlotRecord]
+    var slots: [SlotRecord]
+    let here = try? Workspace.load()
     if args.flags.contains("--all") {
         slots = GlobalState.load().slots
+        // Another session's test run keeps its hosts: stopping them would fail its tests.
+        let busy = Set(Budget.running().map(\.worktree))
+        for worktree in busy.sorted() where worktree != here?.root {
+            print("kept the hosts of \(worktree): a test run is going on there")
+        }
+        slots.removeAll { busy.contains($0.worktree) && $0.worktree != here?.root }
     } else {
         // This worktree's render host and its test and UI hosts.
-        let ws = try Workspace.load()
-        slots = GlobalState.load().slots.filter { $0.worktree == ws.root }
+        guard let here else { throw SimlessError("not in a simless worktree; `simless down --all` stops every worktree's hosts") }
+        slots = GlobalState.load().slots.filter { $0.worktree == here.root }
     }
     // Only stops: the next render/reload relaunches in ~1 s. `simless clean` (or the
     // automatic cleanup when a worktree is deleted) removes slots and caches.
-    var stopped = 0
-    for s in slots where RuntimeHost.hasProcess(s) {
-        Slots.stop(s)
-        stopped += 1
-        print("stopped \(s.slotID)")
+    let running = slots.filter { RuntimeHost.hasProcess($0) }
+    if running.isEmpty { print("nothing was running"); return }
+    // Say what goes, per worktree, before it goes.
+    for (worktree, list) in Dictionary(grouping: running, by: \.worktree).sorted(by: { $0.key < $1.key }) {
+        let mine = worktree == here?.root ? " (this worktree)" : ""
+        print("stopping \(list.count) host(s) of \(worktree)\(mine): \(list.map(\.slotID).joined(separator: ", "))")
     }
-    if stopped == 0 { print("nothing was running") }
+    for s in running { Slots.stop(s) }
+    print("stopped \(running.count) host(s); they start again on next use")
 }
 
 func cmdAgent(_ args: Args) throws {

@@ -50,7 +50,10 @@ public func simlessRuntimeStart() {
         BundleIDs.restore(slot: slot, original: original)
     }
     AppGroups.redirect()
+    TabSidebar.install()
     if let model = env["SIMLESS_DEVICE_MODEL"], !model.isEmpty { DeviceModel.apply(model) }
+    // Unit test hosts: windows tests make get the device's size and safe areas.
+    if env["SIMLESS_UI"] != "1", let canvas = env["SIMLESS_UNIT_CANVAS"] { UnitCanvas.install(canvas) }
     if env["SIMLESS_UI"] == "1" {
         Headless.install()
         // An iPhone supports a watch session; asked at startup, so set it now.
@@ -371,5 +374,75 @@ enum Housekeeping {
         var total = 0
         for case let f as URL in e { total += (try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0 }
         return total
+    }
+}
+
+// MARK: - Device canvas in unit test hosts
+
+/// A test that puts a view in a window of its own (to read its layout or
+/// accessibility) gets an iPhone's window there: its size and its safe areas,
+/// such as the Dynamic Island's 62 pt, not the Mac window's 20 pt.
+enum UnitCanvas {
+    static var width = 402.0, height = 874.0, top = 62.0, bottom = 34.0
+
+    static func install(_ spec: String) {
+        let c = spec.split(separator: ",").compactMap { Double($0) }
+        guard c.count == 4 else { return }
+        (width, height, top, bottom) = (c[0], c[1], c[2], c[3])
+        // A window on the canvas reports the device's insets.
+        let sel = #selector(getter: UIView.safeAreaInsets)
+        if let m = class_getInstanceMethod(UIWindow.self, sel) {
+            typealias Getter = @convention(c) (AnyObject, Selector) -> UIEdgeInsets
+            let original = unsafeBitCast(method_getImplementation(m), to: Getter.self)
+            let block: @convention(block) (UIWindow) -> UIEdgeInsets = { w in
+                guard w.bounds.width == CGFloat(width), w.bounds.height == CGFloat(height) else { return original(w, sel) }
+                return UIEdgeInsets(top: CGFloat(top), left: 0, bottom: CGFloat(bottom), right: 0)
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        NotificationCenter.default.addObserver(forName: UIWindow.didBecomeVisibleNotification, object: nil, queue: .main) { n in
+            guard let w = n.object as? UIWindow else { return }
+            apply(w)
+        }
+    }
+
+    /// Sizes the window to the canvas and lays its content out within the
+    /// device's safe areas (the root's own safe area counts what the Mac adds).
+    static func apply(_ w: UIWindow) {
+        let size = CGSize(width: width, height: height)
+        if w.frame.size != size { w.frame = CGRect(origin: .zero, size: size) }
+        if let root = w.rootViewController {
+            root.view.layoutIfNeeded()
+            let base = root.view.safeAreaInsets, current = root.additionalSafeAreaInsets
+            let wanted = UIEdgeInsets(top: max(0, CGFloat(top) - (base.top - current.top)), left: 0,
+                                      bottom: max(0, CGFloat(bottom) - (base.bottom - current.bottom)), right: 0)
+            if wanted != current { root.additionalSafeAreaInsets = wanted }
+        }
+        w.layoutIfNeeded()
+    }
+}
+
+// MARK: - Tab sidebar
+
+/// A tab view that adapts to a sidebar (`.sidebarAdaptable`) starts with the
+/// sidebar open on the Mac, as in Mac Catalyst. iPadOS starts it closed, with
+/// the floating tab bar, and opens it on request: so do the hosts.
+enum TabSidebar {
+    private static var started = Set<ObjectIdentifier>()
+
+    static func install() {
+        guard let cls = NSClassFromString("UITabBarController") else { return }
+        let sel = NSSelectorFromString("viewWillAppear:")
+        guard let m = class_getInstanceMethod(cls, sel) else { return }
+        typealias F = @convention(c) (AnyObject, Selector, Bool) -> Void
+        let original = unsafeBitCast(method_getImplementation(m), to: F.self)
+        let block: @convention(block) (AnyObject, Bool) -> Void = { controller, animated in
+            if started.insert(ObjectIdentifier(controller)).inserted, controller.responds(to: NSSelectorFromString("sidebar")),
+               let sidebar = controller.value(forKey: "sidebar") as? NSObject, sidebar.responds(to: NSSelectorFromString("setHidden:")) {
+                sidebar.setValue(true, forKey: "hidden")
+            }
+            original(controller, sel, animated)
+        }
+        method_setImplementation(m, imp_implementationWithBlock(block))
     }
 }

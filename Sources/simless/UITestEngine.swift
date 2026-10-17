@@ -33,8 +33,8 @@ enum UITestEngine {
     /// their sources (synchronized folders, or a folder named like the target).
     static func targets(_ ws: Workspace, includingUnbuilt: Bool = false) -> [UITarget] {
         var names = Set<String>()
-        if let file = (try? FileManager.default.contentsOfDirectory(atPath: ws.products))?.first(where: { $0.hasSuffix(".xctestrun") }),
-           let data = FileManager.default.contents(atPath: "\(ws.products)/\(file)"),
+        if let file = ws.appXCTestRun,
+           let data = FileManager.default.contents(atPath: file),
            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
             var entries: [[String: Any]] = []
             if let configs = plist["TestConfigurations"] as? [[String: Any]] {
@@ -209,10 +209,14 @@ enum UITestEngine {
                 tests[id] = merged
             }
         }
-        let bad = tests.filter { ["failed", "crashed", "not-run"].contains($0.value["status"] as? String ?? "") }.keys.sorted()
-        let out: [String: Any] = ["ok": bad.isEmpty && perDevice.values.allSatisfy { $0["ok"] as? Bool ?? false },
-                                  "devices": perDevice.keys.sorted(), "failing": bad, "tests": tests,
-                                  "flaky": tests.filter { $0.value["status"] as? String == "flaky" }.keys.sorted()]
+        func with(_ statuses: Set<String>) -> [String] { tests.filter { statuses.contains($0.value["status"] as? String ?? "") }.keys.sorted() }
+        // The same fields as one device's file, so a merge script reads both the same way.
+        let notRun = Set(perDevice.values.flatMap { $0["notRun"] as? [String] ?? [] }).union(with(["not-run"])).sorted()
+        let bad = with(["failed", "crashed"])
+        let out: [String: Any] = ["ok": bad.isEmpty && notRun.isEmpty && perDevice.values.allSatisfy { $0["ok"] as? Bool ?? false },
+                                  "selected": with(["passed", "failed", "crashed", "skipped", "flaky", "not-run"]).count,
+                                  "notRun": notRun, "flaky": with(["flaky"]), "failing": bad,
+                                  "devices": perDevice.keys.sorted(), "tests": tests]
         try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: path))
     }
 
@@ -233,16 +237,23 @@ enum UITestEngine {
         var excluded: [String] = []                 // --skip and tests.skip
         var unbuiltTests: [String] = []             // in a UI test target the scheme doesn't build
         var named: [String] = []                    // ...and asked for by name
+        var missing: [String] = []                  // in the scheme, yet not in the build: never fine
+        let inScheme = Set(SimulatorLane.schemes(ws).filter { $0.value == ws.config.scheme }.keys)
         for target in every where !target.built {
             let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
             if !wanted { continue }
             for id in tests(in: target) {
                 if let mark = simulatorOnly.first(where: { TestEngine.matches(id.user, $0.key) }) { markedTests[id.user] = mark.value }
+                else if inScheme.contains(target.name) && SimulatorLane.platform(target.name, ws: ws) == "iOS" { missing.append(id.user) }
                 else {
                     unbuiltTests.append(id.user)
                     if !filters.isEmpty { named.append(id.user) }
                 }
             }
+        }
+        if !missing.isEmpty {
+            let targets = Set(missing.map { String($0.split(separator: "/")[0]) }).sorted()
+            Log.info("note: \(targets.joined(separator: ", ")) is in the \(ws.config.scheme) scheme but not in the build; its \(missing.count) test(s) count as not run")
         }
         for target in all {
             let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
@@ -265,6 +276,7 @@ enum UITestEngine {
         }
         if selected.isEmpty {
             // Nothing to run here is only fine when everything asked for is simulator-only.
+            if !missing.isEmpty { throw SimlessError("no UI test ran: \(missing.count) test(s) in the \(ws.config.scheme) scheme aren't in the build (run `simless up`)") }
             if !markedTests.isEmpty && named.isEmpty {
                 try saveResults(ws: ws, results: Results(), selected: [], marked: markedTests, load: [], excluded: excluded, unbuilt: unbuiltTests)
                 print("0 run here, \(markedTests.count) simulator-only (`simless test --simulator-only` lists them)")
@@ -363,7 +375,7 @@ enum UITestEngine {
         let r = results
         for (id, reason) in r.crashed { print("  CRASHED: \(id): \(reason)") }
         for id in passedAlone { print("  flaky: \(id) failed while the run was busy, and passed alone (load, or a flaky test)") }
-        let notRun = try saveResults(ws: ws, results: r, selected: selected.map(\.user), marked: markedTests, load: passedAlone,
+        let notRun = try saveResults(ws: ws, results: r, selected: selected.map(\.user) + missing, marked: markedTests, load: passedAlone,
                                      excluded: excluded, unbuilt: unbuiltTests)
         var parts = ["\(r.passed.count) passed", "\(r.failed.count) failed"]
         if !r.skipped.isEmpty { parts.append("\(r.skipped.count) skipped") }
@@ -385,7 +397,7 @@ enum UITestEngine {
 
     /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to
     /// one per two cores.
-    static var defaultJobs: Int { max(1, min(4, ProcessInfo.processInfo.activeProcessorCount / 2)) }
+    static var defaultJobs: Int { max(1, min(4, ProcessInfo.processInfo.processorCount / 2)) }
 
     final class Results: @unchecked Sendable {
         private let lock = NSLock()

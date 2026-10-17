@@ -122,6 +122,24 @@ struct Workspace {
     var derivedData: String { "\(work)/DerivedData" }
     var products: String { "\(derivedData)/Build/Products" }
     var productsIphoneos: String { "\(products)/Debug-iphoneos" }
+
+    /// The app scheme's .xctestrun in the build folder. Package test builds
+    /// write their own next to it, so it's picked by the scheme it's for
+    /// (Xcode names it `<Scheme>_<TestPlan>_<platform>.xctestrun`), or else by
+    /// holding the app's unit-test target, never by which sorts first.
+    var appXCTestRun: String? {
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: products)) ?? []).filter { $0.hasSuffix(".xctestrun") }
+        if let named = files.filter({ $0.hasPrefix("\(config.scheme)_") }).max(by: { mtime("\(products)/\($0)") < mtime("\(products)/\($1)") }) {
+            return "\(products)/\(named)"
+        }
+        return files.map { "\(products)/\($0)" }.first { path in
+            guard let data = FileManager.default.contents(atPath: path),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return false }
+            let entries = (plist["TestConfigurations"] as? [[String: Any]])?.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
+                ?? plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
+            return entries.contains { $0["BlueprintName"] as? String == config.testTarget }
+        }
+    }
     var buildLog: String { "\(work)/build.log" }
     var settingsPath: String { "\(work)/settings.json" }
 

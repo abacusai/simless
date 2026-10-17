@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D3E0A1B20000000000000001 /* DemoKit in Frameworks */ = {isa = PBXBuildFile; productRef = D3E0A1B20000000000000002 /* DemoKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D799BAE6088A90139B415FCC /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -59,6 +63,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D3E0A1B20000000000000001 /* DemoKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -111,6 +116,9 @@
 				FBF56003221A421EB69B7F14 /* SimlessDemo */,
 			);
 			name = SimlessDemo;
+			packageProductDependencies = (
+				D3E0A1B20000000000000002 /* DemoKit */,
+			);
 			productName = SimlessDemo;
 			productReference = 8BCD5BC4CDFDF0918087C782 /* SimlessDemo.app */;
 			productType = "com.apple.product-type.application";
@@ -189,6 +197,9 @@
 			);
 			mainGroup = E50290A24C49A459B43487C5;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D3E0A1B20000000000000003 /* XCLocalSwiftPackageReference "DemoKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 328EC33DF3954DC9B83FA285 /* Products */;
 			projectDirPath = "";
@@ -469,6 +480,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D3E0A1B20000000000000003 /* XCLocalSwiftPackageReference "DemoKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = DemoKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D3E0A1B20000000000000002 /* DemoKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DemoKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 98F54143AB4E86B28C3AFEE0 /* Project object */;
 }

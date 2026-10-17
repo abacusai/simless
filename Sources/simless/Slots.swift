@@ -63,12 +63,12 @@ enum Slots {
         try Signing.sign(app, identity: signing.identity, entitlements: entitlements)
 
         // xctestrun for installing: same as the build's, host bundle id swapped.
-        guard let src = (try? fm.contentsOfDirectory(atPath: ws.products))?.first(where: { $0.hasSuffix(".xctestrun") }) else {
+        guard let src = ws.appXCTestRun else {
             throw SimlessError("build produced no .xctestrun (is \(ws.config.testTarget) an app-hosted unit-test target?)")
         }
         let xctestrun = "\(slot.dir)/slot.xctestrun"
         try? fm.removeItem(atPath: xctestrun)
-        try retargetXCTestRun(from: "\(ws.products)/\(src)", to: xctestrun,
+        try retargetXCTestRun(from: src, to: xctestrun,
                               hostBundleID: settings.bundleID, slotID: slot.slotID)
         // The runtime every launch of this slot injects (Dynamic Type, original
         // bundle ids, the test runner), outside the app so it never needs re-signing.
@@ -198,9 +198,10 @@ enum Slots {
     }
 
     /// Installs the slot via a zero-test run (xcodebuild is the only supported
-    /// installer for DfI apps). Installs are serialized machine-wide.
+    /// installer for DfI apps). At most 3 install at once machine-wide: a cold
+    /// `simless up` installs the render slot and the test slots side by side.
     static func install(_ slot: SlotRecord, ws: Workspace) throws {
-        try withLock("install") {
+        try withToken("install", count: 3) {
             let t = now()
             stop(slot)
             let log = "\(slot.dir)/install.log"

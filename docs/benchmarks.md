@@ -50,15 +50,16 @@ All times are per cycle (or per agent) medians unless noted.
 
 ## Test suites
 
-A second production app: about 2,200 unit tests in 41 targets (most in a local Swift package) and 108 XCUITests, on a 10-core M-series Mac with 32 GB. The baseline is one fixed native run on an iPhone 17 simulator, iOS 26.5, with Xcode's parallel testing (5 simulator clones for the UI tests). simless results matched it test by test.
+A second production app: about 2,280 unit tests in 41 targets (most in a local Swift package) and about 110 XCUITests, on a 10-core M-series Mac with 32 GB. The baseline is one fixed native run on an iPhone 17 simulator, iOS 26.5, with Xcode's parallel testing (5 simulator clones for the UI tests). simless results matched it test by test.
 
 | | Simulator | simless |
 |---|---|---|
-| Unit tests, nothing built and empty caches (`simless clean --all`, then `up` and `test all`) | 116 s build + 375 s tests = 491 s | 150 to 178 s `up` + 332 s = **510 to 535 s** |
-| Unit tests, already built | 375 s | **309 to 333 s** |
+| Unit tests, nothing built and empty caches (`simless clean --all`, then `up` and `test all`) | 116 s build + 375 s tests = 491 s | 140 s `up` + 333 s = **473 s** (494 s before slots installed side by side) |
+| Unit tests, already built | 375 s | **327 to 390 s** |
 | 20 named tests | 25.5 s | **about 1 s** |
-| UI tests, 104 on iPhone and 4 iPad-only ones on iPad | 1,150 s on 5 clones | **454 s** on 4 hidden hosts, no clones, no swap |
-| 5 back-to-back runs on one commit, unit and UI | | **all 10 passed**, with the same tests passing each time. 2 of them flagged tests as flaky that passed when run again alone: wall-clock races in the app's own tests, and one UI test that also failed once under load in an earlier version |
+| UI tests, about 105 on iPhone and 4 iPad-only ones on iPad | 1,150 s on 5 clones | **450 to 561 s** on 4 hidden hosts, no clones, no swap |
+| 3 back-to-back runs on one commit, unit and UI (Xcode 27.1) | | **all 6 passed**, identical results, all 41 unit test targets and both UI targets present |
+| 5 back-to-back runs on one commit, unit and UI (0.5.0) | | **all 10 passed**, with the same tests passing each time. 2 of them flagged tests as flaky that passed when run again alone: wall-clock races in the app's own tests, and one UI test that also failed once under load in an earlier version |
 | Unit and UI runs in two worktrees at once | | **both passed**, no timeouts: unit in 405 s, UI in 866 s on half the Mac |
 
 - **One target sets the floor.** Both unit rows are as long as the app's slowest test target, which gets a host to itself (about 310 to 330 s). Its slowest test does fuzzy word matching in a debug build, and the Mac's Swift runtime runs that code about twice as slow as the simulator's: the same test took 180 s for its slowest case as a plain macOS program built with the same flags. The rest of the suite is done in about 130 s.

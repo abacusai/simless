@@ -45,7 +45,7 @@ enum TestEngine {
 
     /// Test hosts for a run of `targetCount` targets.
     static func defaultHosts(targetCount: Int, config: Config.Tests?, share: Double = 1) -> Int {
-        let cores = Double(ProcessInfo.processInfo.activeProcessorCount) * share
+        let cores = Double(ProcessInfo.processInfo.processorCount) * share
         return config?.hosts ?? (targetCount >= 4 ? max(1, min(4, Int(cores / 3))) : 1)
     }
 
@@ -163,13 +163,16 @@ enum TestEngine {
         // each other. Targets are spread by how long their tests took last time.
         // Test runs in other worktrees get their share of the cores too.
         let share = Budget.share(ws)
-        let cores = max(2, Int(Double(ProcessInfo.processInfo.activeProcessorCount) * share))
-        if share < 1 { Log.step("sharing the Mac with \(Int((1 / share).rounded()) - 1) other test run(s): using \(cores) of \(ProcessInfo.processInfo.activeProcessorCount) cores") }
+        let cores = max(2, Int(Double(ProcessInfo.processInfo.processorCount) * share))
+        if share < 1 { Log.step("sharing the Mac with \(Int((1 / share).rounded()) - 1) other test run(s): using \(cores) of \(ProcessInfo.processInfo.processorCount) cores") }
         let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? defaultHosts(targetCount: targets.count, config: config, share: share)
         let groups = partition(targets, into: max(1, min(wantedHosts, targets.count)), weights: lastTargetSeconds(ws))
         var slots = [firstSlot]
         for i in 1..<max(1, groups.count) { slots.append(try RuntimeHost.slot(kind: "test\(i + 1)", ws: ws)) }
-        if groups.count > 1 { Log.step("running on \(groups.count) hosts: " + groups.map { $0.map(\.name).joined(separator: ", ") }.joined(separator: " | ")) }
+        // The plan and why, every time: a run on fewer hosts than usual should say so.
+        let why = args.values["--hosts"] != nil ? "--hosts" : config?.hosts != nil ? "tests.hosts"
+            : targets.count < 4 ? "fewer than 4 targets" : share < 1 ? "sharing the Mac" : "\(ProcessInfo.processInfo.processorCount) cores"
+        Log.step("running on \(groups.count) host(s) (\(why)): " + groups.map { $0.map(\.name).joined(separator: ", ") }.joined(separator: " | "))
 
         // Swift Testing would start every test at once; capping how many run
         // together keeps load down and, when a test takes the host down, the
@@ -248,8 +251,12 @@ enum TestEngine {
         if simOnly > 0 { parts.append("\(simOnly) simulator-only (`simless test --simulator-only` lists them)") }
         if !result.crashes.isEmpty { parts.append("\(result.crashes.count) crashed") }
         if !result.slow.isEmpty { parts.append("\(result.slow.count) flaky") }
+        // The targets this run had to cover, from the scheme and the packages
+        // rather than the build: a target that went missing from the build
+        // must fail the run, not pass it with fewer tests.
+        let expected = all ? expectedTargets(ws, packageTargets: packageTargets) : Array(wanted)
         let outcome = try saveResults(ws: ws, result: result, session: session, filters: filters, marks: simulatorOnly,
-                                      excluded: (config?.skip ?? []) + (args.repeated["--skip"] ?? []))
+                                      excluded: (config?.skip ?? []) + (args.repeated["--skip"] ?? []), expectedTargets: expected)
         if !outcome.notRun.isEmpty { parts.append("\(outcome.notRun.count) didn't run") }
         print(parts.joined(separator: ", "))
         for id in outcome.notRun.prefix(20) { print("  NOT RUN: \(id)") }
@@ -273,7 +280,9 @@ enum TestEngine {
 
     /// How long each target's tests took in the last run (the sum of its tests' times).
     static func lastTargetSeconds(_ ws: Workspace) -> [String: Double] {
-        for path in ["\(ws.work)/test-results.json", historyPath(ws)] {
+        // The history first: only full runs write it, while a run of a few
+        // tests leaves test-results.json with times for a few targets.
+        for path in [historyPath(ws), "\(ws.work)/test-results.json"] {
             if let d = FileManager.default.contents(atPath: path),
                let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                let seconds = r["targetSeconds"] as? [String: Double], !seconds.isEmpty { return seconds }
@@ -319,8 +328,8 @@ enum TestEngine {
     /// The app's hosted unit-test targets, from the build's .xctestrun (UI test
     /// bundles excluded).
     static func appTestTargets(_ ws: Workspace) throws -> [String] {
-        guard let file = (try? FileManager.default.contentsOfDirectory(atPath: ws.products))?.first(where: { $0.hasSuffix(".xctestrun") }),
-              let data = FileManager.default.contents(atPath: "\(ws.products)/\(file)"),
+        guard let file = ws.appXCTestRun,
+              let data = FileManager.default.contents(atPath: file),
               let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw SimlessError("not built yet; run `simless up`")
         }
@@ -421,6 +430,18 @@ enum TestEngine {
         id == mark || id.hasPrefix(mark + "/") || id == mark + "()" || (mark.hasSuffix("()") && id == String(mark.dropLast(2)))
     }
 
+    /// The unit-test targets `test all` must run: the app scheme's iOS ones
+    /// (test plans included) and every local package's.
+    static func expectedTargets(_ ws: Workspace, packageTargets: [String]) -> [String] {
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        let ui = UITestEngine.uiTestTargets(pbx: pbx)
+        // Only targets that exist: a scheme can still list one that was removed.
+        let projectTargets = Set(pbx.matches(of: #/\/\* ([^*]+) \*\/ = \{\s*isa = PBXNativeTarget;/#).map { String($0.1) })
+        let scheme = SimulatorLane.schemes(ws).filter { $0.value == ws.config.scheme }.keys
+            .filter { projectTargets.contains($0) && !ui.contains($0) && SimulatorLane.platform($0, ws: ws) == "iOS" }
+        return Array(Set(scheme).union(packageTargets)).sorted()
+    }
+
     /// What a merge check needs beyond pass and fail.
     struct Outcome { var selected = 0; var notRun: [String] = []; var flaky: [String] = [] }
 
@@ -428,7 +449,7 @@ enum TestEngine {
     /// which aren't expected to run.
     @discardableResult
     static func saveResults(ws: Workspace, result: Result, session: Session, filters: [String] = [], marks: [String: String] = [:],
-                            excluded: [String] = []) throws -> Outcome {
+                            excluded: [String] = [], expectedTargets: [String] = []) throws -> Outcome {
         var simulatorOnly: [String: String] = [:]
         for (id, reason) in result.skipped where isSimulatorOnly(reason) { simulatorOnly[session.userID(id)] = reason }
         // Every test, with what happened to it.
@@ -460,6 +481,13 @@ enum TestEngine {
         for id in selected where tests[id] == nil {
             tests[id] = ["status": "not-run", "reason": "selected, but it never ran"]
             outcome.notRun.append(id)
+        }
+        // A target with no test in the run at all (its bundle never loaded, or
+        // the build left it out) is one not-run entry for the whole target.
+        for target in expectedTargets where !selected.contains(where: { $0.hasPrefix(target + "/") })
+            && !marks.keys.contains(where: { matches(target, $0) }) && !excluded.contains(where: { matches(target, $0) }) {
+            tests[target] = ["status": "not-run", "reason": "no test from this target ran (its bundle didn't load, or the build left it out)"]
+            outcome.notRun.append(target)
         }
         outcome.notRun.sort()
         outcome.flaky = result.slow.map(session.userID).sorted()
@@ -552,6 +580,8 @@ final class Session {
         }
         env["SIMLESS_SANDBOX_TOKENS"] = dirs.compactMap(Sandbox.readToken).joined(separator: "\n")
         env["SIMLESS_IDLE"] = String(ws.idleMinutes * 60)
+        // Windows tests make get the device's size and safe areas.
+        if let c = try? Render.canvas(ws.config.device) { env["SIMLESS_UNIT_CANVAS"] = "\(c.width),\(c.height),\(c.safeTop),\(c.safeBottom)" }
         // What earlier runs' tests left in tmp goes when the host starts.
         env["SIMLESS_CLEAN_TMP"] = "1"
         return env
