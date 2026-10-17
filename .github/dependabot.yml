@@ -6,3 +6,9 @@ updates:
       interval: "weekly"
     labels:
       - "dependencies"
+    # CodeQL's init and analyze steps must run the same version, so they update
+    # together in one pull request.
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
