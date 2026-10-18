@@ -268,4 +268,18 @@ final class BehaviorUITests: XCTestCase {
     func testASkipKeepsItsReason() throws {
         try XCTSkipUnless(false, "The lab only covers this on an iPad")
     }
+
+    /// A tab view's tabs are buttons: in a tab bar on an iPhone, and on an iPad
+    /// (where XCUITest shows no tab bar around the floating one's tabs, checked
+    /// in an iPad simulator) right in the app.
+    @MainActor
+    func testATabBarsTabsAreButtons() throws {
+        let app = launch("tabs")
+        let iPad = app.windows.firstMatch.frame.width >= 600
+        let profile = iPad ? app.buttons["Profile"].firstMatch : app.tabBars.buttons["Profile"]
+        XCTAssertTrue(profile.waitForExistence(timeout: 10), "No Profile tab button")
+        if iPad { XCTAssertFalse(app.tabBars.firstMatch.exists, "An iPad's floating tab bar isn't a tab bar to XCUITest") }
+        profile.tap()
+        XCTAssertTrue(app.staticTexts["Posts"].waitForExistence(timeout: 5), "The Profile tab didn't open")
+    }
 }

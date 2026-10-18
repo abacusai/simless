@@ -3,6 +3,17 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## 0.5.3 (2026-10-18)
+
+The last gaps before a project can gate its merges on simless: a run never reports results for code that isn't what's on disk, and never passes with tests missing from a list.
+
+- **Tests always run against the files on disk.** The app and its hosted test targets come from the last full build, and before, an edit to an app-hosted test target wasn't rebuilt: a planted failing assertion showed as passed. simless now records every file the build reads (under the project and the local packages, test targets included) and, when one changed, builds again before testing. If that build fails, nothing runs and the run says why. A run of package test targets after package edits alone skips it, since those build from current sources anyway.
+- **An id that matches no test fails the run.** A renamed, deleted or mistyped id in a filter or a `--from` list is `not-run` now, so a list can't shrink without anyone noticing. `--allow-missing` lets it through.
+- **The results file never keeps an earlier answer.** It says `ok: false` while a run goes, and an error that stops the run early (an unknown target, a failed build) leaves `ok: false` with the error in it.
+- **An iPad's floating tab bar is what XCUITest on iPadOS shows**: each tab is a button, with no tab bar element around them. `app.buttons["Profile"]` works on an iPad and `app.tabBars.buttons["Profile"]` doesn't, in an iPad simulator and under simless alike. Checked by running the demo's test in an iPad simulator.
+- **`--help` after any command prints that command's help** and runs nothing. `simless test --help` used to run the tests.
+- **UI test bundles rebuild when their sources' content changes**, a deleted file or one put back to an older version included, not only when a file is newer than the bundle.
+
 ## 0.5.2 (2026-10-17)
 
 This one makes simless safe to gate merges on: a run can no longer pass with tests missing. Measured on the same production app as before, now on Xcode 27.1, plus the demo app and a second app.

@@ -75,9 +75,57 @@ enum TestEngine {
     /// `simless test`: unit tests, UI tests, or both when a selection names
     /// both. Exits non-zero unless everything selected ran and passed.
     static func run(_ given: Args) throws {
-        var args = given
         let ws = try Workspace.load()
-        if args.flags.contains("--simulator-only") { try printSimulatorOnly(ws); return }
+        if given.flags.contains("--simulator-only") { try printSimulatorOnly(ws); return }
+        // The results files this run answers for: both until the selection is
+        // known, then the unit or UI one, or both. They never keep an earlier
+        // run's answer: they say ok: false while this run goes, and say why
+        // when it stops early.
+        var files = [unitResults, uiResults]
+        do {
+            try runParts(given, ws: ws) { files = $0 }
+        } catch {
+            for f in files { writeFailure(ws: ws, file: f, reason: "\(error)") }
+            throw error
+        }
+    }
+
+    /// Tests never run against a build older than the files on disk: the app
+    /// and its hosted test targets come from the last full build, so when a
+    /// file it was built from changed, `simless up` runs first. (A run of
+    /// package test targets alone after package edits doesn't need it: those
+    /// build from current sources every run.) If that build fails, nothing runs.
+    static func ensureCurrentBuild(_ ws: Workspace, unitPart: [String]?, ui: Bool) throws {
+        let changed = BuildState.changed(ws)
+        if changed.isEmpty { return }
+        let packageDirs = ws.packages.map { URL(fileURLWithPath: "\(ws.root)/\($0)").standardizedFileURL.path + "/" }
+        let packageOnly = changed.allSatisfy { f in packageDirs.contains { f.hasPrefix($0) } }
+        let packageTargets = Set(Packages.testTargets(ws: ws).flatMap(\.targets))
+        let onlyPackageTests = !ui && (unitPart ?? []).count > 0
+            && unitPart!.allSatisfy { packageTargets.contains(String($0.split(separator: "/").first ?? "")) }
+        if packageOnly && onlyPackageTests { return }
+        let shown = changed.prefix(3).map { $0.hasPrefix(ws.root + "/") ? String($0.dropFirst(ws.root.count + 1)) : $0 }
+        Log.step("\(changed.count) file(s) changed since the last build (\(shown.joined(separator: ", "))\(changed.count > 3 ? ", ..." : "")): building again before testing")
+        do {
+            try cmdUp(Args([]))
+        } catch {
+            throw SimlessError("the tests can't run against the files on disk: building them failed, and the last build is older than your edits.\n\(error)")
+        }
+    }
+
+    static let unitResults = "test-results.json"
+    static let uiResults = "ui-test-results.json"
+
+    /// A results file that says the run didn't get to an answer.
+    static func writeFailure(ws: Workspace, file: String, reason: String) {
+        let out: [String: Any] = ["ok": false, "error": reason, "selected": 0, "notRun": [String](), "flaky": [String](), "tests": [String: Any]()]
+        try? mkdirp(ws.work)
+        try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
+            .write(to: URL(fileURLWithPath: "\(ws.work)/\(file)"))
+    }
+
+    private static func runParts(_ given: Args, ws: Workspace, planned: ([String]) -> Void) throws {
+        var args = given
         // Ids from a file (or stdin with "-"), one per line, as the results JSON writes them.
         if let from = args.values["--from"] {
             let text = from == "-" ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
@@ -97,14 +145,19 @@ enum TestEngine {
         if uiOnly, let wrong = uiPart.first(where: { !isUI($0) }) {
             throw SimlessError("\(wrong) isn't in a UI test target; UI test targets: \(uiTargets.joined(separator: ", "))")
         }
-        var ok = true
         let runsUnit = !uiOnly && (positional.isEmpty || !unitPart.isEmpty)
+        let runsUI = uiOnly || !uiPart.isEmpty
+        let files = (runsUnit ? [unitResults] : []) + (runsUI ? [uiResults] : [])
+        planned(files)
+        for f in files { writeFailure(ws: ws, file: f, reason: "running") }
+        try ensureCurrentBuild(ws, unitPart: runsUnit ? unitPart : nil, ui: runsUI)
+        var ok = true
         if runsUnit {
             var unitArgs = args
             unitArgs.positional = unitPart
             ok = try runUnit(unitArgs, ws: ws) && ok
         }
-        if uiOnly || !uiPart.isEmpty {
+        if runsUI {
             ok = try UITestEngine.runDevices(args, ws: ws, filters: uiPart) && ok
         }
         if !ok { exit(1) }
@@ -119,8 +172,6 @@ enum TestEngine {
         if (timeoutArg != nil && Double(timeoutArg!) == nil) || timeout <= 0 {
             throw SimlessError("--timeout takes seconds per test, e.g. --timeout 120")
         }
-        let edited = ws.changedSources()
-        if !edited.isEmpty { Log.info("note: \(edited.count) file(s) edited since `simless up`; app tests run the last full build (package tests are rebuilt)") }
 
         // What to run.
         let packages = Packages.testTargets(ws: ws)
@@ -256,7 +307,8 @@ enum TestEngine {
         // must fail the run, not pass it with fewer tests.
         let expected = all ? expectedTargets(ws, packageTargets: packageTargets) : Array(wanted)
         let outcome = try saveResults(ws: ws, result: result, session: session, filters: filters, marks: simulatorOnly,
-                                      excluded: (config?.skip ?? []) + (args.repeated["--skip"] ?? []), expectedTargets: expected)
+                                      excluded: (config?.skip ?? []) + (args.repeated["--skip"] ?? []), expectedTargets: expected,
+                                      allowMissing: args.flags.contains("--allow-missing"))
         if !outcome.notRun.isEmpty { parts.append("\(outcome.notRun.count) didn't run") }
         print(parts.joined(separator: ", "))
         for id in outcome.notRun.prefix(20) { print("  NOT RUN: \(id)") }
@@ -449,7 +501,7 @@ enum TestEngine {
     /// which aren't expected to run.
     @discardableResult
     static func saveResults(ws: Workspace, result: Result, session: Session, filters: [String] = [], marks: [String: String] = [:],
-                            excluded: [String] = [], expectedTargets: [String] = []) throws -> Outcome {
+                            excluded: [String] = [], expectedTargets: [String] = [], allowMissing: Bool = false) throws -> Outcome {
         var simulatorOnly: [String: String] = [:]
         for (id, reason) in result.skipped where isSimulatorOnly(reason) { simulatorOnly[session.userID(id)] = reason }
         // Every test, with what happened to it.
@@ -488,6 +540,16 @@ enum TestEngine {
             && !marks.keys.contains(where: { matches(target, $0) }) && !excluded.contains(where: { matches(target, $0) }) {
             tests[target] = ["status": "not-run", "reason": "no test from this target ran (its bundle didn't load, or the build left it out)"]
             outcome.notRun.append(target)
+        }
+        // An id asked for that matches no test (renamed, deleted, mistyped) is
+        // not run either: a list of tests mustn't shrink without anyone noticing.
+        if !allowMissing {
+            let all = session.known.map(session.userID)
+            for f in filters where !all.contains(where: { matches($0, f) || String($0.split(separator: "/").first ?? "") == f })
+                && !marks.keys.contains(where: { matches(f, $0) || matches($0, f) }) {
+                tests[f] = ["status": "not-run", "reason": "matches no test"]
+                outcome.notRun.append(f)
+            }
         }
         outcome.notRun.sort()
         outcome.flaky = result.slow.map(session.userID).sorted()

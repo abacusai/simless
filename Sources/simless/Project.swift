@@ -361,7 +361,7 @@ struct Workspace {
         return Array(Set(out)).sorted()
     }
 
-    private static func digest(_ path: String) -> String? {
+    static func digest(_ path: String) -> String? {
         guard let d = FileManager.default.contents(atPath: path) else { return nil }
         return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
     }

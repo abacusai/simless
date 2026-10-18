@@ -578,6 +578,8 @@ enum Snapshotter {
         case is UIToolbar: return .toolbar
         case is UITableView: return .table
         case is UICollectionView:
+            // iPadOS shows XCUITest no tab bar around the floating one's tabs.
+            if cls.contains("Floating") && Session.canvas.w >= 600 { return nil }
             return cls.contains("TabBar") || cls.contains("Floating") ? .tabBar : .collectionView
         case is UITableViewCell, is UICollectionViewCell: return .cell
         case is UITextView: return .textView
@@ -592,7 +594,8 @@ enum Snapshotter {
         if cls.contains("AlertControllerView") || cls.contains("_UIAlertControllerInterfaceActionGroupView") {
             return Alerts.isActionSheet(obj) ? .sheet : .alert
         }
-        if cls.contains("FloatingTabBar") || cls.hasSuffix("TabBar") { return .tabBar }
+        if cls.contains("FloatingTabBar") { return Session.canvas.w >= 600 ? nil : .tabBar }
+        if cls.hasSuffix("TabBar") { return .tabBar }
         if cls == "UIKeyboardLayoutStar" || cls == "UIKBKeyplaneView" { return .keyboard }
         return nil
     }
@@ -615,6 +618,8 @@ enum Snapshotter {
         }
         let cls = NSStringFromClass(type(of: obj))
         if cls.contains("PickerTableView") || cls.contains("PickerColumn") { return .pickerWheel }
+        // An iPad's floating tab bar: XCUITest on iPadOS sees each tab as a button.
+        if cls.hasPrefix("_UIFloatingTabBarItem") { return .button }
         let t = obj.accessibilityTraits
         if #available(iOS 17.0, *), t.contains(.toggleButton) { return .switch }
         if t.contains(.keyboardKey) { return .key }

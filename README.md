@@ -153,9 +153,11 @@ simless version                   version, Xcode and macOS
 
 ### Using simless as a merge check
 
-`simless test` exits 0 only when every selected test ran and passed. It exits non-zero when a test failed, crashed, ran out of time or never ran, when a selection matches no test at all, and when a test target the run had to cover produced no tests. For `simless test all` those are the app scheme's unit test targets and every local package's test targets. Tests marked simulator-only, `--skip`ped ones and those in a UI test target the scheme doesn't build are listed but don't count against the run.
+`simless test` exits 0 only when every selected test ran and passed. It exits non-zero when a test failed, crashed, ran out of time or never ran, when an id in the selection matches no test (`--allow-missing` lets that through), and when a test target the run had to cover produced no tests. For `simless test all` those are the app scheme's unit test targets and every local package's test targets. Tests marked simulator-only, `--skip`ped ones and those in a UI test target the scheme doesn't build are listed but don't count against the run.
 
-Results go to `test-results.json` and `ui-test-results.json` in the worktree's work folder (`simless status` shows where). Each starts with `ok`, `selected`, `notRun` and `flaky`, and then lists every test with its time, its reason or failure, and one status:
+Tests always run against the files on disk. simless records every file the app's build reads (the project's folder and the local packages, test targets included), and when one has changed since the last build, `simless test` builds again first. If that build fails, nothing runs.
+
+Results go to `test-results.json` and `ui-test-results.json` in the worktree's work folder (`simless status` shows where). They never keep an earlier run's answer: a file says `ok: false` while its run goes, and one that stopped early (an unknown target, a failed build) says `ok: false` with the error. Each starts with `ok`, `selected`, `notRun` and `flaky`, and then lists every test with its time, its reason or failure, and one status:
 
 | Status | Meaning |
 |---|---|
@@ -287,7 +289,7 @@ Agents often work in parallel worktrees. Each worktree has its own hosts, slots 
 - **App extensions and the watch app stay in the app.** They're re-identified under the slot's bundle id so tests can find them. macOS registers the extensions, and simless sets each one to "ignore" so a slot's widgets never show up in the widget gallery.
 - **Device-only tests run.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` instead, or on the `SIMLESS_HEADLESS` environment variable, which is set only in simless runs.
 - **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice`, file-system locations, the sandbox.
-- **Last full build.** App tests run against the last full build, not against hot-reload patches. `simless test` warns when sources have changed since then. Package tests are built from the current sources.
+- **Current build.** App tests run against a full build, never against hot-reload patches, and `simless test` builds again first when a file the build reads has changed. Package tests are built from the current sources.
 - **Windows tests make** on the connected scene have the emulated device's size and safe areas (62 pt on top on an iPhone), and their content is laid out within them.
 - **Bundle ids.** The app, its extensions and the watch app report their original bundle ids to tests, not the slot's, in `bundleIdentifier` and in Info.plist values such as a watch app's companion id.
 - **The Mac's Swift runtime.** Tests run at the Mac's own speed: a CPU-bound benchmark in the demo app takes the same time as in an iOS 26.5 simulator. But the Mac's Swift runtime isn't the simulator's, and unoptimized generic code (a debug build's string matching, say) can run slower. In one app a test took 180 s under simless and as a plain macOS program alike, and about 95 s in the simulator. simless can't swap the Mac's runtime, so a target with tests like that sets the floor for a whole `simless test all`: it gets a host of its own, and the run can't end sooner than it does. Split such tests into smaller ones (or into their own target) to bring the whole run down.
@@ -299,6 +301,7 @@ Agents often work in parallel worktrees. Each worktree has its own hosts, slots 
 - **Alerts and confirmation dialogs** as an iPhone's alerts and action sheets (the Mac would show AppKit panels).
 - **Context menus and `Menu`** as an iPhone menu, opened by a long press or a tap, with submenus that open on a tap.
 - **A text field's edit menu** (Select, Select All, Paste) on a long press.
+- **An iPad's floating tab bar** as iPadOS shows it to XCUITest: each tab a button, with no tab bar element around them (query `app.buttons["Tab"]` on an iPad, `app.tabBars.buttons["Tab"]` on an iPhone).
 - **The share sheet** as a sheet with Close. Close or a swipe down cancels it. Sharing to a target isn't emulated.
 - **Compact date pickers** as a button with the date or time, which opens wheels for a time.
 - **The keyboard:** the keyboard's notifications, an iPhone keyboard's frame, and the keyboard toolbar above it.

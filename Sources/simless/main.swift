@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.5.2"
+let version = "0.5.3"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -23,6 +23,7 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
         [--hosts <test hosts side by side, default up to 4>] [--jobs <tests at once per host>]
         [--from <file|->]: test ids from a file or stdin, one per line, as the results JSON writes them
         (unit and UI ids can be mixed: both run, one exit code)
+        [--allow-missing]: an id that matches no test is fine (by default it's not run, and the run fails)
   simless test ui [UITarget[/Class[/method]]...]   XCUITest UI tests, unchanged, in hidden hosts
         (naming a UI test target, class or test runs it the same way)
         [--jobs <hosts, default up to 4>] [--device iphone|ipad|iphone,ipad] [--timeout <seconds per test, default 600>]
@@ -272,6 +273,9 @@ func cmdUp(_ args: Args) throws {
     try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
     try ws.snapshotSources()
+    // What this build is built from, as of its start (recorded once it succeeds).
+    let inputs = BuildState.current(ws, previous: BuildState.load(ws) ?? [:])
+    try? FileManager.default.removeItem(atPath: BuildState.path(ws))
     // Local packages' tests: the scheme's build-for-testing usually builds them
     // with the app. Sources as of now, for marking those bundles current.
     let packages = Packages.testTargets(ws: ws)
@@ -285,6 +289,7 @@ func cmdUp(_ args: Args) throws {
         else { try? FileManager.default.removeItem(atPath: ws.snapshotPath) }
         throw error
     }
+    BuildState.save(ws, inputs)
     // Package tests the app build made are current; the rest build now, in the
     // app's build folder, while the host starts.
     if !args.flags.contains("--no-tests") {
@@ -578,6 +583,18 @@ var raw = Array(CommandLine.arguments.dropFirst())
 if raw.contains("-v") || raw.contains("--verbose") { Log.verbose = true; raw.removeAll { $0 == "-v" || $0 == "--verbose" } }
 guard let command = raw.first else { print(usage); exit(0) }
 let args = Args(Array(raw.dropFirst()))
+// `simless <command> --help` prints that command's part of the help and runs nothing.
+if args.flags.contains("--help") || args.flags.contains("-h") {
+    var lines: [Substring] = []
+    var inCommand = false
+    for line in usage.split(separator: "\n", omittingEmptySubsequences: false) {
+        if line.hasPrefix("  simless ") { inCommand = line.hasPrefix("  simless \(command) ") || line == "  simless \(command)" }
+        else if !line.hasPrefix("        ") { inCommand = false }
+        if inCommand { lines.append(line) }
+    }
+    print(lines.isEmpty ? usage : lines.joined(separator: "\n"))
+    exit(0)
+}
 
 do {
     if !["help", "-h", "--help", "init", "skill", "version", "--version"].contains(command) { Cleanup.collectGarbage() }

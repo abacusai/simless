@@ -21,6 +21,7 @@ struct BehaviorLab: View {
         case "menu": SubmenuLab()
         case "waits": WaitsLab()
         case "sheet": SheetLab()
+        case "tabs": TabsView()
         default: Text("Unknown lab \(name)")
         }
     }

@@ -111,8 +111,13 @@ enum UITestEngine {
         let exe = "\(bundle)/Contents/MacOS/\(target.name)"
         let shim = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Templates/XCUI")) ?? [])
             .filter { $0.hasSuffix(".swift") }.map { "\(Paths.toolRoot)/Templates/XCUI/\($0)" }
-        let newest = (target.sources + shim).map(mtime).max() ?? 0
-        if exists(exe), mtime(exe) >= newest, mtime(exe) >= mtime(Bundle.main.executablePath ?? "") { return bundle }
+        // Built from exactly these files with exactly this content (a deleted
+        // file or one put back to an older version counts too), by this simless.
+        let key = shortHash(((target.sources + shim).sorted().map { "\($0) \(Workspace.digest($0) ?? "")" }
+                             + ["\(mtime(Bundle.main.executablePath ?? ""))"]).joined(separator: "\n"))
+        let keyFile = "\(bundle)/Contents/simless-sources"
+        if exists(exe), (try? String(contentsOfFile: keyFile, encoding: .utf8)) == key { return bundle }
+        try? FileManager.default.removeItem(atPath: keyFile)
         let t = now()
         let p = "\(RuntimeBuild.developerDir)/Platforms/MacOSX.platform/Developer"
         let sdk = try Shell.check(["xcrun", "--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -149,6 +154,7 @@ enum UITestEngine {
                                    "NSPrincipalClass": "SimlessXCUIObserver"]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: URL(fileURLWithPath: "\(bundle)/Contents/Info.plist"))
+        try key.write(toFile: keyFile, atomically: true, encoding: .utf8)
         Log.step("built \(target.name) for the Mac in \(secs(t))")
         return bundle
     }
@@ -251,6 +257,16 @@ enum UITestEngine {
                 }
             }
         }
+        // An id asked for that matches no UI test (renamed, deleted, mistyped)
+        // counts as not run, unless --allow-missing.
+        var unmatched: [String] = []
+        if !args.flags.contains("--allow-missing") {
+            let everyID = every.flatMap { tests(in: $0) }.map(\.user)
+            for f in filters where !everyID.contains(where: { id in id == f || id.hasPrefix(f + "/") || f == String(id.split(separator: "/")[0])
+                || id == f.replacingOccurrences(of: "()", with: "") }) {
+                unmatched.append(f)
+            }
+        }
         if !missing.isEmpty {
             let targets = Set(missing.map { String($0.split(separator: "/")[0]) }).sorted()
             Log.info("note: \(targets.joined(separator: ", ")) is in the \(ws.config.scheme) scheme but not in the build; its \(missing.count) test(s) count as not run")
@@ -277,6 +293,7 @@ enum UITestEngine {
         if selected.isEmpty {
             // Nothing to run here is only fine when everything asked for is simulator-only.
             if !missing.isEmpty { throw SimlessError("no UI test ran: \(missing.count) test(s) in the \(ws.config.scheme) scheme aren't in the build (run `simless up`)") }
+            if !unmatched.isEmpty { throw SimlessError("no UI test matches \(unmatched.joined(separator: " "))") }
             if !markedTests.isEmpty && named.isEmpty {
                 try saveResults(ws: ws, results: Results(), selected: [], marked: markedTests, load: [], excluded: excluded, unbuilt: unbuiltTests)
                 print("0 run here, \(markedTests.count) simulator-only (`simless test --simulator-only` lists them)")
@@ -375,7 +392,7 @@ enum UITestEngine {
         let r = results
         for (id, reason) in r.crashed { print("  CRASHED: \(id): \(reason)") }
         for id in passedAlone { print("  flaky: \(id) failed while the run was busy, and passed alone (load, or a flaky test)") }
-        let notRun = try saveResults(ws: ws, results: r, selected: selected.map(\.user) + missing, marked: markedTests, load: passedAlone,
+        let notRun = try saveResults(ws: ws, results: r, selected: selected.map(\.user) + missing + unmatched, marked: markedTests, load: passedAlone,
                                      excluded: excluded, unbuilt: unbuiltTests)
         var parts = ["\(r.passed.count) passed", "\(r.failed.count) failed"]
         if !r.skipped.isEmpty { parts.append("\(r.skipped.count) skipped") }
