@@ -31,5 +31,6 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
         }
+        .onAppear { AppModel.shared.didShow(Self.self) }
     }
 }
