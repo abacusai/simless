@@ -3,6 +3,14 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **`simless init` and `up` work on a big app with no hand fixes.** On a production app (702 Swift files, 19 remote packages), `up` failed three ways, each needing a manual step. A warm `up` now takes 21 s, and the host starts.
+  - **The kit lands where the target compiles it.** `init` saw synchronized folders in the project and assumed the kit's folder was one, but the target root was a classic group holding a few synchronized subfolders, so the build failed with "cannot find 'SimlessHost' in scope". `init` now resolves the folder each of the target's synchronized groups really is, puts the kit in one of them (a `Debug` folder when there is one), and when there's none it says exactly what to add to the target.
+  - **Read-only binary frameworks.** A binary xcframework in a SwiftPM checkout is read-only and so was the slot's copy, so preparing the slot failed with "cannot open …/TerraiOS.framework/TerraiOS". The slot's clone is made writable. The build's copy is never written.
+  - **Swift libraries only Mac Catalyst has.** A framework built for an old iOS loads `@rpath/libswiftCoreNFC.dylib`, which a Mac Catalyst process only has under `/System/iOSSupport/usr/lib/swift`, where dyld doesn't look for `@rpath` libraries, so the host crashed at launch. The slot's copy of such a binary gets that folder as its last rpath, on every slot preparation.
+- **UI test sources in nested synchronized folders are found**, with the same group walk.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.
