@@ -183,7 +183,7 @@ simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
 simless reload [files...]         hot-reload everything edited since `simless up`
-      [--render <fixture|all>] [--matrix] [--no-fallback]
+      [--render <fixture|all>] [--matrix] [--no-fallback] [--dry-run]
 simless test [Target/Class/method...|all]   unit tests on the Mac, local package tests included
       [--skip Target/Class/method]... [--timeout <seconds per test>] [--hosts <n>] [--jobs <tests at once>]
       [--from <file|->]               test ids from a file or stdin, unit and UI ids mixed
@@ -372,7 +372,7 @@ simless also cleans up after itself, so nothing piles up between runs or after a
 
 What simless does to stay accurate:
 
-- **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
+- **Hot reload patches more than the edited files.** It also patches every view between the fixture you render and the edit, including views in local Swift packages, so a parent view never renders a stale subview. With `--render X` it only patches X's way to the edit: other fixtures that reach the edited view are listed as stale until the next full build, and `simless render` notes it on them. A store or model that merely names a view doesn't count as rendering it. Edits it can't trace safely (an extension of a type outside your sources, an internal or public top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically. `simless reload --dry-run` shows what a reload would patch.
 - **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac unless you pass `--idiom phone`. Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 

@@ -3,6 +3,18 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Hot reload works on big apps.** On a production app (702 Swift files, 19 packages), every edit fell back to a full rebuild, because even a leaf view reached 352 files on the way from the fixtures. Edit to checked screen now takes 3.2 s instead of 45.1 s for a leaf view (ScheduledTasksView) and 3.0 s instead of 37 s for a main screen (AuthenticationViewB), and both renders match a full build's exactly, PNGs included. What changed:
+  - **Only what the edit changed counts.** Each edited file is compared declaration by declaration with its copy from the last full build, so an edit to one view's `body` doesn't make every type in its file edited.
+  - **Only views make renders stale.** From an edited view, only the views that name it need patching. A store, model or enum that names a view doesn't render it, which is what pulled half the app in. An edited model still reaches everything that uses it.
+  - **Only the fixture you render.** `reload --render X` patches X's way to the edit. Other fixtures that reach it are listed as stale until the next full build, `simless render` notes it on them, and they never trigger a rebuild. `simless reload --dry-run` shows what a reload would patch.
+  - **Patches compile what they patch.** Unchanged declarations in a patched file resolve to the app's own copy, so an unchanged `extension View { func card() }` no longer makes the patch fail as ambiguous.
+  - **Faster compile.** One frontend job per file (2.1 s instead of 3.5 s for that app's two-file patch), and the package module map search is cached (0.25 s per reload).
+  - **Packages with C headers and static xcframeworks compile.** Patches get the header paths the app build has, so GoogleSignIn and GoogleMaps imports no longer fail.
+- **Replacing `body` in place was tried and isn't safe.** `@_dynamicReplacement` swaps the code but keeps the old `some View` type, which SwiftUI would read wrong. [findings.md](docs/findings.md#hot-reload) has the test.
+- **Unit tests for simless itself** (`swift test`), starting with hot-reload scoping, and CI now checks a real hot reload on the demo app: a screen that a shared store names and another screen embeds.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.
