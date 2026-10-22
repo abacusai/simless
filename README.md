@@ -182,6 +182,9 @@ simless up [--no-tests]           build, prepare this worktree's host, start it,
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
+simless act <fixture> <step>...   render a fixture, interact with it, then print the tree and issues
+      steps: tap "<label|#id>"  type "<#id|label>" "<text>"  swipe up|down|left|right [on "<label|#id>"]
+             longpress "<label|#id>"  wait <ms>        [--device …] [--dark] [--png <file|dir>] [--json]
 simless reload [files...]         hot-reload everything edited since `simless up`
       [--render <fixture|all>] [--matrix] [--no-fallback]
 simless test [Target/Class/method...|all]   unit tests on the Mac, local package tests included
@@ -209,6 +212,8 @@ simless version                   version, Xcode and macOS
 `--matrix` renders light and dark on `iphone`, `iphone-small` and `ipad`.
 
 `--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone. `--settle <ms>` gives a screen time for its async work (`.task`, loads) before the tree is read.
+
+`simless act Settings tap "Push notifications"` renders the fixture, works it like a finger and a keyboard would, and prints the tree afterwards (`"Push notifications" = "0"`). It uses the same automation as `simless test ui`: a tap is an accessibility activation where the element has an action and a real touch elsewhere, and `type` focuses the field first, so SwiftUI text fields take typing and their bindings update. Steps chain in one call and each one is reported as done or not, with what's on screen when an element isn't found. It needs kit 5 (`simless init`).
 
 `simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. `simless test all` runs the app's test targets and every local package's, in warm hosts with tests in parallel. A big run is spread over several hosts (`--hosts`), because main-actor tests run one at a time per process. Targets are spread by how long each took in the last run, and a target that takes half again as long as any other gets a host to itself. Those times are kept per repository, so a new worktree or a run after `simless clean` spreads well too. A test that crashes the host or runs longer than `--timeout` (default 600 s, like Xcode) is reported with its name and the crash's frames, and a fresh host runs only what didn't finish. A few failures (up to 30) run again alone, and a test that passes then is reported as flaky. A `--skip` that didn't match anything gets a note with the id formats.
 
@@ -280,6 +285,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `simless up` once per worktree. Never boot a simulator for screen checks.
 - After editing SwiftUI views: `simless reload --render <Fixture>` (≈2 s). Read the tree and fix every issue.
 - `simless render all --matrix` checks every screen in light/dark on iPhone, small iPhone and iPad.
+- To check what a tap or typing does: `simless act <Fixture> tap "#id" type "#field" "text"`, then read the tree.
 - New screen or state? Register it in SimlessFixtures.swift with deterministic data.
 - Use `--png <dir>` only when visual detail matters.
 - Logic: `simless test <Target>/<Class>` (local package test targets work too, and `simless test all` runs every one).

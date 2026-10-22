@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **`simless act`: interact with a screen, then read it.** `simless act Settings tap "Push notifications"` renders the fixture, taps the switch and prints the tree with its new value, in 0.15 s on the demo app. On a production app, typing an email into the sign-in field and tapping Continue takes 0.4 s, and the tree shows the field's text and what the screen did next. Steps chain in one call: `tap "<label or #id>"`, `type "<#id>" "<text>"`, `swipe up|down|left|right [on "<label>"]`, `longpress "<label>"` and `wait <ms>`, with `--device`, `--dark`, `--png` and `--json` like `render`. It's the automation `simless test ui` runs on, so text fields take focus and typing (SwiftUI bindings update), which a simulator screenshot tool can't do. Each step says whether it worked, and one that finds nothing lists what's on screen. Needs kit 5: run `simless init` once.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.
