@@ -25,7 +25,14 @@ enum Patch {
         let settings = try ws.settings()
         let t0 = now()
         let scope = try scope(ws: ws, slot: slot, files: files, fixtures: fixtures)
-        let dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: scope.texts)
+        let dylib: String
+        if scope.previews.isEmpty {
+            dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: scope.texts)
+        } else {
+            // Previews the reload renders compile into it, from their files.
+            let p = Previews.patchCode(ws: ws, names: scope.previews, kept: scope.kept, texts: scope.texts)
+            dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: p.texts, prelude: p.prelude, entry: p.entry)
+        }
         Cleanup.prunePatches(ws: ws)
         let tCompile = now() - t0
 
@@ -64,11 +71,23 @@ enum Patch {
 
     // MARK: - Compile
 
+    /// Fixtures from `#Preview` blocks live in their own dylib (Previews.swift),
+    /// which `simless up` loads. A patch's registry replaces the host's, so its
+    /// entry registers them again when that dylib is loaded.
+    static let registerPreviews = """
+            if let previews = NSClassFromString("SimlessPreviewRegistrations") as? NSObject.Type {
+                _ = previews.perform(NSSelectorFromString("registerInto:"), with: NSNumber(value: address))
+            }
+    """
+
+    /// `prelude` is top-level code for the entry file, `entry` runs after
+    /// `simlessFixtures` with `r` (the registry) and `address` in scope.
     static func compile(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings, files: [String],
-                        texts: [String: String] = [:]) throws -> String {
-        let dir = "\(ws.work)/patches"
+                        texts: [String: String] = [:], name: String = "SimlessPatch", dir: String? = nil,
+                        prelude: String = "", entry entryCode: String = registerPreviews) throws -> String {
+        let dir = dir ?? "\(ws.work)/patches"
         try mkdirp(dir)
-        let module = "SimlessPatch\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
+        let module = "\(name)\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
         let fixtures = "\(ws.root)/\(ws.config.fixturesFile)"
 
         // Which module each file comes from: the app target, or a local package
@@ -110,8 +129,9 @@ enum Patch {
         }
         let entry = "\(dir)/\(module)_entry.swift"
         try """
+            import Foundation
             @testable import \(settings.moduleName)
-
+            \(prelude)
             // The address crosses into the main actor as an Int (Sendable), so this
             // compiles under Swift 6 whatever the module's default isolation.
             @_cdecl("simless_patch_entry")
@@ -119,7 +139,9 @@ enum Patch {
                 let address = Int(bitPattern: registry)
                 MainActor.assumeIsolated {
                     let pointer = UnsafeRawPointer(bitPattern: address)!
-                    simlessFixtures(Unmanaged<SimlessRegistry>.fromOpaque(pointer).takeUnretainedValue())
+                    let r = Unmanaged<SimlessRegistry>.fromOpaque(pointer).takeUnretainedValue()
+                    simlessFixtures(r)
+            \(entryCode)
                 }
             }
             """.write(toFile: entry, atomically: true, encoding: .utf8)
@@ -152,7 +174,9 @@ enum Patch {
             throw SimlessError("patch compile failed:\n" + compilerErrors(r.out, originals: originals, lineOffset: modulesInvolved.count))
         }
         let ts = now()
-        if Native.isNative(slot) {
+        // By the workspace's mode, not the slot's: previews compile while the
+        // slot is being prepared again, when its native marker isn't there yet.
+        if ws.native {
             try Native.adopt([out])
         } else {
             let (identity, _) = try Signing.identity(team: settings.team)

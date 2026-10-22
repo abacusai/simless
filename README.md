@@ -158,6 +158,8 @@ SimlessHost.startIfRequested()
 #endif
 ```
 
+Some fixtures come for free. `root` is the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`, like `LoginView.Error` or `NoteRow.2`. `simless up` compiles them against the build, and `simless render all` lists them after yours. A preview that can't be built outside Xcode is left out, and `up` says which and why.
+
 Register the screens agents should be able to render, each in a deterministic state:
 
 ```swift
@@ -331,6 +333,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 - `mode`: `"native"` (the default) runs the app unsigned. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
+- `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default.
 - `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.
 
 </details>

@@ -94,6 +94,12 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 
 `checks.ignore` in `.simless.json` drops issues containing a given string. A split view's column resize handle (an unlabeled, full-height adjustable element, partly off screen when the sidebar is hidden) is left out of the tree.
 
+## Fixtures nobody wrote
+
+`root` and one fixture per `#Preview` block (and `PreviewProvider`) are generated from source at `simless up` (`Previews.swift`), and compiled against the build like a hot-reload patch, while the slot gets ready. A `Preview` value can't give its view back (`ViewPreviewBody` isn't public), so simless doesn't read previews from the binary. Instead each file with previews gets a copy in which every preview is a function that registers its body, in place: the copy keeps its line numbers (compile errors point at the preview), the file's private sample data and helpers stay, and everything else is blanked and resolves to the app's own code. `@Previewable` state becomes a small view's state, as the macro does it, and a body that returns a view controller or a UIView is wrapped in a representable. `root` is the `@main` App rewritten as a view: its properties (`@StateObject`s, `@Environment`), its first `WindowGroup`'s content as the body, and the scene modifiers views have too (`.modelContainer`, `.environment`, `.environmentObject`). Its `init` doesn't run again, and a `@UIApplicationDelegateAdaptor` reads the app's delegate.
+
+A preview that doesn't compile is left out with the compiler's reason, and the rest compile again without it, a few rounds at most. The dylib is loaded after every host start, before the newest hot-reload patch. A patch replaces the host's fixture registry, so its entry registers the previews again. Those come from the build's code, so a hot reload treats previews like other fixtures: `reload --render <preview>` compiles that preview into the patch from its file, and previews the edit reaches but the patch doesn't render are reported as stale.
+
 ## Unit tests
 
 `simless test` doesn't use xcodebuild to run tests. It keeps a test host: a copy of the slot app launched with `SimlessRuntime.dylib` inserted (`DYLD_INSERT_LIBRARIES`) and Xcode's macOS test frameworks on `DYLD_FRAMEWORK_PATH`. The runtime listens on the slot's port and loads test bundles on request with `dlopen`:
