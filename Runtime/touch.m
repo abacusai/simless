@@ -194,6 +194,16 @@ static BOOL simless_touch_unguarded(UIWindow *window, CGPoint point, int phase) 
             fprintf(stderr, "simless-touch: began at %.0f,%.0f on %s, hit test found %s, %lu recognizers\n", point.x, point.y,
                     NSStringFromClass(current.view.class).UTF8String, found.UTF8String, (unsigned long)current.gestureRecognizers.count);
     }
+    if (p == UITouchPhaseEnded && touchDebug()) {
+        NSMutableArray *states = [NSMutableArray array];
+        for (UIGestureRecognizer *g in current.gestureRecognizers)
+            [states addObject:[NSString stringWithFormat:@"%@ on %@ state %ld", NSStringFromClass(g.class), NSStringFromClass(g.view.class), (long)g.state]];
+        NSMutableArray *scrolls = [NSMutableArray array];
+        for (UIView *v = current.view; v != nil; v = v.superview)
+            if ([v isKindOfClass:UIScrollView.class]) [scrolls addObject:[NSString stringWithFormat:@"%@ %lu recognizers", NSStringFromClass(v.class), (unsigned long)v.gestureRecognizers.count]];
+        fprintf(stderr, "simless-touch: ending with %s; scroll views above: %s\n",
+                [states componentsJoinedByString:@", "].UTF8String, [scrolls componentsJoinedByString:@", "].UTF8String);
+    }
     [app sendEvent:event];
     CFRelease(hid);
     if (p == UITouchPhaseEnded || p == UITouchPhaseCancelled) current = nil;
