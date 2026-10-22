@@ -25,7 +25,9 @@ enum JSONReport {
             let mode = after.builtAt != before.builtAt ? "build"
                 : after.patch > before.patch ? "patch"
                 : after.patch == 0 && before.patch > 0 ? "restart" : "none"
-            return ["mode": mode, "edited": files]
+            var out: [String: Any] = ["mode": mode, "edited": files]
+            if mode == "patch" { out["stale"] = after.stale ?? [] }
+            return out
         }
     }
 
