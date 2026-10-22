@@ -23,6 +23,8 @@ An iOS device binary and a Mac Catalyst binary are the same arm64 code against t
 
 - builds the plain iOS device slice (`generic/platform=iOS`), which needs no Mac destination and so works in a VM too, and no project variant.
 - clones the app into the slot and rewrites the platform field of every iOS-tagged Mach-O in it (main executable, debug dylib, frameworks, test bundles) to Mac Catalyst, in place: a few bytes per binary (`MachO.swift`, with `vtool` for old binaries that only have `LC_VERSION_MIN_IPHONEOS`).
+- makes the clone writable (a binary xcframework from a SwiftPM checkout is read-only, and its build product keeps that), never the build itself.
+- adds `/System/iOSSupport/usr/lib/swift` as the last rpath of a binary that loads a Swift library through `@rpath` which only Mac Catalyst has (`libswiftCoreNFC` in a framework built for an old iOS). Every slot preparation applies it again, so `clean` and a cold `up` get it too.
 - signs what changed ad hoc (`codesign -s -`): no identity, no keychain, no profile.
 - starts the executable directly with `posix_spawn`, in a session of its own, with the runtime in `DYLD_INSERT_LIBRARIES`. No xcodebuild install, no LaunchServices, no window server session needed.
 
@@ -77,6 +79,8 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 - **Serves newline-delimited JSON on `127.0.0.1:<port>`**: `stats`, `render`, `load`, `stop`.
 - **Exits after 30 idle minutes.**
 
+SimlessRuntime, which every host loads before the app's own code, also takes the network away from render hosts (`Runtime/Network.swift`): a `URLProtocol` registered globally and put first in every new default and ephemeral `URLSessionConfiguration` (sessions with their own configuration only use the protocols it lists) fails each http(s) and ws(s) request with `notConnectedToInternet`, except loopback and what `.simless.json` allows or stubs. Each blocked request is a line in the host's log, which `simless render` sums up per host, so it works in the dfi mode's sandbox too. Test hosts keep the network unless `network.tests` is set.
+
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode.
 - phone canvases get compact width and, on the Mac, the device's safe-area insets. iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` crashes under it. When a render takes the host down, the CLI reads the macOS crash report for the slot (`~/Library/Logs/DiagnosticReports`), reports the exception and first frames in the app or SwiftUI, relaunches the host and carries on. Under `.phone` it first retries the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all.
@@ -84,6 +88,8 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 - `--locale` relaunches the host with `-AppleLanguages` and `-AppleLocale`, since the language is process-wide (string lookup, formatters, layout direction).
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display.
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
+
+`simless act` mounts a fixture the same way, then sends the kit `ui.*` requests (snapshot, tap, type, swipe, idle). The kit hands each to SimlessRuntime (`simless_runtime_ui`), whose UI test automation then works on the render window only, plus menus and alerts above it. The render window has no scene, but a text field in it still becomes first responder and takes typed text. A final `tree` request reads the canvas as it is, without mounting it again.
 
 Renders take ~20–60 ms. The CLI turns the tree into compact text and runs deterministic checks:
 - controls without labels,
@@ -93,6 +99,12 @@ Renders take ~20–60 ms. The CLI turns the tree into compact text and runs dete
 - overlapping controls.
 
 `checks.ignore` in `.simless.json` drops issues containing a given string. A split view's column resize handle (an unlabeled, full-height adjustable element, partly off screen when the sidebar is hidden) is left out of the tree.
+
+## Fixtures nobody wrote
+
+`root` and one fixture per `#Preview` block (and `PreviewProvider`) are generated from source at `simless up` (`Previews.swift`), and compiled against the build like a hot-reload patch, while the slot gets ready. A `Preview` value can't give its view back (`ViewPreviewBody` isn't public), so simless doesn't read previews from the binary. Instead each file with previews gets a copy in which every preview is a function that registers its body, in place: the copy keeps its line numbers (compile errors point at the preview), the file's private sample data and helpers stay, and everything else is blanked and resolves to the app's own code. `@Previewable` state becomes a small view's state, as the macro does it, and a body that returns a view controller or a UIView is wrapped in a representable. `root` is the `@main` App rewritten as a view: its properties (`@StateObject`s, `@Environment`), its first `WindowGroup`'s content as the body, and the scene modifiers views have too (`.modelContainer`, `.environment`, `.environmentObject`). Its `init` doesn't run again, and a `@UIApplicationDelegateAdaptor` reads the app's delegate.
+
+A preview that doesn't compile is left out with the compiler's reason, and the rest compile again without it, a few rounds at most. The dylib is loaded after every host start, before the newest hot-reload patch. A patch replaces the host's fixture registry, so its entry registers the previews again. Those come from the build's code, so a hot reload treats previews like other fixtures: `reload --render <preview>` compiles that preview into the patch from its file, and previews the edit reaches but the patch doesn't render are reported as stale.
 
 ## Unit tests
 
@@ -152,7 +164,15 @@ Tests are spread over several hosts (`--jobs`) by their last durations. Each hos
 - **Getting the patch into the host:**
   - **Live (default when available):** SimlessAgent copies the patch into the host's sandbox `tmp` directory, and the host loads it from there.
   - **Warm (no permissions):** the patch is bundled into the slot app, which is re-signed, reinstalled and relaunched, and the host loads it at startup. Takes ~10 s.
-- **Scope:** a patch's copy of a type only takes effect where the patch itself constructs it, so an unedited parent would still embed the old subview. Before compiling, simless builds a type-reference graph of the app's sources and every local package module, and also patches every file on a path from the fixtures file to an edited file. The graph uses top-level type declarations and identifiers in code (not comments or strings). Across modules it only follows `public`/`open` types along declared package dependencies. Edits that other code can observe without naming an edited type can't be traced this way: extensions of other types, and non-private top-level functions or variables. They, and patches reaching more than 40 files, fall back to a full build. The analysis over-approximates on purpose: an extra file costs compile time, a missing one costs a wrong render.
+- **Scope:** a patch's copy of a type only takes effect where the patch itself constructs it, so an unedited parent would still embed the old subview. Before compiling, simless builds a graph of the app's sources and every local package module, by top-level declaration (a type and its extensions are one node), with edges from identifiers in code (not comments or strings). Across modules it only follows `public`/`open` types along declared package dependencies. The rules:
+  - **What changed:** each edited file is compared declaration by declaration with its copy from the last full build (`simless up` keeps APFS clones of the sources it built), so an edit to one view's `body` changes that view only, not every type in its file.
+  - **Views reach views:** from an edited view, only views that name it are affected, because they construct or embed it. A store, model or enum that names a view doesn't make a render stale: renders go from view to view. A "view" is anything that conforms to `View`, `ViewModifier`, a style or representable protocol (or an app protocol that refines one), a UIKit view or view controller class, or any declaration whose code builds views (`some View`, `AnyView`, `@ViewBuilder`).
+  - **Logic reaches everything:** from an edited non-view type (a model, a view model), everything that names it is affected, views and non-views alike.
+  - **Per fixture:** each fixture only needs the affected views on its own way to the edit. `reload --render X` patches what X needs (plus what the previous patch covered, when it fits). Other fixtures that reach the edit are listed as stale until the next full build, and `simless render` says so on each of them. They never trigger a rebuild.
+  - **Only what's patched is compiled:** in each file the patch includes, declarations that aren't patched are blanked (lines and `#if`s kept, so errors still point at the right line) and resolve to the app's own copy. A second copy of an unchanged `extension View { func card() }` would be ambiguous next to the app's.
+  - **Can't be traced:** edits that other code can observe without naming an edited type, which are extensions of types outside the sources and non-private top-level functions or variables, fall back to a full build. So do patches reaching more than 40 files.
+  - The analysis over-approximates where it's unsure: an extra file costs compile time, a missing one costs a wrong render. `simless reload --dry-run` prints what a reload would patch and which fixtures would be stale.
+- **Compiling it:** one frontend job per file (`-j`), so each loads the app's modules side by side, plus the header search paths of package C targets and static xcframeworks that the app build passes (`Products/include`, each generated module map's umbrella folder).
 - **Package modules:** `simless init` records the local Swift packages the project references. Each source file is mapped to its module, and each module's language mode, default isolation and upcoming features are read from `swift package dump-package`. The patch `@testable import`s every module involved and compiles with their settings. A patch mixing modules with different settings can't be one module, so it falls back to a full build.
 - **Fallback:** if a patch can't compile (stored properties, signatures, or a real error) or can't be scoped, reload falls back to a full build. Errors are mapped back to the user's `file:line`.
 - **Which files count as edited:** content hashes against a snapshot taken when the build started. Git checkouts that only touch mtimes don't count.
@@ -192,11 +212,11 @@ Hosts and the agent are already long-lived processes, so the CLI coordinates wit
 
 See [How far to trust results](../README.md#how-far-to-trust-results) for what a pass and a failure mean, the known ways a pass can be wrong (hot reload with nested views, device traits, safe areas, Dynamic Type), and how unit tests can differ. In brief:
 
-- **Hot reload replaces only the edited types.** Unedited views that embed an edited type still run the previously built code until the next full build.
+- **Hot reload replaces only the edited types.** It also patches the views on the way from the rendered fixtures to the edit. Other fixtures that reach the edit run the previously built code until the next full build, and are reported as stale.
 - **Traits aren't an iPhone's.** It's an iOS app on a Mac: the idiom is `.pad` unless `--idiom phone` is passed. simless sets phone size classes and safe areas itself, and its runtime makes text scale with Dynamic Type.
 - **No capabilities.** Slots run without app capabilities. App-group containers are private folders.
 - **Not covered:** system UI that UI tests don't emulate (HealthKit and StoreKit sheets, photo and file pickers, the Home Screen), features that need a permission (it's denied), the watch app, and pixel-exact rendering.
 - **The Mac's Swift runtime:** tests run against the Mac's system libraries, not the simulator's. Plain CPU work runs at the simulator's speed, but unoptimized generic code can be slower.
 - **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
-- **Side effects:** the host runs the app's real startup, so guard side effects with `SimlessHost.isActive`.
+- **Side effects:** the host runs the app's real startup. Render hosts get no network through URL Loading, but WKWebView, raw sockets and other side effects need a `SimlessHost.isActive` guard.
 - **Private APIs:** the hosts use private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`, CoreText's text-style tables, UIKit's touch and gesture-container internals) that an OS update could change.

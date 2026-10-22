@@ -47,7 +47,7 @@ enum UITestEngine {
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
         let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
         return (names.union(unbuilt)).sorted().compactMap { name in
-            let dirs = synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
+            let dirs = PBX.synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
                 + (ws.config.tests?.uiSources?[name].map { ["\(ws.root)/\($0)"] } ?? [])
             let folders = dirs.isEmpty ? ["\(ws.projectDir)/\(name)"].filter { exists($0) } : dirs
             let sources = folders.flatMap { dir -> [String] in
@@ -68,20 +68,6 @@ enum UITestEngine {
             out.insert(String(name.1))
         }
         return out
-    }
-
-    /// Paths of the PBXFileSystemSynchronizedRootGroups a target lists.
-    static func synchronizedFolders(target: String, pbx: String) -> [String] {
-        guard let start = pbx.range(of: "/* \(target) */ = {\n\t\t\tisa = PBXNativeTarget;"),
-              let end = pbx.range(of: "\n\t\t};", range: start.upperBound..<pbx.endIndex),
-              let groups = pbx[start.upperBound..<end.lowerBound].range(of: #"fileSystemSynchronizedGroups = \(([^)]*)\)"#, options: .regularExpression)
-        else { return [] }
-        let ids = pbx[groups].matches(of: #/([0-9A-F]{24})/#).map { String($0.1) }
-        return ids.compactMap { id in
-            guard let g = pbx.range(of: "\t\t\(id) /* "), let gEnd = pbx.range(of: "};", range: g.upperBound..<pbx.endIndex) else { return nil }
-            let body = pbx[g.upperBound..<gEnd.lowerBound]
-            return body.firstMatch(of: #/path = "?([^";]+)"?;/#).map { String($0.1) }
-        }
     }
 
     /// Test methods per class, from the sources (XCTestCase subclasses).

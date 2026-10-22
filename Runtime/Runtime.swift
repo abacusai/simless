@@ -52,6 +52,8 @@ public func simlessRuntimeStart() {
     // A test run starts with an empty tmp, so what tests leave there doesn't pile up.
     if env["SIMLESS_CLEAN_TMP"] == "1", Housekeeping.isAppData(NSTemporaryDirectory()) { Housekeeping.empty(NSTemporaryDirectory()) }
     raiseOpenFileLimit()
+    // Render hosts (and test hosts when the project asks): no network, before the app's startup makes calls.
+    if let network = env["SIMLESS_NETWORK"] { NetworkGuard.install(network) }
     // No macOS permission or review dialogs from a host (SIMLESS_PERMISSIONS=ask lets them through).
     if env["SIMLESS_PERMISSIONS"] != "ask" { Permissions.install() }
     consumeSandboxTokens(env["SIMLESS_SANDBOX_TOKENS"])
@@ -81,6 +83,23 @@ public func simlessRuntimeStart() {
 }
 
 private var appNapOff: NSObjectProtocol?
+
+/// `simless act` in a render host: SimlessKit hands over each `ui.*` request
+/// (one JSON line) with the window the fixture is in, and gets the answer,
+/// as a JSON line, on the main thread.
+@_cdecl("simless_runtime_ui")
+public func simlessRuntimeUI(_ json: UnsafePointer<CChar>, _ window: UnsafeMutableRawPointer?, _ context: UnsafeMutableRawPointer?,
+                             _ reply: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void) {
+    func send(_ object: [String: Any]) {
+        let data = (try? JSONSerialization.data(withJSONObject: Connection.finite(object))) ?? Data(#"{"ok":false}"#.utf8)
+        String(decoding: data, as: UTF8.self).withCString { reply($0, context) }
+    }
+    guard let data = String(cString: json).data(using: .utf8),
+          let req = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let cmd = req["cmd"] as? String,
+          UIAutomation.handles(cmd) else { return send(["ok": false, "error": "not a UI command"]) }
+    UIAutomation.renderWindow = window.map { Unmanaged<UIWindow>.fromOpaque($0).takeUnretainedValue() }
+    UIAutomation.handle(cmd, req) { send($0) }
+}
 
 /// An app started with `open` may keep 256 files open, and a test run with
 /// hundreds of tests in parallel (each with its own store) needs more.

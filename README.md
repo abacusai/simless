@@ -23,8 +23,8 @@ simless runs your real iOS app natively on a Mac, as an invisible host. An agent
 $ simless render Settings --png out/
 Settings · light · iphone 402×874 · 131 ms
   traits: compact/regular size class, idiom pad, safe area top 62 bottom 34
-  button  "Push notifications" = "1"  @16,208.5 370×58
-  button  "Weekly summary" = "0"  @16,266.5 370×58
+  switch  "Push notifications" = "1"  @16,208.5 370×58
+  switch  "Weekly summary" = "0"  @16,266.5 370×58
   button  "Theme, System"  @32,397.5 338×34.5
   button  "Text size: 3, Decrement" = "3" #Decrement  @276,462 47×32
   button  "Text size: 3, Increment" = "3" #Increment  @323,462 47×32
@@ -34,10 +34,8 @@ Settings · light · iphone 402×874 · 131 ms
   text    "Version 1.0 (demo)"  @16,596 370×30
   header  "Settings"  @16,119 133×40.5
   png: out/Settings-iphone.png
-  issues (3):
+  issues (1):
     ⚠ button "Theme, System" tap target 338×34 is smaller than 44×44
-    ⚠ button "Text size: 3, Decrement" tap target 47×32 is smaller than 44×44
-    ⚠ button "Text size: 3, Increment" tap target 47×32 is smaller than 44×44
 ```
 
 </td>
@@ -158,6 +156,8 @@ SimlessHost.startIfRequested()
 #endif
 ```
 
+Some fixtures come for free. `root` is the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`, like `LoginView.Error` or `NoteRow.2`. `simless up` compiles them against the build, and `simless render all` lists them after yours. A preview that can't be built outside Xcode is left out, and `up` says which and why.
+
 Register the screens agents should be able to render, each in a deterministic state:
 
 ```swift
@@ -169,7 +169,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
 }
 ```
 
-Then run `simless up`. If your project doesn't use synchronized folders, add the two files to the app target first. If app startup has side effects a background host shouldn't trigger (analytics, sync), guard them with `SimlessHost.isActive`.
+Then run `simless up`. `simless init` puts the kit in a folder Xcode syncs for the app target (Xcode 16's synchronized folders, also when they sit inside classic groups). When the target has none, it says so, and you add the two files to the app target first. Render hosts get no network: every request the app makes through `URLSession` fails as if the Mac were offline, and the render lists what was blocked (see `network` under [Options](#options-in-simlessjson) to allow or stub hosts). If app startup has other side effects a background host shouldn't trigger (an SDK starting up, writing to a shared service), guard them with `SimlessHost.isActive`.
 
 Live reload works out of the box: simless puts each patch in the host's own temp folder and the host loads it, in about 0.2 s after the compile. (The `dfi` mode runs the app in the Mac's app sandbox, where simless can't place files. There, `simless agent install` and Full Disk Access for SimlessAgent take hot reload from about 10 s to about 2 s. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).)
 
@@ -177,13 +177,17 @@ Live reload works out of the box: simless puts each patch in the host's own temp
 
 ```
 simless init [--no-hook]          set up a repo
-simless up [--no-tests]           build, prepare this worktree's host, start it, and prepare local packages'
+      [--template <dir>]          an xcodegen app template instead: kit and config only, no project edits
+simless up [--no-tests] [--json]  build, prepare this worktree's host, start it, and prepare local packages'
                                   tests and the test hosts, so the first `simless test` only runs tests
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
+simless act <fixture> <step>...   render a fixture, interact with it, then print the tree and issues
+      steps: tap "<label|#id>"  type "<#id|label>" "<text>"  swipe up|down|left|right [on "<label|#id>"]
+             longpress "<label|#id>"  wait <ms>        [--device …] [--dark] [--png <file|dir>] [--json]
 simless reload [files...]         hot-reload everything edited since `simless up`
-      [--render <fixture|all>] [--matrix] [--no-fallback]
+      [--render <fixture|all>] [--matrix] [--no-fallback] [--dry-run]
 simless test [Target/Class/method...|all]   unit tests on the Mac, local package tests included
       [--skip Target/Class/method]... [--timeout <seconds per test>] [--hosts <n>] [--jobs <tests at once>] [--agent]
       [--from <file|->]               test ids from a file or stdin, unit and UI ids mixed
@@ -192,7 +196,8 @@ simless test ui [Target/Class/method...]   your XCUITest UI tests, without a sim
 simless test --simulator-only     the tests marked as needing a simulator, and the xcodebuild command for them
 simless calibrate [fixture]       compare renders with an iOS Simulator (boots one, run once per app)
       [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone]
-simless status                    hosts, test runs going on and their share of the Mac, disk use
+simless status [--json]           hosts, test runs going on and their share of the Mac, disk use
+simless doctor [--json]           whether this Mac can run simless (macOS, Xcode, iOS SDK, disk), exit 1 if not
 simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every worktree's,
                                   said before it stops them, except where a test run is going on)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
@@ -210,6 +215,8 @@ simless version                   version, Xcode and macOS
 
 `--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone. `--settle <ms>` gives a screen time for its async work (`.task`, loads) before the tree is read.
 
+`simless act Settings tap "Push notifications"` renders the fixture, works it like a finger and a keyboard would, and prints the tree afterwards (`"Push notifications" = "0"`). It uses the same automation as `simless test ui`: a tap is an accessibility activation where the element has an action and a real touch elsewhere, and `type` focuses the field first, so SwiftUI text fields take typing and their bindings update. Steps chain in one call and each one is reported as done or not, with what's on screen when an element isn't found. It needs kit 5 (`simless init`).
+
 `simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. `simless test all` runs the app's test targets and every local package's, in warm hosts with tests in parallel. A big run is spread over several hosts (`--hosts`), because main-actor tests run one at a time per process. Targets are spread by how long each took in the last run, and a target that takes half again as long as any other gets a host to itself. A target with many classes is split over hosts by class too (up to 6 hosts, half the cores), so an app with one big test target uses the Mac: the first of its hosts runs whatever the others don't, so a class the split didn't see still runs. Those times are kept per repository, so a new worktree or a run after `simless clean` spreads well too. A test that crashes the host or runs longer than `--timeout` (default 600 s, like Xcode, and 120 s with `--agent` or `SIMLESS_AGENT=1`, so an agent doesn't wait out a hung test) is reported with its name and the crash's frames, and a fresh host runs only what didn't finish. A few failures (up to 30) run again alone, and a test that passes then is reported as flaky. A `--skip` that didn't match anything gets a note with the id formats.
 
 `--from <file>` (or `--from -` for stdin) takes test ids one per line, in the format the results files use, so a merge script can pass the tests a change touches. Unit and UI ids can be mixed: both kinds run, with one exit code.
@@ -217,6 +224,29 @@ simless version                   version, Xcode and macOS
 `simless test ui` runs the UI test targets' XCUITest code as it is: `XCUIApplication` with launch arguments and environment, queries, `tap`, `typeText`, swipes, coordinates, alerts, `performAccessibilityAudit` and screenshots. It spreads the tests over several hidden hosts (`--jobs`, default up to 4), and saves a screenshot and the element tree for every failure. `--device iphone,ipad` runs every UI test on both, and `tests.uiDevices` adds a device that runs only the tests listed for it (an iPad-only class, say). See [UI tests](#ui-tests) for what it emulates and what still needs a simulator.
 
 </details>
+
+## On a build machine
+
+A machine that builds many projects as one user, from xcodegen templates, with an agent checking each change. Set `SIMLESS_ISOLATE=1` for the whole machine, so each project's hosts write only into their own slot and can't reach other projects' hosts.
+
+```sh
+simless doctor --json                   # gate the machine: macOS, Xcode, iOS SDK, free disk ("ok": true)
+simless init --template <template-dir>  # once per app template: writes .simless.json and the kit, edits no project file,
+                                        # prints the App hook and any project.yml change
+# every build, in the project's workspace
+xcodegen generate
+simless up --json                       # the compile step: the app build, its diagnostics, and a host ready to render
+simless render all
+# every edit the agent makes
+simless reload --json --render <fixture>
+simless status --json                   # for a daemon: hosts, memory, test runs, disk per project
+```
+
+`simless up --json` and `simless reload --json` write their usual output to stderr and one JSON object to stdout: `ok`, `mode` (`build`, `patch`, `restart` or `none`), `seconds`, the edited files, the fixtures a patch left stale, the host, and `diagnostics`, each with `file` (relative to the worktree), `line`, `column`, `severity` and `message`. A failed build lists every error and warning in its log. A patch only compiles the files it patches, so `reload` can pass when another file no longer compiles against an edit: `up --json` is the check that the whole app builds.
+
+`simless up` is the build, not a second one next to it. It builds the iOS device slice, which is what simless runs, so the simulator build a pipeline usually makes isn't needed for checks. On a small xcodegen app (iOS 18, SwiftData, 5 views) the simulator build took 7.7 s cold, while `simless up` built the app in 3.3 s and had a host up a few seconds later, and after a one-line edit `up --json` took 5.4 s and `reload --json` 0.5 to 3.4 s. Building into the pipeline's own DerivedData instead saves almost nothing (6.4 s fresh against 5.7 s next to a simulator build, since the two SDKs compile everything separately), and a simulator build can't be run as a host (see [findings](docs/findings.md#the-native-mode-the-details)).
+
+Edits are told by content: a sync that deletes the sources and untars them again (modification times kept) changes nothing unless a file's content did.
 
 ## In CI
 
@@ -280,6 +310,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `simless up` once per worktree. Never boot a simulator for screen checks.
 - After editing SwiftUI views: `simless reload --render <Fixture>` (≈2 s). Read the tree and fix every issue.
 - `simless render all --matrix` checks every screen in light/dark on iPhone, small iPhone and iPad.
+- To check what a tap or typing does: `simless act <Fixture> tap "#id" type "#field" "text"`, then read the tree.
 - New screen or state? Register it in SimlessFixtures.swift with deterministic data.
 - Use `--png <dir>` only when visual detail matters.
 - Logic: `simless test <Target>/<Class> --agent` (local package test targets work too, and `simless test all` runs every one).
@@ -311,7 +342,8 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
   "embeddedBundles": true,
   "mode": "native",
   "settle": 0,
-  "isolate": false
+  "isolate": false,
+  "network": { "allow": ["cdn.example.com"], "stub": { "https://api.example.com/config*": "Fixtures/config.json" } }
 }
 ```
 
@@ -328,10 +360,13 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `tests.uiSources`: a UI test target's source folder, when it isn't a synchronized folder simless can find.
 - `tests.uiDevices`: more devices for `simless test ui`, each with the tests that run on it (`[]` for all of them). The device in `device` runs every UI test.
 - `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against and the simulator-only command runs on (default: the newest runtime, iPhone 17 Pro).
-- `idiom`: `"phone"` renders phone canvases with the phone idiom (see [Known differences](#known-differences-from-an-iphone)).
+- `idiom`: `"phone"` or `"pad"` for phone canvases. The default is the phone idiom for an iPhone-only app and the iPad idiom otherwise (see [Known differences](#known-differences-from-an-iphone)).
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 - `mode`: `"native"` (the default) runs the app unsigned. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
+- `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default.
+- `hostIdleMinutes`, `standbyIdleMinutes` and `diskLimitGB`: see [Many agents, one Mac](#many-agents-one-mac). The environment variables win, for a machine's own policy.
+- `network`: render hosts get no network by default. A request through `URLSession` (any configuration) or `NSURLConnection` fails with `URLError.notConnectedToInternet`, except to loopback, and each render after new ones says `network: blocked 6 requests: api.example.com (/v1/user, /v1/events); …` (once per request, per host). `allow` lists hosts or URLs that may go through, as globs (`"api.example.com"`, `"*.example.com"`, `"https://example.com/v1/*"`). `stub` serves a file (relative to the repository) for matching URLs, with status 200. `"block": false`, or `SIMLESS_NETWORK=allow` for one command, turns it off. Unit and UI test hosts keep the network, since tests can depend on it; `"tests": true` blocks it there too. WKWebView content and code that opens its own sockets (Network.framework, gRPC) aren't covered.
 - `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.
 
 </details>
@@ -347,14 +382,14 @@ simless also cleans up after itself, so nothing piles up between runs or after a
 
 <br>
 
-- **Deleted worktrees:** every command removes the hosts, slots and build cache of any worktree that has been gone for 10 minutes. The wait is for build machines that replace a project's files on every sync: a worktree that disappears for a moment keeps its builds.
-- **Unused worktrees:** a worktree that hasn't used simless for two weeks loses its hosts, slots and builds too (its `.simless.json` stays, and `simless up` builds again).
+- **Deleted worktrees:** every command removes the hosts, slots and build cache of any worktree that has been gone for 10 minutes (`SIMLESS_GONE_MINUTES`). The wait is for build machines that replace a project's files on every sync: a worktree that disappears for a moment keeps its builds.
+- **Unused worktrees:** a worktree that hasn't used simless for two weeks (`SIMLESS_UNUSED_DAYS`) loses its hosts, slots and builds too (its `.simless.json` stays, and `simless up` builds again).
 - **App data:** every test run starts with a fresh install's data, like a simulator's clones. The app's home folder in the slot (documents, caches, tmp, its keychain) is emptied and its preferences are cleared before a UI run and before each unit test host starts. Removing a slot empties it too. (In the dfi mode the data sits in a sandbox container that only the app may touch, so simless launches the app once to delete its own files.)
-- **Hosts:** a host exits after 30 idle minutes (`hostIdleMinutes`), a standby test host after 10. `simless down` stops this worktree's hosts, test and UI hosts included.
+- **Hosts:** a host exits after 30 idle minutes (`hostIdleMinutes`, or `SIMLESS_HOST_IDLE_MINUTES`), a standby test host after 10 (`standbyIdleMinutes`, or `SIMLESS_STANDBY_IDLE_MINUTES`). `simless down` stops this worktree's hosts, test and UI hosts included.
 - **Crash reports** that macOS writes for simless hosts are deleted after a day.
 - **Patches:** only the newest 3 are kept, and patch files are deleted as soon as they're loaded.
 - **Compile cache:** the shared Xcode compilation cache is cleared above 8 GB, and when a build finds it damaged (after a full disk, say), simless clears it and builds again.
-- **Total disk:** everything simless keeps across worktrees stays under 25 GB (`SIMLESS_DISK_LIMIT_GB` changes it). When `simless up` finds more, the builds and slots of the worktrees that used simless least recently go first, never one used in the last hour, then the shared compilation cache.
+- **Total disk:** everything simless keeps across worktrees stays under 25 GB (`SIMLESS_DISK_LIMIT_GB`, then a project's `diskLimitGB`, change it). When `simless up` finds more, the builds and slots of the worktrees that used simless least recently go first, never one used in the last hour, then the shared compilation cache.
 - **Your repository** gets nothing from simless outside the two kit files and `.simless.json`. Package manifests are read with SwiftPM's scratch folder in the cache, not a `.build` next to your package.
 - **Timing history** (how long each test target took, per repository) is kept in `~/Library/Application Support/Simless/history`, a few KB, so a run after a clean still spreads its targets well.
 - **Generated files** next to your project are git-excluded and removed by `simless clean`.
@@ -373,7 +408,7 @@ simless also cleans up after itself, so nothing piles up between runs or after a
 
 What simless does to stay accurate:
 
-- **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
+- **Hot reload patches more than the edited files.** It also patches every view between the fixture you render and the edit, including views in local Swift packages, so a parent view never renders a stale subview. With `--render X` it only patches X's way to the edit: other fixtures that reach the edited view are listed as stale until the next full build, and `simless render` notes it on them. A store or model that merely names a view doesn't count as rendering it. Edits it can't trace safely (an extension of a type outside your sources, an internal or public top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically. `simless reload --dry-run` shows what a reload would patch.
 - **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac unless you pass `--idiom phone`. Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 
@@ -384,11 +419,12 @@ What simless does to stay accurate:
 
 <br>
 
-- **The idiom is `.pad` by default** (UI test hosts excepted, which report an iPhone's). Code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and renders print a note about it. `--idiom phone` (or `"idiom": "phone"`) gives views the phone idiom. It's opt-in because SwiftUI's `Stepper` crashes on the Mac under it, and it has been seen crashing under the iPad idiom too. When the phone idiom crashes a screen, simless restarts the host, renders that screen with the iPad idiom and says so. On the demo app it fixed the navigation bar of a split view, but didn't close the other gaps below, so run `simless calibrate --idiom phone` to see whether it helps your screens. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
+- **The idiom.** An iPhone-only app (`TARGETED_DEVICE_FAMILY = 1`) renders phone canvases with the phone idiom, as on an iPhone. Others keep the Mac's iPad idiom unless you pass `--idiom phone` (or set `"idiom": "phone"` or `"pad"`). Under the iPad idiom, code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and controls get iPad metrics. Renders print the traits the view saw. SwiftUI's `Stepper` crashes on the Mac under the phone idiom (its default style resolves to itself until the stack overflows, see [findings](docs/findings.md#rendering-on-the-mac)), so a screen that shows one renders with the iPad idiom and says so. simless finds out from rendering the screen with the iPad idiom once per build. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
 - **Text renders 2 to 4% wider.** Usually lines break the same way, but long or centered text can need an extra line. Treat exact line breaks and truncation as unverified until calibration shows they match.
 - **Platform rows are taller.** `List` rows came out 2 pt taller and `Form` toggle rows 6 pt taller, so content below them sits lower.
-- **System colors follow the Mac.** Controls use the macOS accent color (an "on" toggle can be gray instead of green), which an accessibility tree can't show.
-- **Some controls are exposed differently to accessibility.** In calibration, a `Menu` with a custom label was unlabeled in simless but labeled on iOS, so simless reported an issue that isn't one on a phone. Confirm accessibility flags on `Menu` and other platform-backed controls with `simless calibrate`.
+- **Colors.** Renders use the app's accent color, or iOS blue when it has none, and iOS green for switches that are on, not the Mac's accent color. Other system colors can still differ from an iPhone's, which an accessibility tree can't show.
+- **A font the app doesn't ship.** A custom font that isn't registered (missing from `UIAppFonts`) falls back to Helvetica on both, but macOS's Helvetica has a tighter line (1.0 em against 1.175 em on iOS), so such text sits higher in a render. Registering the font closes the gap, and it's the same font on an iPhone too.
+- **Some controls are exposed differently to accessibility.** On the Mac, SwiftUI fills in a `Menu`'s custom label only after it's been read once, so simless reads the tree twice and a `Menu` row is labeled as on iOS ("Landing page, Chats"). Switches are `switch`, text fields are `field` (with their placeholder), and switches, text fields and a stepper's halves aren't flagged as small tap targets, since the system sizes them. A text field with neither a label nor a placeholder is flagged. Confirm other accessibility flags on platform-backed controls with `simless calibrate`.
 - **Text size:** `--text-size` and `-UIPreferredContentSizeCategoryName` scale text the way an iPhone does. An iOS app on the Mac normally resolves every text style to one size, so simless's runtime makes CoreText use iOS's sizes instead (body is 17 pt by default and 53 pt at AX5, as on an iPhone). Set `SIMLESS_DYNAMIC_TYPE=0` to turn that off.
 - **Pixels and images:** rendering is close to an iPhone's but not identical, and the Mac loads and draws images its own way. Use the simulator for final pixels and image checks.
 - **Crashes:** a screen that crashes the render host is reported with the crash's first frames in your code or SwiftUI, and `render all` carries on with the other screens. SwiftUI itself can crash on the Mac where an iPhone doesn't (`Stepper` is the known case), so confirm such a crash in a simulator.
@@ -458,7 +494,7 @@ Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pic
 ### Other limits
 
 - **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an iOS app target.
-- **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
+- **Side effects:** the host runs your app's real startup in the background. Its `URLSession` requests are blocked (see `network` in the options), but other side effects aren't: guard SDKs that start up or write somewhere with `SimlessHost.isActive`.
 - **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, touch injection, hiding the app, suppressing its windows, and in the dfi mode sandbox extensions for reading the repository). It also relies on macOS running an iOS device binary that's tagged Mac Catalyst. An OS update could break them, and they never ship in release builds.
 
 ## How it works

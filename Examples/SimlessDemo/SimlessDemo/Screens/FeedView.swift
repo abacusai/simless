@@ -19,6 +19,7 @@ struct FeedView: View {
             }
             .navigationTitle("Feed")
         }
+        .onAppear { AppModel.shared.didShow(Self.self) }
     }
 }
 

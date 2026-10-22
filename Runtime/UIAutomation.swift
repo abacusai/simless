@@ -21,17 +21,23 @@ enum UIAutomation {
         // first attempt's answer: a tap or a drag is never done twice.
         let rid = req["rid"] as? String
         if let rid, Replies.answer(rid, on: connection) { return }
+        handle(cmd, req) { connection.send($0) }
+    }
+
+    /// Runs a command and replies on the main thread.
+    static func handle(_ cmd: String, _ req: [String: Any], reply: @escaping ([String: Any]) -> Void) {
+        let rid = req["rid"] as? String
         // A run loop block, not the main queue: commands spin the run loop while
         // they wait (idle, touches, dismissals), and inside a main-queue block
         // the main queue couldn't drain, so the app's own async work would stall.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
             enableAutomation()
-            var reply: [String: Any] = [:]
-            if let thrown = catchingExceptions({ reply = perform(cmd, req) }) {
-                reply = ["ok": false, "error": "UIKit threw \(thrown) during \(cmd)"]
+            var answer: [String: Any] = [:]
+            if let thrown = catchingExceptions({ answer = perform(cmd, req) }) {
+                answer = ["ok": false, "error": "UIKit threw \(thrown) during \(cmd)"]
             }
-            if let rid { reply["rid"] = rid; Replies.store(rid, reply) }
-            connection.send(reply)
+            if let rid { answer["rid"] = rid; Replies.store(rid, answer) }
+            reply(answer)
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
@@ -223,8 +229,17 @@ enum UIAutomation {
         automationOn = true
     }
 
+    /// The render host's canvas, while `simless act` drives a fixture in it:
+    /// the only app window then, with what's shown above it (menus, alerts).
+    static var renderWindow: UIWindow?
+
     /// The app's windows, back to front.
     static var appWindows: [UIWindow] {
+        if let w = renderWindow { return [w] + sceneWindows.filter { $0.windowLevel > .normal } }
+        return sceneWindows
+    }
+
+    private static var sceneWindows: [UIWindow] {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows).filter { !$0.isHidden && $0.bounds.width > 0 && !Keyboard.isEmulatedKeyboard($0)
                 // UIKit's text effects window holds nothing a test sees on the Mac.

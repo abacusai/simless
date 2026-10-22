@@ -82,3 +82,12 @@ for f in ../../docs/fidelity/*.png; do sips -Z 874 "$f" >/dev/null; done   # hal
 ```
 
 `simless up` needs a signing team. The demo project doesn't set one, so simless uses the only Apple Development identity in your keychain. Set `SIMLESS_TEAM=<team id>` if you have several.
+
+## A production app (chatllm-ios)
+
+`simless calibrate --idiom phone` on its 6 registered fixtures, against an iPhone 17 Pro simulator on iOS 27: none within 2 pt before or after these changes, but the reasons are now known.
+
+- **Text lines are 15% shorter** where the app asks for a custom font it never registers (Inter): both platforms fall back to Helvetica, whose macOS file has a tighter line than iOS's. This moves everything below such text. Registering the font fixes it in the app, and it's the same font on a device.
+- **Chat bubbles are 25 to 31 pt wider.** They're `UITextView`s sized with `sizeThatFits`, and TextKit measures them wider on the Mac. The phone idiom doesn't change it.
+- **Bar buttons are 36 pt wide** against 22 pt on iOS, so toolbar items sit 7 pt further in.
+- **ChatList is within 3 pt**, and the Settings rows that hold one line match.
