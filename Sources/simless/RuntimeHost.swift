@@ -77,6 +77,19 @@ enum RuntimeHost {
     /// Launches the host with the runtime listening on the slot's port.
     /// Returns once the runtime answers.
     static func launch(_ slot: SlotRecord, env extra: [String: String], args: [String] = [], timeout: Double = 120) throws {
+        do {
+            try launchOnce(slot, env: extra, args: args, timeout: timeout)
+        } catch let e as Exited {
+            // Now and then a host quits while it starts, with no crash and
+            // nothing in its log: start it once more, as render hosts do.
+            Log.debug("\(e.message); starting it again")
+            do { try launchOnce(slot, env: extra, args: args, timeout: timeout) } catch let again as Exited { throw SimlessError(again.message) }
+        }
+    }
+
+    private struct Exited: Error { let message: String }
+
+    private static func launchOnce(_ slot: SlotRecord, env extra: [String: String], args: [String], timeout: Double) throws {
         terminateAll(slot)
         let app = try installedApp(slot)
         var env = baseEnvironment(slot)
@@ -99,7 +112,10 @@ enum RuntimeHost {
                 return
             }
             if now() > deadline - timeout + 5, !hasProcess(slot) {
-                throw SimlessError("\(slot.slotID) exited while starting\(CrashReport.hostTrap(slot).map { ": \($0)" } ?? ""); log: \(slot.dir)/host.log")
+                if let trap = CrashReport.hostTrap(slot) {
+                    throw SimlessError("\(slot.slotID) exited while starting: \(trap); log: \(slot.dir)/host.log")
+                }
+                throw Exited(message: "\(slot.slotID) exited while starting; log: \(slot.dir)/host.log")
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
