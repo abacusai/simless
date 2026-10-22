@@ -88,6 +88,24 @@ jobs:
           simless render all --png "$RUNNER_TEMP/renders/"
           simless test all
 
+      - name: Sample a hung tap (temporary)
+        continue-on-error: true
+        timeout-minutes: 6
+        working-directory: Examples/SimlessDemo
+        env:
+          SIMLESS_UI_TRACE: "1"
+        run: |
+          sw_vers
+          "$GITHUB_WORKSPACE/.build/release/simless" test ui SimlessDemoUITests/BehaviorUITests/testATabBarsTabsAreButtons --timeout 120 > "$RUNNER_TEMP/one.log" 2>&1 &
+          sleep 45
+          for pid in $(pgrep -f '/Native/'); do
+            echo "::group::sample $pid $(ps -o command= -p $pid | cut -c1-150)"
+            sample "$pid" 3 2>/dev/null | grep -v '^\s*$' | head -400
+            echo "::endgroup::"
+          done
+          wait || true
+          cat "$RUNNER_TEMP/one.log"
+
       - name: Demo app UI tests (native mode, unsigned)
         timeout-minutes: 10
         working-directory: Examples/SimlessDemo
