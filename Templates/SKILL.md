@@ -58,7 +58,7 @@ simless calibrate                            # once per app: compare every fixtu
 simless render <Fixture> --png /tmp/shots/   # only when you need to see pixels
 simless render <Fixture> --locale hr         # another language, without a fixture per locale
 simless render <Fixture> --text-size ax5     # at a Dynamic Type size (text scales like on an iPhone)
-simless test MyAppTests/SomeTests            # unit tests on the Mac, no simulator
+simless test MyAppTests/SomeTests --agent    # unit tests on the Mac, no simulator; --agent: 120 s per test, not 600
 simless test MyKitTests                      # a local package's test target works the same way
 simless test all --skip MyAppTests/DeviceOnlyTests   # every test target, minus what needs a device
 simless test ui                              # the XCUITest UI tests, no simulator

@@ -3,6 +3,17 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **A big test target uses the whole Mac.** A target with many classes is split over hosts by class (up to 6, half the cores), weighed by the last run's times, and the first of its hosts runs whatever the others don't, so nothing the split missed is left out. On a production app with one test target (1,464 tests), the run that was still going after 35 min on one host took 7 min 19 s on 5 hosts, against about 11 min on a simulator in CI.
+- **`--agent` (or `SIMLESS_AGENT=1`) stops a hung test after 120 s** instead of 600, for UI tests too. Two tests that hung about 10 min each in that run stopped at 2 min.
+- **Three gaps a simulator doesn't have, closed.** On that app, 15 tests failed before and 9 after:
+  - **Attachments work.** XCTest refused `add(XCTAttachment(...))` ("activities are disabled") because a host ran it without the configuration xcodebuild hands it. simless now makes one, with activities on.
+  - **A window keeps the size a test gives it.** A test that sized a scene window to 320×230 for a snapshot got the device canvas's 402 pt. Only sizes UIKit gives a window become the canvas's now.
+  - **Tests that need the app's scene find it.** The first tests of a host ran before the scene connected and found no `UIWindowScene`. A run now waits for it, up to 3 s.
+  - **Still failing:** 5 StoreKit tests, whose `SKTestSession` loads its `.storekit` file but whose products don't resolve in a host (they need a simulator), and 4 that measure text with TextKit, which on the Mac gave the proposed width where UIKit reports the text's (180 pt for "Hi", against 17).
+- The demo app has a test for attachments and one for a window's size.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.
