@@ -44,9 +44,12 @@ enum TestEngine {
     // MARK: - Command
 
     /// Test hosts for a run of `targetCount` targets.
-    static func defaultHosts(targetCount: Int, config: Config.Tests?, share: Double = 1) -> Int {
+    static func defaultHosts(targetCount: Int, config: Config.Tests?, share: Double = 1, classes: Int = 0) -> Int {
         let cores = Double(ProcessInfo.processInfo.processorCount) * share
-        return config?.hosts ?? (targetCount >= 4 ? max(1, min(4, Int(cores / 3))) : 1)
+        if let hosts = config?.hosts { return hosts }
+        if targetCount >= 4 { return max(1, min(4, Int(cores / 3))) }
+        // A target with many classes runs on several hosts, split by class.
+        return classes >= 8 ? max(1, min(6, Int(cores / 2))) : 1
     }
 
     /// After `simless up`: the package test bundles signed and the test hosts'
@@ -168,7 +171,7 @@ enum TestEngine {
         let config = ws.config.tests
 
         let timeoutArg = args.values["--timeout"]
-        let timeout = timeoutArg.flatMap(Double.init) ?? config?.timeout ?? 600
+        let timeout = timeoutArg.flatMap(Double.init) ?? config?.timeout ?? defaultTimeout(args)
         if (timeoutArg != nil && Double(timeoutArg!) == nil) || timeout <= 0 {
             throw SimlessError("--timeout takes seconds per test, e.g. --timeout 120")
         }
@@ -219,23 +222,30 @@ enum TestEngine {
         let share = Budget.share(ws)
         let cores = max(2, Int(Double(ProcessInfo.processInfo.processorCount) * share))
         if share < 1 { Log.step("sharing the Mac with \(Int((1 / share).rounded()) - 1) other test run(s): using \(cores) of \(ProcessInfo.processInfo.processorCount) cores") }
-        let wantedHosts = args.values["--hosts"].flatMap(Int.init) ?? defaultHosts(targetCount: targets.count, config: config, share: share)
+        // A big target can be most of a run: its classes are split over hosts too.
+        let splittable = shardableClasses(targets, ws: ws, whole: all || filters.allSatisfy { !$0.contains("/") })
+        let wantedHosts = args.values["--hosts"].flatMap(Int.init)
+            ?? defaultHosts(targetCount: targets.count, config: config, share: share, classes: splittable.values.map(\.count).max() ?? 0)
         let groups = partition(targets, into: max(1, min(wantedHosts, targets.count)), weights: lastTargetSeconds(ws))
+        let shards = shard(groups, hosts: wantedHosts, classes: splittable, weights: lastTargetSeconds(ws))
         var slots = [firstSlot]
-        for i in 1..<max(1, groups.count) { slots.append(try RuntimeHost.slot(kind: "test\(i + 1)", ws: ws)) }
+        for i in 1..<max(1, shards.count) { slots.append(try RuntimeHost.slot(kind: "test\(i + 1)", ws: ws)) }
         // The plan and why, every time: a run on fewer hosts than usual should say so.
         let why = args.values["--hosts"] != nil ? "--hosts" : config?.hosts != nil ? "tests.hosts"
-            : targets.count < 4 ? "fewer than 4 targets" : share < 1 ? "sharing the Mac" : "\(ProcessInfo.processInfo.processorCount) cores"
-        Log.step("running on \(groups.count) host(s) (\(why)): " + groups.map { $0.map(\.name).joined(separator: ", ") }.joined(separator: " | "))
+            : shards.count > groups.count ? "a target split by class" : targets.count < 4 ? "fewer than 4 targets"
+            : share < 1 ? "sharing the Mac" : "\(ProcessInfo.processInfo.processorCount) cores"
+        Log.step("running on \(shards.count) host(s) (\(why)): " + shards.map { s in
+            s.targets.map(\.name).joined(separator: ", ") + (s.classes.map { " (\($0.count) classes)" } ?? (s.skip.isEmpty ? "" : " (the rest)"))
+        }.joined(separator: " | "))
 
         // Swift Testing would start every test at once; capping how many run
         // together keeps load down and, when a test takes the host down, the
         // list of suspects short.
-        let width = args.values["--jobs"].flatMap(Int.init) ?? config?.jobs ?? max(4, cores / groups.count + 2)
+        let width = args.values["--jobs"].flatMap(Int.init) ?? config?.jobs ?? max(4, cores / shards.count + 2)
         // App test targets load from each host's own copy of the app.
-        let sessions = try groups.indices.map { i -> Session in
+        let sessions = try shards.indices.map { i -> Session in
             let ownApp = try RuntimeHost.appBundle(slots[i])
-            let own = groups[i].map { t in t.bundle.hasPrefix(app + "/") ? Target(name: t.name, module: t.module, bundle: ownApp + t.bundle.dropFirst(app.count)) : t }
+            let own = shards[i].targets.map { t in t.bundle.hasPrefix(app + "/") ? Target(name: t.name, module: t.module, bundle: ownApp + t.bundle.dropFirst(app.count)) : t }
             return Session(ws: ws, slot: slots[i], targets: own, timeout: timeout, width: width)
         }
         let combined = Session(ws: ws, slot: firstSlot, targets: targets, timeout: timeout, width: width)
@@ -246,10 +256,10 @@ enum TestEngine {
         DispatchQueue.concurrentPerform(iterations: sessions.count) { i in
             let session = sessions[i]
             let names = Set(session.targets.map(\.name))
-            let include: [String]? = all ? nil : filters.filter { names.contains(String($0.split(separator: "/").first ?? "")) }
+            let include: [String]? = shards[i].classes ?? (all ? nil : filters.filter { names.contains(String($0.split(separator: "/").first ?? "")) })
             do {
                 let started = now()
-                var result = try session.run(Selection(include: include, skip: skips))
+                var result = try session.run(Selection(include: include, skip: skips + shards[i].skip))
                 if sessions.count > 1 {
                     Log.step("host \(i + 1) (\(session.targets.count) targets) finished in \(secs(started))")
                 }
@@ -285,9 +295,11 @@ enum TestEngine {
             result.timedOut += r.timedOut
             result.slow += r.slow
             result.seconds.merge(r.seconds) { a, _ in a }
-            result.spans.merge(r.spans) { a, _ in a }
+            // A target split over hosts ran from its first shard's start to its last one's end.
+            result.spans.merge(r.spans) { a, b in (min(a.start, b.start), max(a.end, b.end)) }
         }
-        combined.known = sessions.flatMap(\.known)
+        var seenKnown = Set<String>()
+        combined.known = sessions.flatMap(\.known).filter { seenKnown.insert($0).inserted }
         let session = combined
         let slot = firstSlot
 
@@ -351,6 +363,84 @@ enum TestEngine {
     static func historyPath(_ ws: Workspace) -> String {
         let origin = (try? Shell.check(["git", "-C", ws.root, "remote", "get-url", "origin"]))?.trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(Paths.support)/history/\(shortHash((origin.flatMap { $0.isEmpty ? nil : $0 } ?? ws.root) + "|" + ws.config.project)).json"
+    }
+
+    /// Seconds per test: 120 for an agent (`--agent` or SIMLESS_AGENT=1), which
+    /// shouldn't wait out a hung test for 10 minutes, else 600 like Xcode.
+    static func defaultTimeout(_ args: Args) -> Double {
+        args.flags.contains("--agent") || ProcessInfo.processInfo.environment["SIMLESS_AGENT"] == "1" ? 120 : 600
+    }
+
+    /// One host's share of a run: its targets, and for a target split over
+    /// hosts, its classes (or everything but the other hosts' classes).
+    struct Shard {
+        var targets: [Target]
+        var classes: [String]?   // "Target/Class" ids this host runs
+        var skip: [String] = []  // the classes other hosts run
+    }
+
+    /// Each target's test classes ("Target/Class"), for targets a run takes whole:
+    /// from the last run's results, else from the sources.
+    static func shardableClasses(_ targets: [Target], ws: Workspace, whole: Bool) -> [String: [String]] {
+        guard whole else { return [:] }
+        var out: [String: [String]] = [:]
+        if let d = FileManager.default.contents(atPath: "\(ws.work)/test-results.json"),
+           let tests = (try? JSONSerialization.jsonObject(with: d) as? [String: Any])?["tests"] as? [String: Any] {
+            for id in tests.keys {
+                let parts = id.split(separator: "/")
+                guard parts.count >= 3 else { continue }
+                out[String(parts[0]), default: []].append("\(parts[0])/\(parts[1])")
+            }
+        }
+        for t in targets where out[t.name] == nil {
+            let dir = "\(ws.projectDir)/\(t.name)"
+            guard let e = FileManager.default.enumerator(atPath: dir) else { continue }
+            var classes = Set<String>()
+            let decl = try! NSRegularExpression(
+                pattern: #"^(?:@\w+(?:\([^)\n]*\))?\s+)*(?:(?:final|public|internal|private|fileprivate)\s+)*(?:class|struct|actor|enum)\s+(\w+)([^{\n]*)\{"#,
+                options: .anchorsMatchLines)
+            while let rel = e.nextObject() as? String {
+                guard rel.hasSuffix(".swift"), let text = try? String(contentsOfFile: "\(dir)/\(rel)", encoding: .utf8) else { continue }
+                let ns = text as NSString
+                let found = decl.matches(in: text, range: NSRange(location: 0, length: ns.length))
+                // A suite: an XCTestCase, or a type with @Test functions before the next top-level type.
+                for (n, m) in found.enumerated() {
+                    let end = n + 1 < found.count ? found[n + 1].range.location : ns.length
+                    let body = ns.substring(with: NSRange(location: m.range.location, length: end - m.range.location))
+                    if ns.substring(with: m.range(at: 2)).contains("XCTestCase") || body.range(of: #"(?m)^\s+@Test\b"#, options: .regularExpression) != nil {
+                        classes.insert("\(t.name)/\(ns.substring(with: m.range(at: 1)))")
+                    }
+                }
+            }
+            out[t.name] = classes.sorted()
+        }
+        return out.mapValues { Array(Set($0)).sorted() }
+    }
+
+    /// Hosts beyond one per target go to the targets that take longest, split
+    /// by class: the classes weighed by their tests' last times (or counted).
+    /// The first host of a split target runs everything the others don't, so a
+    /// class nobody listed (or a test outside a class) still runs.
+    static func shard(_ groups: [[Target]], hosts: Int, classes: [String: [String]], weights: [String: Double]) -> [Shard] {
+        var shards = groups.map { Shard(targets: $0) }
+        var spare = hosts - shards.count
+        while spare > 0 {
+            // The heaviest group that's one target with classes to split.
+            guard let i = shards.indices.filter({ shards[$0].targets.count == 1 && shards[$0].classes == nil && shards[$0].skip.isEmpty
+                        && (classes[shards[$0].targets[0].name]?.count ?? 0) >= 4 })
+                    .max(by: { (weights[shards[$0].targets[0].name] ?? 0) < (weights[shards[$1].targets[0].name] ?? 0) }) else { break }
+            let t = shards[i].targets[0]
+            let list = classes[t.name] ?? []
+            let parts = min(spare + 1, list.count / 2)
+            guard parts > 1 else { break }
+            var buckets = Array(repeating: [String](), count: parts)
+            for (n, c) in list.enumerated() { buckets[n % parts].append(c) }
+            let others = buckets.dropFirst().flatMap { $0 }
+            shards[i] = Shard(targets: [t], classes: nil, skip: others)
+            for b in buckets.dropFirst() { shards.append(Shard(targets: [t], classes: b)) }
+            spare -= parts - 1
+        }
+        return shards
     }
 
     /// Targets spread over `count` groups, the longest first onto the lightest group.

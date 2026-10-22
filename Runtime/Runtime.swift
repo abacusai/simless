@@ -478,15 +478,40 @@ enum UnitCanvas {
             }
             method_setImplementation(m, imp_implementationWithBlock(block))
         }
+        // A size a test gives a window (a 320 pt snapshot, say) is kept, as on an
+        // iPhone: only the sizes UIKit gives it (the Mac's) become the canvas's.
+        let setFrame = #selector(setter: UIView.frame)
+        if let m = class_getInstanceMethod(UIWindow.self, setFrame) {
+            typealias Setter = @convention(c) (AnyObject, Selector, CGRect) -> Void
+            let original = unsafeBitCast(method_getImplementation(m), to: Setter.self)
+            let block: @convention(block) (UIWindow, CGRect) -> Void = { w, frame in
+                original(w, setFrame, frame)
+                guard !applying, frame.size != .zero, frame.size != CGSize(width: width, height: height),
+                      frame.size != w.windowScene?.coordinateSpace.bounds.size, frame.size != UIScreen.main.bounds.size else { return }
+                objc_setAssociatedObject(w, &explicitKey, NSValue(cgRect: frame), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
         NotificationCenter.default.addObserver(forName: UIWindow.didBecomeVisibleNotification, object: nil, queue: .main) { n in
             guard let w = n.object as? UIWindow else { return }
             apply(w)
         }
     }
 
-    /// Sizes the window to the canvas and lays its content out within the
-    /// device's safe areas (the root's own safe area counts what the Mac adds).
+    private static var explicitKey = 0
+    private static var applying = false
+
+    /// Sizes the window to the canvas, or to the frame the app gave it, and lays
+    /// its content out within the device's safe areas (the root's own safe
+    /// area counts what the Mac adds).
     static func apply(_ w: UIWindow) {
+        applying = true
+        defer { applying = false }
+        if let explicit = (objc_getAssociatedObject(w, &explicitKey) as? NSValue)?.cgRectValue {
+            if w.frame != explicit { w.frame = explicit }
+            w.layoutIfNeeded()
+            return
+        }
         let size = CGSize(width: width, height: height)
         if w.frame.size != size { w.frame = CGRect(origin: .zero, size: size) }
         if let root = w.rootViewController {
