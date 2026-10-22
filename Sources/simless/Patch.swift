@@ -174,7 +174,9 @@ enum Patch {
             throw SimlessError("patch compile failed:\n" + compilerErrors(r.out, originals: originals, lineOffset: modulesInvolved.count))
         }
         let ts = now()
-        if Native.isNative(slot) {
+        // By the workspace's mode, not the slot's: previews compile while the
+        // slot is being prepared again, when its native marker isn't there yet.
+        if ws.native {
             try Native.adopt([out])
         } else {
             let (identity, _) = try Signing.identity(team: settings.team)
