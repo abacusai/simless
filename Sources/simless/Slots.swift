@@ -294,6 +294,7 @@ enum Slots {
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                Previews.load(slot)
                 try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
                 return
             }
@@ -332,6 +333,7 @@ enum Slots {
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                Previews.load(slot)
                 try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
                 return
             }

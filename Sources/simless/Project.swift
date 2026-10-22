@@ -25,6 +25,7 @@ struct Config: Codable {
     var mode: String?             // "native" (default): hosts run unsigned; "dfi": signed Designed-for-iPad installs
     var settle: Double?           // default --settle: ms each render gives the screen's async work (default 0)
     var isolate: Bool?            // native hosts get a sandbox of their own: write only their slot, read only their worktree
+    var previews: Bool?           // fixtures from #Preview blocks and the App's root view (default true)
 
     struct Checks: Codable {
         var minTapTarget: Double?     // points (default 44)

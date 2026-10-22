@@ -302,6 +302,8 @@ func cmdUp(_ args: Args) throws {
     let packageBuild = DispatchGroup()
     defer { packageBuild.wait() }
     DispatchQueue.global().async(group: packageBuild) { RuntimeBuild.prebuild() }
+    // Previews compile against this build: the last build's must not load meanwhile.
+    try? FileManager.default.removeItem(atPath: Previews.dir(ws))
     do { try ws.build() } catch {
         // A failed build must not hide edits from the next `simless reload`.
         if let previousSnapshot { try? previousSnapshot.write(to: URL(fileURLWithPath: ws.snapshotPath)) }
@@ -343,6 +345,14 @@ func cmdUp(_ args: Args) throws {
         }
     }
     defer { testsReady.wait() }
+    // Fixtures from #Preview blocks and the App, compiled while the slot gets ready.
+    let previewsBuilt = DispatchGroup()
+    var previewsError: Error?
+    if ws.config.previews != false {
+        DispatchQueue.global().async(group: previewsBuilt) {
+            do { try Previews.build(ws: ws, slot: slot, settings: settings) } catch { previewsError = error }
+        }
+    }
     let embedded = ws.config.embeddedBundles ?? true
     try Slots.prepare(slot, ws: ws, settings: settings, embedded: embedded)
     do {
@@ -354,6 +364,9 @@ func cmdUp(_ args: Args) throws {
         try Slots.install(slot, ws: ws)
     }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
+    previewsBuilt.wait()
+    if let previewsError { Log.info("note: fixtures from #Preview blocks weren't built: \(previewsError)") }
+    else { Previews.load(slot) }
     let stats = slot.stats() ?? [:]
     let fixtures = stats["fixtures"] as? [String] ?? []
     if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
@@ -361,6 +374,7 @@ func cmdUp(_ args: Args) throws {
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
+    if let previews = Previews.summary(ws) { print(previews) }
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")\(Native.isNative(slot) ? " (native: unsigned, no agent needed)" : "")")
     if let note = skillNote() { print(note) }
     testsReady.wait()
@@ -416,6 +430,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
             options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
             options.checks = ws.config.checks ?? .init()
+            options.patch = slot.patch
             if var png = args.values["--png"] {
                 while png.count > 1 && png.hasSuffix("/") { png.removeLast() }
                 let isDir = fixtures.count > 1 || variants.count > 1 || args.values["--png"]!.hasSuffix("/")

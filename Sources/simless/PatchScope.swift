@@ -55,6 +55,8 @@ enum PatchScope {
         let covered: [String]   // fixtures the patch renders with the edited code
         let stale: [String]     // fixtures that reach the edit but aren't covered
         let texts: [String: String] // what the patch compiles of each file
+        var kept: [String: Set<Int>] = [:]  // the chunks of each file it compiles
+        var previews: [String] = []         // fixtures from #Preview blocks the patch must register itself
     }
 
     /// Comments and string literals, blanked (same length) before collecting
@@ -256,6 +258,7 @@ enum PatchScope {
         var fixturesPath = "SimlessFixtures.swift"
         var fixturesText = ""
         var before: [String: String] = [:]      // edited path -> its text as of the last full build
+        var previews: [String: (file: String, line: Int)] = [:]  // fixtures from #Preview blocks (Previews.swift)
     }
 
     /// The scope input for a worktree: its sources and local package modules.
@@ -284,6 +287,7 @@ enum PatchScope {
         input.sources = texts.value
         for f in files { input.moduleOf[f] = Packages.module(of: f, in: packageModules)?.name ?? input.appModule }
         for f in edited { input.before[f] = ws.snapshotText(of: f) }
+        for e in Previews.manifest(ws)?.entries ?? [] where e.skipped == nil { input.previews[e.name] = (e.file, e.line) }
         return input
     }
 
@@ -458,10 +462,22 @@ enum PatchScope {
         // Per fixture: the affected nodes on its way to the edit.
         let appModule = input.appModule
         let fixtureText = input.fixturesText
-        let perFixture = fixtureTokens(fixtureText) ?? ["*": Set(strings(identifier, code(fixtureText)))]
+        // Registrations this can't read are one fixture, "*"; a file without any has none.
+        let perFixture = fixtureTokens(fixtureText)
+            ?? (fixtureText.contains(".add(") ? ["*": Set(strings(identifier, code(fixtureText)))] : [:])
+        // Previews are fixtures too, starting from their own block (or the App, for root).
+        var starts: [String: (tokens: Set<String>, file: String, own: String?)] = [:]
+        for (name, tokens) in perFixture { starts[name] = (tokens, fixturesPath, nil) }
+        for (name, at) in input.previews {
+            guard let text = input.sources[at.file], let cs = g.chunksByFile[at.file] else { continue }
+            let ns = text as NSString
+            guard let c = cs.last(where: { 1 + ns.substring(to: $0.start).filter { $0 == "\n" }.count <= at.line }) else { continue }
+            starts[name] = (c.tokens, at.file, g.nodeOf[at.file]?[c.key])
+        }
         var needed: [String: Set<String>] = [:]
-        for (name, tokens) in perFixture {
-            var seen = g.resolve(tokens, from: fixturesPath, module: appModule).filter { affected[$0] != nil }
+        for (name, start) in starts {
+            var seen = g.resolve(start.tokens, from: start.file, module: g.moduleOf[start.file] ?? appModule).filter { affected[$0] != nil }
+            if let own = start.own, affected[own] != nil { seen.insert(own) }
             var q = Array(seen)
             while let x = q.popLast() {
                 for d in g.deps[x] ?? [] where affected[d] != nil && seen.insert(d).inserted { q.append(d) }
@@ -469,8 +485,8 @@ enum PatchScope {
             needed[name] = seen
         }
         let targets: Set<String>
-        if let requested, perFixture["*"] == nil, requested.allSatisfy({ perFixture[$0] != nil }) { targets = Set(requested) }
-        else { targets = Set(perFixture.keys) }
+        if let requested, requested.allSatisfy({ starts[$0] != nil && $0 != "*" }) { targets = Set(requested) }
+        else { targets = Set(starts.keys) }
 
         // Nodes: what changed and what each target fixture needs. A type is
         // patched whole, extensions in other files included, since the patch's
@@ -479,19 +495,27 @@ enum PatchScope {
         for t in targets { patched.formUnion(needed[t] ?? []) }
         var all = editedSet.union([fixturesPath])
         for k in patched { all.formUnion(g.nodes[k]!.files) }
-        let fixtureNames = perFixture["*"] == nil ? Set(perFixture.keys) : []
-        let reach = fixtureNames.filter { !(needed[$0] ?? []).isEmpty || editedSet.contains(fixturesPath) }
-        let covered = reach.filter { (needed[$0] ?? []).isSubset(of: patched) }
+        let fixtureNames = Set(starts.keys).subtracting(["*"])
+        let reach = fixtureNames.filter {
+            !(needed[$0] ?? []).isEmpty || (editedSet.contains(fixturesPath) && input.previews[$0] == nil)
+        }
+        // A preview the edit reaches registers from the build's code: the patch
+        // compiles the ones it renders, from their own files.
+        let previews = reach.intersection(targets).filter { input.previews[$0] != nil }
+        for p in previews { all.insert(input.previews[p]!.file) }
+        let covered = reach.filter { (needed[$0] ?? []).isSubset(of: patched) && (input.previews[$0] == nil || previews.contains($0)) }
         if all.count > maxFiles {
             let forWhat = requested.map { " for \($0.joined(separator: ", "))" } ?? ""
             throw SimlessError("patch can't cover this edit: it reaches \(all.count) files between the fixtures and the edit\(forWhat) (limit \(maxFiles))")
         }
+
 
         // What the patch compiles of each file: the patched declarations and the
         // file-private ones they use. The rest is blanked (lines and `#if`s kept)
         // and resolves to the app's own copy: a second copy of an extension
         // member would be ambiguous, and an unpatched type would only add work.
         var texts: [String: String] = [:]
+        var kept: [String: Set<Int>] = [:]
         for f in all where f != fixturesPath {
             guard let cs = g.chunksByFile[f], let keys = g.nodeOf[f], let first = cs.first,
                   let text = input.sources[f] else { continue }
@@ -509,9 +533,11 @@ enum PatchScope {
             var out = ns.substring(to: first.start)
             for (i, c) in cs.enumerated() { out += keep.contains(i) ? c.text : blank(c.text) }
             texts[f] = out
+            kept[f] = keep
         }
         let extra = all.subtracting(editedSet).subtracting([fixturesPath]).sorted()
         return Scope(all: [fixturesPath] + edited.filter { $0 != fixturesPath } + extra, extra: extra,
-                     covered: covered.sorted(), stale: reach.subtracting(covered).sorted(), texts: texts)
+                     covered: covered.sorted(), stale: reach.subtracting(covered).sorted(), texts: texts,
+                     kept: kept, previews: previews.sorted())
     }
 }
