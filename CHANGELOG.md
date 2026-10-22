@@ -7,6 +7,15 @@
 
 - **`simless act`: interact with a screen, then read it.** `simless act Settings tap "Push notifications"` renders the fixture, taps the switch and prints the tree with its new value, in 0.15 s on the demo app. On a production app, typing an email into the sign-in field and tapping Continue takes 0.4 s, and the tree shows the field's text and what the screen did next. Steps chain in one call: `tap "<label or #id>"`, `type "<#id>" "<text>"`, `swipe up|down|left|right [on "<label>"]`, `longpress "<label>"` and `wait <ms>`, with `--device`, `--dark`, `--png` and `--json` like `render`. It's the automation `simless test ui` runs on, so text fields take focus and typing (SwiftUI bindings update), which a simulator screenshot tool can't do. Each step says whether it worked, and one that finds nothing lists what's on screen. Needs kit 5: run `simless init` once.
 
+## Unreleased
+
+- **iPhone-only apps render with the phone idiom.** All of our customer apps are iPhone-only (`TARGETED_DEVICE_FAMILY = 1`), and the iPad idiom gave them iPad metrics. Other apps keep the iPad idiom unless they ask (`--idiom phone`, or `"idiom"` in `.simless.json`).
+- **No more `Stepper` crashes under the phone idiom.** The cause is in SwiftUI: on the Mac its default stepper style resolves to itself until the stack overflows (traced, see findings.md), and nothing public can change that. So a screen that shows a `Stepper` renders with the iPad idiom and says so, which simless finds out from one iPad-idiom render per fixture and build, instead of crashing the host first.
+- **Fewer false issues, one more real one.** Switches (`switch`) and text fields (`field`, with their placeholder) have roles of their own, and switches, text fields and a stepper's halves aren't flagged as small tap targets any more: the system sizes them. A `Menu` row is labeled as on iOS ("Landing page, Chats"), because SwiftUI only fills in that label on the Mac after it's been read once. A text field with no label and no placeholder is flagged, like chatllm-ios's sign-in email field. Needs kit 6 (`simless init`).
+- **iOS colors in PNGs.** The app's accent color or iOS blue instead of the Mac's accent color, and iOS green for switches that are on.
+- **`simless calibrate` skips the fixtures only simless has** (root and `#Preview` blocks) instead of failing them.
+- **Fidelity on a production app is still 0 of 6 within 2 pt, and why is known.** ChatList is now within 3 pt. Most of the rest comes from the app: its custom font is never registered (on devices either), and the Helvetica both platforms fall back to has a 15% tighter line on macOS. Chat bubbles, which are `UITextView`s, are still 25 to 31 pt wider, and bar buttons are 36 pt wide against 22. [fidelity.md](docs/fidelity.md) lists what's left.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.
