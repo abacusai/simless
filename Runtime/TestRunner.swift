@@ -2,6 +2,7 @@
 // Copyright 2026 Abacus.AI, Inc.
 
 import Foundation
+import UIKit
 import ObjectiveC
 
 /// Runs loaded test bundles in this process and streams one event per line:
@@ -45,6 +46,7 @@ final class TestRunner {
     // MARK: Running
 
     func run() {
+        Scenes.waitForFirst()
         var swiftResult: Bool?
         if let swift = request["swift"] as? [String: Any], let ep = SwiftTesting.entryPoint() {
             var config: [String: Any] = ["parallel": request["parallel"] as? Bool ?? true]
@@ -186,6 +188,22 @@ enum XCTestSide {
         patterns.contains { p in id == p || id.hasPrefix(p + "/") || id.hasPrefix(p + ".") }
     }
 
+    /// `add(XCTAttachment)` needs activities, which XCTest only reports when its
+    /// configuration says so. xcodebuild hands the process one; a host has none
+    /// ("Attachments cannot be added to the test because activities are disabled"),
+    /// so it makes one that reports them.
+    static func enableActivities() {
+        guard let cls = NSClassFromString("XCTestConfiguration") as? NSObject.Type else { return }
+        var config = cls.perform(NSSelectorFromString("activeTestConfiguration"))?.takeUnretainedValue() as? NSObject
+        if config == nil {
+            let made = cls.init()
+            cls.perform(NSSelectorFromString("setActiveTestConfiguration:"), with: made)
+            config = made
+        }
+        guard let config, config.responds(to: NSSelectorFromString("setReportActivities:")) else { return }
+        config.setValue(true, forKey: "reportActivities")
+    }
+
     static func run(include: [String]?, exclude: [String], connection: Connection) {
         guard let suiteClass = NSClassFromString("XCTestSuite") as? NSObject.Type,
               let center = (NSClassFromString("XCTestObservationCenter") as? NSObject.Type)?
@@ -196,6 +214,7 @@ enum XCTestSide {
             return (include.map { matches(id, $0) } ?? true) && !matches(id, exclude)
         }
         if cases.isEmpty { return }
+        enableActivities()
         guard let suite = suiteClass.perform(NSSelectorFromString("testSuiteWithName:"), with: "simless")?
             .takeUnretainedValue() as? NSObject else { return }
         for c in cases { suite.perform(NSSelectorFromString("addTest:"), with: c) }
@@ -282,6 +301,22 @@ final class XCTestObserver: NSObject {
 /// Runs `body` on the main thread as a run loop block and waits for it. Unlike
 /// DispatchQueue.main.sync, the main queue keeps draining while `body` spins
 /// the run loop (an XCTest wait, an expectation fulfilled from main-queue work).
+/// The app's scene connects a moment after launch, and tests that look for
+/// it (`connectedScenes.first as? UIWindowScene`) found none when they ran
+/// first. The first run waits for it, up to 3 s: without a window server it
+/// never comes.
+enum Scenes {
+    private static var waited = false
+
+    static func waitForFirst() {
+        guard !waited else { return }
+        waited = true
+        guard Bundle.main.object(forInfoDictionaryKey: "UIApplicationSceneManifest") != nil else { return }
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, onMainRunLoop({ UIApplication.shared.connectedScenes.isEmpty }) { usleep(50_000) }
+    }
+}
+
 func onMainRunLoop<T>(_ body: @escaping () -> T) -> T {
     if Thread.isMainThread { return body() }
     var result: T?
