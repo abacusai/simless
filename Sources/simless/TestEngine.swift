@@ -203,8 +203,8 @@ enum TestEngine {
             let names = p.targets.filter(wanted.contains)
             if names.isEmpty { continue }
             let products = try Packages.buildTests(p, targets: names, ws: ws)
-            try prepareBundles(names.map { "\(products)/\($0).xctest" }, products: products, team: settings.team, native: ws.native)
-            targets += names.map { Target(name: $0, module: moduleName($0), bundle: "\(products)/\($0).xctest") }
+            let bundles = try prepareBundles(names.map { "\(products)/\($0).xctest" }, products: products, team: settings.team, native: ws.native)
+            targets += zip(names, bundles).map { Target(name: $0, module: moduleName($0), bundle: $1) }
         }
         let firstSlot = try RuntimeHost.slot(kind: "test", ws: ws)
         let app = try RuntimeHost.appBundle(firstSlot)
@@ -405,37 +405,60 @@ enum TestEngine {
 
     /// Package test bundles are built unsigned: sign them so the host can load
     /// them, and put the package's resource bundles inside each, where
-    /// `Bundle.module` looks.
-    static func prepareBundles(_ bundles: [String], products: String, team: String, native: Bool) throws {
+    /// `Bundle.module` looks. That happens to a clone next to Xcode's bundle
+    /// (`<Name>.simless.xctest`, so relative load paths resolve the same): a
+    /// bundle changed in place made the next build link all of them again, and
+    /// sign them all again after it. Returns the bundles to load.
+    @discardableResult
+    static func prepareBundles(_ bundles: [String], products: String, team: String, native: Bool) throws -> [String] {
         let fm = FileManager.default
         let identity = native ? "-" : try Signing.identity(team: team).0
         let resources = ((try? fm.contentsOfDirectory(atPath: products)) ?? []).filter { $0.hasSuffix(".bundle") }
-        // Skip what hasn't changed since its last signature.
+        let stampName = ".simless-\(native ? "native" : "signed")"
+        // Skip what hasn't changed since it was prepared: the bundle's files and
+        // the resource bundles copied into it.
+        let resourcesChanged = resources.map { newestChange("\(products)/\($0)") }.max() ?? 0
         let stale = bundles.filter { bundle in
-            let exe = "\(bundle)/\(((bundle as NSString).lastPathComponent as NSString).deletingPathExtension)"
-            let stamp = "\(bundle)/.simless-\(native ? "native" : "signed")"
-            return !(exists(stamp) && mtime(stamp) >= mtime(exe))
+            let stamp = "\(prepared(bundle))/\(stampName)"
+            return !(exists(stamp) && mtime(stamp) >= max(newestChange(bundle), resourcesChanged))
         }
-        guard !stale.isEmpty else { return }
+        guard !stale.isEmpty else { return bundles.map(prepared) }
         let t = now()
         // Signing hashes every file, so bundles are signed side by side.
         let errors = Locked<[Error]>([])
         DispatchQueue.concurrentPerform(iterations: stale.count) { i in
-            let bundle = stale[i]
+            let bundle = stale[i], copy = prepared(stale[i])
             do {
+                try? fm.removeItem(atPath: copy)
+                try Shell.check(["/bin/cp", "-c", "-R", bundle, copy], what: "clone \((bundle as NSString).lastPathComponent)")
                 for r in resources {
-                    try? FileManager.default.removeItem(atPath: "\(bundle)/\(r)")
-                    try Shell.check(["/bin/cp", "-c", "-R", "\(products)/\(r)", "\(bundle)/\(r)"], what: "copy \(r)")
+                    try? fm.removeItem(atPath: "\(copy)/\(r)")
+                    try Shell.check(["/bin/cp", "-c", "-R", "\(products)/\(r)", "\(copy)/\(r)"], what: "copy \(r)")
                 }
-                if native { try Native.adopt([bundle]) } else { try Signing.sign(bundle, identity: identity) }
-                try? FileManager.default.removeItem(atPath: "\(bundle)/.simless-\(native ? "signed" : "native")")
-                FileManager.default.createFile(atPath: "\(bundle)/.simless-\(native ? "native" : "signed")", contents: nil)
+                if native { try Native.adopt([copy]) } else { try Signing.sign(copy, identity: identity) }
+                fm.createFile(atPath: "\(copy)/\(stampName)", contents: nil)
             } catch {
                 errors.mutate { $0.append(error) }
             }
         }
         if let first = errors.value.first { throw first }
         Log.step("signed \(stale.count) test bundle(s) in \(secs(t))")
+        return bundles.map(prepared)
+    }
+
+    /// simless's copy of a test bundle Xcode built.
+    static func prepared(_ bundle: String) -> String { (bundle as NSString).deletingPathExtension + ".simless.xctest" }
+
+    /// The newest modification of a file or anything in a folder.
+    static func newestChange(_ path: String) -> Double {
+        var newest = mtime(path)
+        let url = URL(fileURLWithPath: path)
+        guard let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.contentModificationDateKey]) else { return newest }
+        for case let f as URL in files {
+            let d = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+            newest = max(newest, d)
+        }
+        return newest
     }
 
     // MARK: - Simulator-only

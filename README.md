@@ -117,12 +117,12 @@ Since 0.6.0 hosts run unsigned. Compared with the signed "Designed for iPad" ins
 
 | | 0.5 (signed) | 0.6 (unsigned) | |
 |---|---|---|---|
-| Warm `simless up` | 53.2 s | **28.5 s** | **1.9×** |
+| Warm `simless up` | 53.2 s | **25.9 to 29.4 s** | **1.9×** |
 | 107 UI tests | 545 s | **432 s** | 1.3× |
 | 2,345 unit tests | 320 s | **303 to 327 s** | same |
 | What the Mac needs | certificate, wildcard profile, Full Disk Access | **Xcode** | |
 
-Every test has the same outcome as before and the renders are the same. PNGs also line up with the tree's frames exactly now.
+Every test has the same outcome as before and the renders are the same. PNGs also line up with the tree's frames exactly now. Part of the warm `up` gain is that simless no longer changes the test bundles Xcode built: it signs a clone of each, so Xcode doesn't link all 40 package test bundles again on every build, and nothing needs signing again when nothing changed.
 
 ## Does it look the same?
 
