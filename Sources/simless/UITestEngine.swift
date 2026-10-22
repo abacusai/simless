@@ -234,7 +234,7 @@ enum UITestEngine {
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
         let skips = (config?.skip ?? []) + (args.repeated["--skip"] ?? []) + simulatorOnly.keys.sorted()
-        let timeout = args.values["--timeout"].flatMap(Double.init) ?? config?.uiTimeout ?? 600
+        let timeout = args.values["--timeout"].flatMap(Double.init) ?? config?.uiTimeout ?? TestEngine.defaultTimeout(args)
 
         // Selection.
         var selected: [TestID] = []
