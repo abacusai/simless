@@ -28,7 +28,9 @@ Install it and it works: simless no longer needs an Apple Development certificat
 - **Explicit signing choices win (dfi mode).** `SIMLESS_TEAM`, then `"team"` in `.simless.json`, then the project's `DEVELOPMENT_TEAM`.
 - **Ports are checked before they're handed out**, and the CLI finds its templates and runtime sources next to the binary it runs from (or `SIMLESS_ROOT`), so a checkout restored from a CI cache works.
 - **`"isolate": true`** (or `SIMLESS_ISOLATE=1`) gives each native host a sandbox of its own, for build machines that serve many projects as one user: it writes only into its slot, reads only its worktree and build folder in the user's home, and can't reach other hosts. The demo's renders, unit and UI tests come out the same with it.
-- **CI runs the demo app end to end** on a hosted runner: build, every render, unit and UI tests, unsigned.
+- **UI tests work on macOS 15.** Every synthesized touch threw there, because macOS 15's UIKit makes hit test contexts without the event. AppKit swallowed the exception, so each tap waited out the 240 s request timeout. Touches now use the initializer the running UIKit has. And swipes on the whole app started at its top-left corner, because the shim read the app's frame from an array literal that came out as `[Any]` of `Int` and `Double` there. One gap is left on macOS 15: Swift Charts' scroll and selection gestures see the touches but don't act on them, so the demo skips those three tests there.
+- **A UIKit exception fails the request instead of hanging it.** Every UI request runs under a catcher, and an exception comes back as an error with its reason.
+- **CI runs the demo app end to end** on GitHub's hosted macOS 15 runner (a VM with Xcode 26): build, every render, unit and UI tests, unsigned.
 
 ## 0.5.3 (2026-10-18)
 
