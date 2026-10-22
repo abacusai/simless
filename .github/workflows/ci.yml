@@ -93,6 +93,7 @@ jobs:
         working-directory: Examples/SimlessDemo
         env:
           SIMLESS_UI_TRACE: "1"
+          SIMLESS_HOST_ENV_SIMLESS_TOUCH_DEBUG: "1"
         run: |
           "$GITHUB_WORKSPACE/.build/release/simless" test ui
 

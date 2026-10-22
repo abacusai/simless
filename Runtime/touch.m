@@ -69,6 +69,31 @@ static id simless_hit_test_context(CGPoint point, UIEvent *event) {
     return context;
 }
 
+/// SIMLESS_TOUCH_DEBUG=1: what this UIKit offers for gesture containers, once,
+/// and what each touch's hit test found, on stderr (the host's log).
+static BOOL touchDebug(void) {
+    static BOOL on;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        on = getenv("SIMLESS_TOUCH_DEBUG") != NULL;
+        if (!on) return;
+        Class cls = NSClassFromString(@"_UIHitTestContext");
+        NSMutableArray *names = [NSMutableArray array];
+        for (Class c in @[cls ?: NSNull.class, object_getClass(cls) ?: NSNull.class]) {
+            unsigned int n = 0;
+            Method *methods = class_copyMethodList(c, &n);
+            for (unsigned int i = 0; i < n; i++) [names addObject:NSStringFromSelector(method_getName(methods[i]))];
+            free(methods);
+        }
+        fprintf(stderr, "simless-touch: _UIHitTestContext %s, UIView _hitTestWithContext: %d, UIEvent _addGestureRecognizersFromContainer:toTouch: %d, methods: %s\n",
+                cls ? "present" : "missing",
+                [UIView instancesRespondToSelector:@selector(_hitTestWithContext:)],
+                [NSClassFromString(@"UITouchesEvent") instancesRespondToSelector:@selector(_addGestureRecognizersFromContainer:toTouch:)],
+                [names componentsJoinedByString:@" "].UTF8String);
+    });
+    return on;
+}
+
 /// Why the last touch failed (an exception UIKit threw), or NULL.
 static char *lastError;
 const char *simless_touch_error(void) { return lastError; }
@@ -149,20 +174,25 @@ static BOOL simless_touch_unguarded(UIWindow *window, CGPoint point, int phase) 
     // views; UIKit finds the deepest one under the finger with its own hit
     // test, and the touch carries the recognizers from there up.
     if (p == UITouchPhaseBegan) {
+        NSString *found = @"no hit test";
         if ([window respondsToSelector:@selector(_hitTestWithContext:)]
             && [event respondsToSelector:@selector(_addGestureRecognizersFromContainer:toTouch:)]) {
             // Asked of the view under the finger (and up), in its own coordinates.
             for (UIView *v = current.view; v != nil; v = v.superview) {
                 if (![v respondsToSelector:@selector(_hitTestWithContext:)]) continue;
                 id context = simless_hit_test_context([v convertPoint:point fromView:window], event);
-                if (context == nil) break;
+                if (context == nil) { found = @"no context"; break; }
                 id target = [v _hitTestWithContext:context];
-                if (target == nil) { if (v == window) break; continue; }
+                if (target == nil) { found = @"nothing"; if (v == window) break; continue; }
+                found = NSStringFromClass([target class]);
                 // A view (a UIKit control, say) gets its recognizers the usual way.
                 if (![target isKindOfClass:UIView.class]) [event _addGestureRecognizersFromContainer:target toTouch:current];
                 break;
             }
         }
+        if (touchDebug())
+            fprintf(stderr, "simless-touch: began at %.0f,%.0f on %s, hit test found %s, %lu recognizers\n", point.x, point.y,
+                    NSStringFromClass(current.view.class).UTF8String, found.UTF8String, (unsigned long)current.gestureRecognizers.count);
     }
     [app sendEvent:event];
     CFRelease(hid);

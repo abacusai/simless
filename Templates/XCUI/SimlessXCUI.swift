@@ -64,7 +64,7 @@ final class SimlessUIHost: @unchecked Sendable {
         guard env["SIMLESS_UI_TRACE"] != nil else { return send(request) }
         let start = Date()
         let r = send(request)
-        FileHandle.standardError.write(Data("simless-trace \(request["cmd"] ?? "") \(Int(Date().timeIntervalSince(start) * 1000)) \(r == nil ? "NOREPLY \(lastFailure)" : "")\(r?["busy"] ?? "")\(r?["how"] ?? "")\(r?["error"].map { " error: \($0)" } ?? "")\n".utf8))
+        FileHandle.standardError.write(Data("simless-trace \(request["cmd"] ?? "") \(Int(Date().timeIntervalSince(start) * 1000)) \(r == nil ? "NOREPLY \(lastFailure)" : "")\(r?["busy"] ?? "")\(r?["how"] ?? "")\((r?["error"] as? String).map { " error: \($0)" } ?? "")\n".utf8))
         return r
     }
 
