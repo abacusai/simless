@@ -232,7 +232,14 @@ enum UIAutomation {
             .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
     }
 
-    static var keyWindow: UIWindow? { appWindows.last(where: \.isKeyWindow) ?? appWindows.last }
+    /// The key window, or with none key (a hidden app often has none) the
+    /// topmost one big enough to be a screen: macOS 15 keeps a small window of
+    /// its own above the app's.
+    static var keyWindow: UIWindow? {
+        let windows = appWindows
+        return windows.last(where: \.isKeyWindow)
+            ?? windows.last(where: { $0.bounds.width >= 100 && $0.bounds.height >= 100 }) ?? windows.last
+    }
 }
 
 // MARK: - Replies
@@ -959,6 +966,10 @@ enum Input {
 
     /// XCUITest's swipe: a quick drag across half the element, in one direction.
     static func swipe(center: CGPoint, dx: Double, dy: Double, size: CGSize, velocity: Double) -> String? {
+        if getenv("SIMLESS_TOUCH_DEBUG") != nil {
+            let list = UIAutomation.appWindows.map { "\(type(of: $0)) \($0.bounds.size) key \($0.isKeyWindow)" }
+            FileHandle.standardError.write(Data("simless-touch: windows \(list)\n".utf8))
+        }
         let window = UIAutomation.keyWindow?.bounds ?? .zero
         let length = dx != 0 ? min(size.width, window.width) * 0.5 : min(size.height, window.height) * 0.5
         var start = center
