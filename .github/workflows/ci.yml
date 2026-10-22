@@ -87,6 +87,9 @@ jobs:
         run: |
           simless() { "$GITHUB_WORKSPACE/.build/release/simless" "$@"; }
           simless up
+          # Fixtures nobody wrote: the App's root view and a #Preview block.
+          simless render all | tee all.txt
+          grep -q "^root · " all.txt && grep -q "^LoginView.Error · " all.txt && rm all.txt
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
           simless test all

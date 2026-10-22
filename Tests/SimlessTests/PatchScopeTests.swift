@@ -123,6 +123,19 @@ final class PatchScopeTests: XCTestCase {
         XCTAssertThrowsError(try PatchScope.scope(i, edited: ["LeafView.swift"]))
     }
 
+    func testPreviewsAreFixturesThePatchRegistersWhenAsked() throws {
+        var i = input(leaf: leafEdited + "\n#Preview(\"Card\") {\n    LeafView()\n}\n")
+        i.before["LeafView.swift"] = leafBefore + "\n#Preview(\"Card\") {\n    LeafView()\n}\n"
+        i.previews = ["LeafView.Card": ("LeafView.swift", leafBefore.components(separatedBy: "\n").count + 1)]
+        let asked = try PatchScope.scope(i, edited: ["LeafView.swift"], fixtures: ["LeafView.Card"])
+        XCTAssertEqual(asked.previews, ["LeafView.Card"])
+        XCTAssertTrue(asked.covered.contains("LeafView.Card"))
+        // Another fixture's reload leaves it stale: it registers from the build.
+        let other = try PatchScope.scope(i, edited: ["LeafView.swift"], fixtures: ["Leaf"])
+        XCTAssertEqual(other.previews, [])
+        XCTAssertTrue(other.stale.contains("LeafView.Card"))
+    }
+
     func testChunksSplitTopLevelDeclarations() {
         let c = PatchScope.chunks(leafBefore)
         XCTAssertEqual(c.map(\.key), ["type LeafView", "ext View", "type Unrelated"])
