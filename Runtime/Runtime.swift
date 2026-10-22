@@ -23,6 +23,8 @@ let runtimeVersion = 1
 
 @_silgen_name("simless_install_crash_handler") func simless_install_crash_handler()
 @_silgen_name("simless_touch") func simless_touch(_ window: UIWindow, _ point: CGPoint, _ phase: Int32) -> Bool
+@_silgen_name("simless_touch_error") func simless_touch_error() -> UnsafePointer<CChar>?
+@_silgen_name("simless_catch") func simless_catch(_ body: @convention(c) (UnsafeMutableRawPointer?) -> Void, _ context: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
 func runtimeLog(_ s: String) {
     FileHandle.standardError.write(Data(("simless-runtime: " + s + "\n").utf8))

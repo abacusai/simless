@@ -50,7 +50,28 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef, uint32_t, int64_t);
 
 @interface NSObject (SimlessHitTestContext)
 - (instancetype)initWithPoint:(CGPoint)point radius:(CGFloat)radius event:(UIEvent *)event;
+- (instancetype)initWithPoint:(CGPoint)point radius:(CGFloat)radius;
++ (instancetype)contextWithPoint:(CGPoint)point radius:(CGFloat)radius;
+- (void)setEvent:(UIEvent *)event;
 @end
+
+/// A hit test context for `point`, made the way this UIKit makes them
+/// (macOS 26 takes the event in the initializer, macOS 15 doesn't), or nil.
+static id simless_hit_test_context(CGPoint point, UIEvent *event) {
+    Class cls = NSClassFromString(@"_UIHitTestContext");
+    if (cls == nil) return nil;
+    if ([cls instancesRespondToSelector:@selector(initWithPoint:radius:event:)])
+        return [[cls alloc] initWithPoint:point radius:0 event:event];
+    id context = nil;
+    if ([cls instancesRespondToSelector:@selector(initWithPoint:radius:)]) context = [[cls alloc] initWithPoint:point radius:0];
+    else if ([cls respondsToSelector:@selector(contextWithPoint:radius:)]) context = [cls contextWithPoint:point radius:0];
+    if ([context respondsToSelector:@selector(setEvent:)]) [context setEvent:event];
+    return context;
+}
+
+/// Why the last touch failed (an exception UIKit threw), or NULL.
+static char *lastError;
+const char *simless_touch_error(void) { return lastError; }
 
 @interface UIEvent (SimlessGestures)
 - (void)_addGestureRecognizersFromContainer:(id)container toTouch:(UITouch *)touch;
@@ -78,7 +99,23 @@ static NSTimeInterval lastTimestamp;
 /// One phase of a one-finger touch at `point` in `window` coordinates.
 /// phase: 0 began, 1 moved, 2 stationary, 3 ended, 4 cancelled.
 /// Returns NO if UIKit lacks a method this needs.
+static BOOL simless_touch_unguarded(UIWindow *window, CGPoint point, int phase);
+
+/// An exception from UIKit fails the touch instead of unwinding into AppKit's
+/// event loop, which swallows it and leaves the request unanswered.
 BOOL simless_touch(UIWindow *window, CGPoint point, int phase) {
+    free(lastError);
+    lastError = NULL;
+    @try {
+        return simless_touch_unguarded(window, point, phase);
+    } @catch (NSException *e) {
+        lastError = strdup([NSString stringWithFormat:@"%@: %@", e.name, e.reason].UTF8String ?: "exception");
+        current = nil;
+        return NO;
+    }
+}
+
+static BOOL simless_touch_unguarded(UIWindow *window, CGPoint point, int phase) {
     UIApplication *app = UIApplication.sharedApplication;
     if (![app respondsToSelector:@selector(_touchesEvent)]) return NO;
     UITouchPhase p = (UITouchPhase)phase;
@@ -112,13 +149,13 @@ BOOL simless_touch(UIWindow *window, CGPoint point, int phase) {
     // views; UIKit finds the deepest one under the finger with its own hit
     // test, and the touch carries the recognizers from there up.
     if (p == UITouchPhaseBegan) {
-        Class contextClass = NSClassFromString(@"_UIHitTestContext");
-        if (contextClass && [window respondsToSelector:@selector(_hitTestWithContext:)]
+        if ([window respondsToSelector:@selector(_hitTestWithContext:)]
             && [event respondsToSelector:@selector(_addGestureRecognizersFromContainer:toTouch:)]) {
             // Asked of the view under the finger (and up), in its own coordinates.
             for (UIView *v = current.view; v != nil; v = v.superview) {
                 if (![v respondsToSelector:@selector(_hitTestWithContext:)]) continue;
-                id context = [[contextClass alloc] initWithPoint:[v convertPoint:point fromView:window] radius:0 event:event];
+                id context = simless_hit_test_context([v convertPoint:point fromView:window], event);
+                if (context == nil) break;
                 id target = [v _hitTestWithContext:context];
                 if (target == nil) { if (v == window) break; continue; }
                 // A view (a UIKit control, say) gets its recognizers the usual way.

@@ -9,7 +9,7 @@ let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
   simless init [--no-hook]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
-  simless up [--no-tests]          build (Designed for iPad), install this worktree's slot, start its host;
+  simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]

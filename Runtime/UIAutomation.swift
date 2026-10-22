@@ -26,11 +26,24 @@ enum UIAutomation {
         // the main queue couldn't drain, so the app's own async work would stall.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
             enableAutomation()
-            var reply = perform(cmd, req)
+            var reply: [String: Any] = [:]
+            if let thrown = catchingExceptions({ reply = perform(cmd, req) }) {
+                reply = ["ok": false, "error": "UIKit threw \(thrown) during \(cmd)"]
+            }
             if let rid { reply["rid"] = rid; Replies.store(rid, reply) }
             connection.send(reply)
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Runs `body`; returns the Objective-C exception it threw, if any (catch.m).
+    private static func catchingExceptions(_ body: @escaping () -> Void) -> String? {
+        final class Body { let run: () -> Void; init(_ run: @escaping () -> Void) { self.run = run } }
+        let box = Unmanaged.passRetained(Body(body))
+        defer { box.release() }
+        guard let thrown = simless_catch({ Unmanaged<Body>.fromOpaque($0!).takeUnretainedValue().run() }, box.toOpaque()) else { return nil }
+        defer { free(thrown) }
+        return String(cString: thrown)
     }
 
     private static func perform(_ cmd: String, _ req: [String: Any]) -> [String: Any] {
@@ -832,10 +845,15 @@ enum Input {
         } while Date() < end
     }
 
+    /// Why a touch didn't start: what UIKit threw, or a missing private method.
+    static func touchFailure() -> String {
+        simless_touch_error().map { "touch injection failed: \(String(cString: $0))" } ?? "touch injection isn't available"
+    }
+
     static func tap(at point: CGPoint, duration: Double) -> String? {
         guard let window = UIAutomation.keyWindow else { return "no window" }
         let target = topWindow(at: point) ?? window
-        guard simless_touch(target, point, 0) else { return "touch injection isn't available" }
+        guard simless_touch(target, point, 0) else { return touchFailure() }
         spin(max(duration, 0.02))
         _ = simless_touch(target, point, 3)
         spin(0.03)
@@ -910,7 +928,7 @@ enum Input {
             t <= fastPart ? t * speed : min(length, length - eased + (t - fastPart) * slow)
         }
         let total = fastPart + eased / slow
-        guard simless_touch(window, a, 0) else { return "touch injection isn't available" }
+        guard simless_touch(window, a, 0) else { return touchFailure() }
         spin(max(press, 0.016))
         func move(_ t: Double) {
             let f = CGFloat(length > 0 ? travelled(min(t, total)) / length : 1)
