@@ -108,7 +108,20 @@ func cmdInit(_ args: Args) throws {
     let sourceDir = fm.fileExists(atPath: "\(root)/\(inProjectDir(appTarget))") ? inProjectDir(appTarget)
         : mainAppFolder(in: projectDir.isEmpty ? root : "\(root)/\(projectDir)").map(inProjectDir)
         ?? (projectDir.isEmpty ? "." : projectDir)
-    let kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
+    // The kit must be compiled by the app target: in a synchronized folder of
+    // the target's (checked for the folder it goes into, since a classic group
+    // can hold synchronized subfolders), or else added to the target by hand.
+    let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
+    let synchronized = PBX.synchronizedFolders(target: appTarget, pbx: pbx).map(inProjectDir)
+    func isSynchronized(_ dir: String) -> Bool { synchronized.contains { dir == $0 || dir.hasPrefix($0 + "/") || $0 == "." } }
+    var kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
+    if args.values["--kit-dir"] == nil, !isSynchronized(kitDir) {
+        // One of the target's synchronized folders, inside its sources when it can be.
+        let inside = synchronized.filter { sourceDir == "." || $0.hasPrefix(sourceDir + "/") }
+        let pick = inside.first { ($0 as NSString).lastPathComponent == "Debug" }
+            ?? (inside.isEmpty ? synchronized : inside).min { ($0.count, $0) < ($1.count, $1) }
+        if let pick { kitDir = "\(pick)/Simless" }
+    }
 
     // Local Swift packages the project references: their views can be hot-reloaded too.
     let packages = Workspace.localPackages(root: root, project: project)
@@ -149,8 +162,7 @@ func cmdInit(_ args: Args) throws {
         }
     }
 
-    let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
-    let synced = pbx.contains("PBXFileSystemSynchronizedRootGroup")
+    let synced = isSynchronized(config.kitDir)
     let hook = args.flags.contains("--no-hook") ? nil : try insertHook(in: "\(root)/\(sourceDir)")
     let configLine = existing != nil ? "kept \(Workspace.configName) (--force rewrites it)"
         : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
@@ -159,7 +171,8 @@ func cmdInit(_ args: Args) throws {
         wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
 
         Next:
-          1. \(synced ? "Both files are in a synchronized folder, so Xcode picks them up." : "Add both files to the \(appTarget) target.")
+          1. \(synced ? "Both files are in a synchronized folder of \(appTarget), so Xcode picks them up."
+                : "\(config.kitDir) isn't in a folder Xcode syncs for \(appTarget): add both files to the \(appTarget) target (in Xcode: File > Add Files, with \(appTarget) checked under Targets)\(synchronized.isEmpty ? "" : ", or move the folder into one of \(synchronized.prefix(5).joined(separator: ", "))"). Until then, `simless up` fails with \"cannot find 'SimlessHost' in scope\".")
           2. \(hook.map { "App hook: \($0)" } ?? """
         In your App's init(), add:
                  #if DEBUG && os(iOS)

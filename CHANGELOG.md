@@ -14,13 +14,15 @@
   - **Packages with C headers and static xcframeworks compile.** Patches get the header paths the app build has, so GoogleSignIn and GoogleMaps imports no longer fail.
 - **Replacing `body` in place was tried and isn't safe.** `@_dynamicReplacement` swaps the code but keeps the old `some View` type, which SwiftUI would read wrong. [findings.md](docs/findings.md#hot-reload) has the test.
 - **Unit tests for simless itself** (`swift test`), starting with hot-reload scoping, and CI now checks a real hot reload on the demo app: a screen that a shared store names and another screen embeds.
-
-## Unreleased
-
 - **Fixtures nobody has to write.** `root` renders the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`. `simless render all` lists them after the registered ones. On a production app, all 34 (27 `#Preview` blocks, 6 preview providers and `root`) compile in 3.2 to 5.6 s while the slot gets ready, so a warm `up` still takes 21 s, and `render all` does the 40 fixtures in 1.9 s. On a freshly generated xcodegen app with no fixture registered, `render all` covers `root` and its 4 previews, a SwiftData `.modelContainer` on the scene and `@Previewable` state included.
   - **They're built from source,** in copies of their files, so a preview's private sample data works, and compile errors leave out only that preview, with the reason in `simless up`'s output. Widget and Live Activity previews are skipped as not views. `"previews": false` turns it off.
   - **They hot-reload.** `reload --render NoteRow.Short` compiles that preview into the patch (0.9 s on the xcodegen app), and other previews that reach the edit are listed as stale, like other fixtures.
   - **A `root` that waits for the network is empty.** The App's real first screen is what renders, so an app that shows nothing until a login check finishes shows nothing here either.
+- **`simless init` and `up` work on a big app with no hand fixes.** On a production app (702 Swift files, 19 remote packages), `up` failed three ways, each needing a manual step. A warm `up` now takes 21 s, and the host starts.
+  - **The kit lands where the target compiles it.** `init` saw synchronized folders in the project and assumed the kit's folder was one, but the target root was a classic group holding a few synchronized subfolders, so the build failed with "cannot find 'SimlessHost' in scope". `init` now resolves the folder each of the target's synchronized groups really is, puts the kit in one of them (a `Debug` folder when there is one), and when there's none it says exactly what to add to the target.
+  - **Read-only binary frameworks.** A binary xcframework in a SwiftPM checkout is read-only and so was the slot's copy, so preparing the slot failed with "cannot open …/TerraiOS.framework/TerraiOS". The slot's clone is made writable. The build's copy is never written.
+  - **Swift libraries only Mac Catalyst has.** A framework built for an old iOS loads `@rpath/libswiftCoreNFC.dylib`, which a Mac Catalyst process only has under `/System/iOSSupport/usr/lib/swift`, where dyld doesn't look for `@rpath` libraries, so the host crashed at launch. The slot's copy of such a binary gets that folder as its last rpath, on every slot preparation.
+- **UI test sources in nested synchronized folders are found**, with the same group walk.
 
 ## 0.6.0 (2026-10-22)
 

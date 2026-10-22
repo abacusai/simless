@@ -23,6 +23,8 @@ An iOS device binary and a Mac Catalyst binary are the same arm64 code against t
 
 - builds the plain iOS device slice (`generic/platform=iOS`), which needs no Mac destination and so works in a VM too, and no project variant.
 - clones the app into the slot and rewrites the platform field of every iOS-tagged Mach-O in it (main executable, debug dylib, frameworks, test bundles) to Mac Catalyst, in place: a few bytes per binary (`MachO.swift`, with `vtool` for old binaries that only have `LC_VERSION_MIN_IPHONEOS`).
+- makes the clone writable (a binary xcframework from a SwiftPM checkout is read-only, and its build product keeps that), never the build itself.
+- adds `/System/iOSSupport/usr/lib/swift` as the last rpath of a binary that loads a Swift library through `@rpath` which only Mac Catalyst has (`libswiftCoreNFC` in a framework built for an old iOS). Every slot preparation applies it again, so `clean` and a cold `up` get it too.
 - signs what changed ad hoc (`codesign -s -`): no identity, no keychain, no profile.
 - starts the executable directly with `posix_spawn`, in a session of its own, with the runtime in `DYLD_INSERT_LIBRARIES`. No xcodebuild install, no LaunchServices, no window server session needed.
 

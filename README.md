@@ -171,7 +171,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
 }
 ```
 
-Then run `simless up`. If your project doesn't use synchronized folders, add the two files to the app target first. If app startup has side effects a background host shouldn't trigger (analytics, sync), guard them with `SimlessHost.isActive`.
+Then run `simless up`. `simless init` puts the kit in a folder Xcode syncs for the app target (Xcode 16's synchronized folders, also when they sit inside classic groups). When the target has none, it says so, and you add the two files to the app target first. If app startup has side effects a background host shouldn't trigger (analytics, sync), guard them with `SimlessHost.isActive`.
 
 Live reload works out of the box: simless puts each patch in the host's own temp folder and the host loads it, in about 0.2 s after the compile. (The `dfi` mode runs the app in the Mac's app sandbox, where simless can't place files. There, `simless agent install` and Full Disk Access for SimlessAgent take hot reload from about 10 s to about 2 s. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).)
 
