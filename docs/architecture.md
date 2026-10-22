@@ -176,6 +176,7 @@ Tests are spread over several hosts (`--jobs`) by their last durations. Each hos
 - **Package modules:** `simless init` records the local Swift packages the project references. Each source file is mapped to its module, and each module's language mode, default isolation and upcoming features are read from `swift package dump-package`. The patch `@testable import`s every module involved and compiles with their settings. A patch mixing modules with different settings can't be one module, so it falls back to a full build.
 - **Fallback:** if a patch can't compile (stored properties, signatures, or a real error) or can't be scoped, reload falls back to a full build. Errors are mapped back to the user's `file:line`.
 - **Which files count as edited:** content hashes against a snapshot taken when the build started. Git checkouts that only touch mtimes don't count.
+- **After a failed build:** the host still runs the last build that worked, so a failed `up` puts back that build's snapshot (with the copies of its files) and leaves its previews' list, and only a build that works replaces them. A reload after a fixed compile error therefore diffs against the code the host runs. A fixture the reload is asked for but can't trace is stale, never covered. Each build records an id of its sources and each patch the id of the sources it compiled, and `--json` and `simless render` say when the host is behind the sources on disk.
 - **Relaunches:** the newest patch is re-applied whenever the host relaunches.
 
 ## Calibration

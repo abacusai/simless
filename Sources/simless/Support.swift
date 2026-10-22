@@ -271,6 +271,8 @@ struct SlotRecord: Codable {
     var worktree: String
     var port: Int
     var builtAt: Double = 0     // reference-date seconds of the last full build
+    var build: String?          // the id of the sources that build was made from (Workspace.sourcesID)
+    var sources: String?        // the id of the sources the host's code reflects: the build's, or the newest patch's
     var patch: Int = 0          // patches applied since that build
     var lastPatch: String?      // newest patch dylib; re-applied whenever the host relaunches
     var covered: [String]?      // fixtures the newest patch renders with the edits

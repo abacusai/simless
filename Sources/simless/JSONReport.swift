@@ -25,9 +25,7 @@ enum JSONReport {
             let mode = after.builtAt != before.builtAt ? "build"
                 : after.patch > before.patch ? "patch"
                 : after.patch == 0 && before.patch > 0 ? "restart" : "none"
-            var out: [String: Any] = ["mode": mode, "edited": files]
-            if mode == "patch" { out["stale"] = after.stale ?? [] }
-            return out
+            return ["mode": mode, "edited": files]
         }
     }
 
@@ -63,8 +61,25 @@ enum JSONReport {
             if let ws, let f = d["file"] as? String { d["file"] = relative(f, ws) }
             return d
         }
-        if let ws, let slot = try? currentSlot(ws), let stats = slot.stats() {
-            out["host"] = ["slot": slot.slotID, "port": slot.port, "patch": slot.patch, "fixtures": stats["fixtures"] ?? []]
+        // Which code the host runs, for a pipeline to check: the full build's
+        // sources, the sources its code reflects (with the newest patch), the
+        // sources on disk, and the fixtures that still render older code.
+        // `current` is true only when the host reflects the sources on disk and
+        // the fixtures rendered aren't stale. A failed build leaves the host on
+        // the last one that worked.
+        if let ws, let slot = try? currentSlot(ws) {
+            let sources = ws.currentSourcesID(), stale = slot.stale ?? []
+            out["build"] = slot.build ?? NSNull()
+            out["hostSources"] = slot.sources ?? slot.build ?? NSNull()
+            out["sources"] = sources
+            out["patch"] = slot.patch
+            out["stale"] = stale
+            // With `--render X`, whether X shows them; else every fixture.
+            let rendered = args.values["--render"].flatMap { $0 == "all" ? nil : [$0] }
+            out["current"] = (slot.sources ?? slot.build) == sources && (rendered.map { Set($0).isDisjoint(with: stale) } ?? stale.isEmpty)
+            if let stats = slot.stats() {
+                out["host"] = ["slot": slot.slotID, "port": slot.port, "patch": slot.patch, "fixtures": stats["fixtures"] ?? []]
+            }
         }
         let data = (try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])) ?? Data("{\"ok\":false}".utf8)
         print(String(decoding: data, as: UTF8.self))
