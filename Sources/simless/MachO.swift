@@ -86,7 +86,8 @@ enum MachO {
                 at += UInt64(size)
             }
         }
-        return (Array(Set(loads)).sorted(), Array(Set(rpaths)))
+        var seen = Set<String>()
+        return (Array(Set(loads)).sorted(), rpaths.filter { seen.insert($0).inserted })   // rpaths in search order
     }
 
     /// Lets a binary find the Swift libraries only Mac Catalyst has (such as
