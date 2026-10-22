@@ -17,14 +17,33 @@ enum UIAutomation {
     static func handles(_ cmd: String) -> Bool { commands.contains(cmd) }
 
     static func handle(_ cmd: String, _ req: [String: Any], _ connection: Connection) {
+        // A request sent again after its connection went (see Replies) gets the
+        // first attempt's answer: a tap or a drag is never done twice.
+        let rid = req["rid"] as? String
+        if let rid, Replies.answer(rid, on: connection) { return }
         // A run loop block, not the main queue: commands spin the run loop while
         // they wait (idle, touches, dismissals), and inside a main-queue block
         // the main queue couldn't drain, so the app's own async work would stall.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
             enableAutomation()
-            connection.send(perform(cmd, req))
+            var reply: [String: Any] = [:]
+            if let thrown = catchingExceptions({ reply = perform(cmd, req) }) {
+                reply = ["ok": false, "error": "UIKit threw \(thrown) during \(cmd)"]
+            }
+            if let rid { reply["rid"] = rid; Replies.store(rid, reply) }
+            connection.send(reply)
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Runs `body`; returns the Objective-C exception it threw, if any (catch.m).
+    private static func catchingExceptions(_ body: @escaping () -> Void) -> String? {
+        final class Body { let run: () -> Void; init(_ run: @escaping () -> Void) { self.run = run } }
+        let box = Unmanaged.passRetained(Body(body))
+        defer { box.release() }
+        guard let thrown = simless_catch({ Unmanaged<Body>.fromOpaque($0!).takeUnretainedValue().run() }, box.toOpaque()) else { return nil }
+        defer { free(thrown) }
+        return String(cString: thrown)
     }
 
     private static func perform(_ cmd: String, _ req: [String: Any]) -> [String: Any] {
@@ -214,6 +233,46 @@ enum UIAutomation {
     }
 
     static var keyWindow: UIWindow? { appWindows.last(where: \.isKeyWindow) ?? appWindows.last }
+}
+
+// MARK: - Replies
+
+/// The answers to the last few hundred requests, by the id the UI test shim
+/// gives each one. A native host's socket can be closed under it (by something
+/// in the app's process while it launches): the shim then sends the request
+/// again on a new connection, and gets the answer the first attempt made, or
+/// waits for it if that one is still running. Exactly once, whatever the socket did.
+enum Replies {
+    private static let lock = NSLock()
+    private static var done: [String: [String: Any]] = [:]
+    private static var order: [String] = []
+    private static var running: Set<String> = []
+
+    /// True when the request was answered here (seen before); false when it's
+    /// new and the caller runs it, then stores its reply.
+    static func answer(_ rid: String, on connection: Connection) -> Bool {
+        lock.lock()
+        if let reply = done[rid] { lock.unlock(); connection.send(reply); return true }
+        guard running.contains(rid) else { running.insert(rid); lock.unlock(); return false }
+        lock.unlock()
+        // The first attempt still runs on the main thread; this is the connection's own thread.
+        let deadline = Date().addingTimeInterval(900)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+            lock.lock(); let reply = done[rid]; lock.unlock()
+            if let reply { connection.send(reply); return true }
+        }
+        connection.send(["ok": false, "error": "request \(rid) didn't finish", "rid": rid])
+        return true
+    }
+
+    static func store(_ rid: String, _ reply: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        running.remove(rid)
+        done[rid] = reply
+        order.append(rid)
+        if order.count > 512 { for old in order.prefix(order.count - 512) { done[old] = nil }; order.removeFirst(order.count - 512) }
+    }
 }
 
 // MARK: - Session (launch set-up)
@@ -786,10 +845,15 @@ enum Input {
         } while Date() < end
     }
 
+    /// Why a touch didn't start: what UIKit threw, or a missing private method.
+    static func touchFailure() -> String {
+        simless_touch_error().map { "touch injection failed: \(String(cString: $0))" } ?? "touch injection isn't available"
+    }
+
     static func tap(at point: CGPoint, duration: Double) -> String? {
         guard let window = UIAutomation.keyWindow else { return "no window" }
         let target = topWindow(at: point) ?? window
-        guard simless_touch(target, point, 0) else { return "touch injection isn't available" }
+        guard simless_touch(target, point, 0) else { return touchFailure() }
         spin(max(duration, 0.02))
         _ = simless_touch(target, point, 3)
         spin(0.03)
@@ -864,7 +928,7 @@ enum Input {
             t <= fastPart ? t * speed : min(length, length - eased + (t - fastPart) * slow)
         }
         let total = fastPart + eased / slow
-        guard simless_touch(window, a, 0) else { return "touch injection isn't available" }
+        guard simless_touch(window, a, 0) else { return touchFailure() }
         spin(max(press, 0.016))
         func move(_ t: Double) {
             let f = CGFloat(length > 0 ? travelled(min(t, total)) / length : 1)
@@ -906,6 +970,8 @@ enum Input {
         if dy > 0, ShareSheet.swipeDown(at: start) || Presentations.dismissSheet(at: start) { return nil }
         // A finger eases off before it lifts, so the glide after a swipe
         // doesn't carry a list more than about a screen.
+        simless_touch_set_swipe(true)
+        defer { simless_touch_set_swipe(false) }
         return drag(from: CGPoint(x: start.x - CGFloat(dx) * 4, y: start.y - CGFloat(dy) * 4), to: end, press: 0,
                     velocity: velocity, hold: 0, release: velocity * 0.4)
     }

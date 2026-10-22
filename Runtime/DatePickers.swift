@@ -131,13 +131,15 @@ enum DatePickers {
         guard let open, let p = Optional(open.picker), p.window != nil else { return nil }
         let anchor = p.convert(p.bounds, to: nil)
         let c = Session.canvas
-        let width = 320.0, height = 216.0
-        let x = min(max(8, anchor.midX - width / 2), c.w - width - 8)
-        var y = anchor.maxY + 8
-        if y + height > c.h - c.bottom { y = max(c.top, anchor.minY - 8 - height) }
-        let w = width / Double(open.wheels.count)
+        // CGFloat throughout: Xcode 26's Swift finds mixed Double and CGFloat arithmetic ambiguous.
+        let width: CGFloat = 320, height: CGFloat = 216
+        let x: CGFloat = min(max(8, anchor.midX - width / 2), CGFloat(c.w) - width - 8)
+        var y: CGFloat = anchor.maxY + 8
+        if y + height > CGFloat(c.h - c.bottom) { y = max(CGFloat(c.top), anchor.minY - 8 - height) }
+        let w: CGFloat = width / CGFloat(open.wheels.count)
+        let wheelY: CGFloat = y + height / 2 - 17
         return (CGRect(x: x, y: y, width: width, height: height),
-                open.wheels.indices.map { CGRect(x: x + Double($0) * w, y: y + height / 2 - 17, width: w, height: 34) })
+                open.wheels.indices.map { CGRect(x: x + CGFloat($0) * w, y: wheelY, width: w, height: 34) })
     }
 
     static func nodes(addRef: (NSObject) -> Int) -> [[String: Any]] {

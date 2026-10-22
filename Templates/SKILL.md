@@ -21,7 +21,7 @@ If it isn't set up, do it yourself:
 2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !SimlessHost.isActive { ... }` (DEBUG only).
 3. Register fixtures (below), then run `simless up`. The first build takes a few minutes; later ones are incremental.
 
-`simless init` needs an Xcode project (not a workspace) with an app-hosted unit-test target. If either is missing, tell the user instead of improvising.
+`simless init` needs an Xcode project (not a workspace). A unit-test target is optional. simless needs no certificate, profile or other setup: if `simless up` asks for one, the project is in the `dfi` mode (`"mode": "dfi"` in `.simless.json`), so tell the user instead of improvising.
 
 ## 2. Fixtures: the screens simless can render
 
@@ -118,7 +118,7 @@ Before you call a UI change done, say what you verified with simless and what st
 
 - **Don't clean up manually.** Hosts exit after 30 idle minutes (`simless down` stops one now; it relaunches on next use). When a worktree is deleted, `simless` removes its host, slot and caches automatically.
 - `simless clean` removes this worktree's build cache. `simless status` lists hosts and whether live reload is on.
-- Live reload uses SimlessAgent, which needs Full Disk Access granted once by the user. Without it, reloads still work in about 10 s. Mention it to the user if `simless status` shows live reload off; don't try to grant it yourself.
+- Live reload needs nothing extra. Only in the `dfi` mode does it use SimlessAgent, which needs Full Disk Access granted once by the user (without it reloads take about 10 s). Mention it if `simless status` shows live reload off, and don't try to grant it yourself.
 
 In your summary, report what you verified with `simless` (which fixtures, devices and modes) and what still needs a simulator.
 

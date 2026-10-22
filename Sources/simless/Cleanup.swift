@@ -29,6 +29,15 @@ enum Cleanup {
             wipeContainer(app: "\(installed)/\(app)", runtime: "\(dir)/SimlessRuntime.dylib")
             _ = try? Shell.run([lsregister, "-u", "\(installed)/\(app)"], useXcode: false)
         }
+        // A native slot's data is its home folder (deleted with the slot) and its
+        // preferences domains, which cfprefsd keeps in ~/Library/Preferences.
+        if exists("\(dir)/Native") {
+            let id = (dir as NSString).lastPathComponent
+            Native.wipePreferences(slotID: id, deleteFiles: true)
+            for app in (try? FileManager.default.contentsOfDirectory(atPath: "\(dir)/Native")) ?? [] where app.hasSuffix(".app") {
+                _ = try? Shell.run([lsregister, "-u", "\(dir)/Native/\(app)"], useXcode: false)
+            }
+        }
         removeCrashReports(slotID: (dir as NSString).lastPathComponent, olderThan: 0)
         try? FileManager.default.removeItem(atPath: dir)
     }
@@ -69,11 +78,33 @@ enum Cleanup {
         }
     }
 
+    /// How long a worktree's .simless.json must stay missing before its slots
+    /// and builds go. A build machine that re-extracts a project's sources on
+    /// every sync (rm -rf, then untar) would otherwise lose them to another
+    /// project's command running inside that window.
+    static let missingGrace: TimeInterval = 600
+
+    /// Whether `worktree` has been gone (no .simless.json) for longer than the grace period.
+    /// The first time it's seen missing is recorded in its build folder.
+    static func goneForGood(_ worktree: String) -> Bool {
+        let marker = "\(Paths.workDir(forWorktree: worktree))/missing-since"
+        if exists("\(worktree)/\(Workspace.configName)") {
+            try? FileManager.default.removeItem(atPath: marker)
+            return false
+        }
+        if !exists(marker) {
+            try? mkdirp((marker as NSString).deletingLastPathComponent)
+            FileManager.default.createFile(atPath: marker, contents: nil)
+            return false
+        }
+        return Date().timeIntervalSinceReferenceDate - mtime(marker) > missingGrace
+    }
+
     /// Cheap enough to run on every invocation.
     static func collectGarbage() {
         _ = try? withLock("state") {
             var state = GlobalState.load()
-            let gone = state.slots.filter { !exists("\($0.worktree)/\(Workspace.configName)") }
+            let gone = state.slots.filter { goneForGood($0.worktree) }
             for slot in gone {
                 Log.step("cleaning up \(slot.slotID): worktree \(slot.worktree) no longer exists")
                 removeSlot(slot)
@@ -105,13 +136,14 @@ enum Cleanup {
             }
             // Crash reports of simless hosts, after a day.
             removeCrashReports(olderThan: 86_400)
+            Native.removeOrphanPreferences(known: Set(state.slots.map(\.slotID)))
             // Build caches of worktrees that no longer exist.
             let work = "\(Paths.cache)/work"
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
                 let owner = try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)
                 // Unmarked and recent: possibly being created right now.
                 let recent = Date().timeIntervalSinceReferenceDate - mtime("\(work)/\(dir)") < 1800
-                if owner.map({ !exists("\($0)/\(Workspace.configName)") }) ?? !recent {
+                if owner.map({ goneForGood($0) }) ?? !recent {
                     try? FileManager.default.removeItem(atPath: "\(work)/\(dir)")
                 }
             }

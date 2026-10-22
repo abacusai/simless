@@ -11,6 +11,7 @@ enum Render {
         var json = false
         var textSize: String?        // Dynamic Type size: xs … xxxl, ax1 … ax5
         var idiom: String?           // "phone": phone idiom on phone canvases
+        var settle: Double?          // ms the screen gets for async work (.task, loads) before it's read
         var checks = Config.Checks()
     }
 
@@ -36,11 +37,12 @@ enum Render {
     }
 
     static func request(fixture: String, dark: Bool, canvas c: Canvas, image: Bool,
-                        textSize: String? = nil, idiom: String? = nil) -> [String: Any] {
+                        textSize: String? = nil, idiom: String? = nil, settle: Double? = nil) -> [String: Any] {
         var r: [String: Any] = ["cmd": "render", "fixture": fixture, "style": dark ? "dark" : "light", "width": c.width,
                                 "height": c.height, "safeTop": c.safeTop, "safeBottom": c.safeBottom, "image": image]
         if let textSize { r["textSize"] = textSize }
         if let idiom, c.width < 600 { r["idiom"] = idiom }
+        if let settle, settle > 0 { r["settleMs"] = settle }
         return r
     }
 
@@ -65,7 +67,7 @@ enum Render {
         let (w, h) = (c.width, c.height)
         let client = try slot.client(timeout: 30)
         let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
-                                        textSize: options.textSize, idiom: options.idiom))
+                                        textSize: options.textSize, idiom: options.idiom, settle: options.settle))
         guard r["ok"] as? Bool == true else {
             let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
             throw SimlessError("\(r["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))

@@ -42,6 +42,8 @@ enum Agent {
 
     /// nil when live reload works, else the reason it doesn't.
     static func liveStatus(probeSlot: SlotRecord?) -> String? {
+        // Native hosts take patches straight from simless: no agent involved.
+        if let slot = probeSlot, Native.isNative(slot) { return nil }
         guard let agent = try? client() else { return "agent not installed or not running (`simless agent install`)" }
         guard let slot = probeSlot, let tmp = slot.stats()?["tmp"] as? String else { return nil }
         // An empty placement probes Full Disk Access without writing anything useful.

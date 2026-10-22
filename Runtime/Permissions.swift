@@ -67,9 +67,7 @@ enum Permissions {
                 later.async { done(denied) }
             }
         }
-        // No completion: nothing happens.
-        noOp("CLLocationManager", "requestWhenInUseAuthorization", classMethod: false)
-        noOp("CLLocationManager", "requestAlwaysAuthorization", classMethod: false)
+        Location.install(done: &done)
         noOp("SKStoreReviewController", "requestReview", classMethod: true)
         noOp("SKStoreReviewController", "requestReviewInScene:", classMethod: true, takesArgument: true)
     }
@@ -110,6 +108,67 @@ enum Permissions {
         } else {
             let block: @convention(block) (AnyObject) -> Void = { _ in }
             method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+    }
+}
+
+/// Location is denied the way an iPhone denies it: once the app asks, the
+/// status is .denied and the delegate hears about it, and asking for a fix
+/// fails with kCLErrorDenied. An app waiting for either no longer waits forever,
+/// and CoreLocation itself is never reached, so macOS never asks the user.
+enum Location {
+    private static let deniedStatus = 2           // CLAuthorizationStatus.denied
+    private static var asked = false
+
+    static func install(done: inout Set<String>) {
+        guard !done.contains("CLLocationManager"), let cls = NSClassFromString("CLLocationManager") else { return }
+        done.insert("CLLocationManager")
+        for name in ["requestWhenInUseAuthorization", "requestAlwaysAuthorization"] {
+            guard let m = class_getInstanceMethod(cls, NSSelectorFromString(name)) else { continue }
+            let block: @convention(block) (NSObject) -> Void = { manager in
+                asked = true
+                DispatchQueue.main.async { tellDelegate(manager, failed: false) }
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        for name in ["startUpdatingLocation", "requestLocation", "startMonitoringSignificantLocationChanges"] {
+            guard let m = class_getInstanceMethod(cls, NSSelectorFromString(name)) else { continue }
+            let block: @convention(block) (NSObject) -> Void = { manager in
+                DispatchQueue.main.async { tellDelegate(manager, failed: true) }
+            }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        // After asking, the status reads as denied (before, as CoreLocation says: not determined).
+        let status = NSSelectorFromString("authorizationStatus")
+        if let m = class_getInstanceMethod(cls, status) {
+            typealias Get = @convention(c) (AnyObject, Selector) -> Int32
+            let original = unsafeBitCast(method_getImplementation(m), to: Get.self)
+            let block: @convention(block) (AnyObject) -> Int32 = { manager in asked ? Int32(deniedStatus) : original(manager, status) }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+        if let m = class_getClassMethod(cls, status) {
+            typealias Get = @convention(c) (AnyObject, Selector) -> Int32
+            let original = unsafeBitCast(method_getImplementation(m), to: Get.self)
+            let block: @convention(block) (AnyObject) -> Int32 = { c in asked ? Int32(deniedStatus) : original(c, status) }
+            method_setImplementation(m, imp_implementationWithBlock(block))
+        }
+    }
+
+    private static func tellDelegate(_ manager: NSObject, failed: Bool) {
+        guard let delegate = manager.value(forKey: "delegate") as? NSObject else { return }
+        if failed {
+            let sel = NSSelectorFromString("locationManager:didFailWithError:")
+            if delegate.responds(to: sel) {
+                delegate.perform(sel, with: manager, with: NSError(domain: "kCLErrorDomain", code: 1))   // kCLErrorDenied
+            }
+            return
+        }
+        let modern = NSSelectorFromString("locationManagerDidChangeAuthorization:")
+        if delegate.responds(to: modern) { delegate.perform(modern, with: manager); return }
+        let legacy = NSSelectorFromString("locationManager:didChangeAuthorizationStatus:")
+        if delegate.responds(to: legacy), let imp = delegate.method(for: legacy) {
+            typealias F = @convention(c) (AnyObject, Selector, AnyObject, Int32) -> Void
+            unsafeBitCast(imp, to: F.self)(delegate, legacy, manager, Int32(deniedStatus))
         }
     }
 }

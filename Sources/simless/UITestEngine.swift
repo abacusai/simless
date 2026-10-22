@@ -335,6 +335,7 @@ enum UITestEngine {
         DispatchQueue.concurrentPerform(iterations: slots.count) { i in
             let slot = slots[i]
             Slots.terminateAll(slot)
+            if Native.isNative(slot) { return Native.wipe(slot) }
             let runtime = "\(slot.dir)/SimlessRuntime.dylib"
             guard let app = try? RuntimeHost.installedApp(slot), !Cleanup.wipeContainer(app: app, runtime: runtime) else { return }
             Log.step("\(slot.slotID)'s app wouldn't launch, installing it again")
@@ -472,7 +473,12 @@ enum UITestEngine {
             // The app's real launch, as XCUITest gives it: no SIMLESS_HEADLESS (apps
             // read it as "render host, skip side effects"); the runtime keeps it hidden.
             for (k, v) in RuntimeHost.baseEnvironment(slot) where k != "SIMLESS_HEADLESS" { env["SIMLESS_HOST_ENV_\(k)"] = v }
-            env["SIMLESS_HOST_ENV_SIMLESS_SANDBOX_TOKENS"] = Sandbox.readToken(ws.root) ?? ""
+            if Native.isNative(slot) {
+                // Started directly, not with `open`: the shim runs the app's executable.
+                env["SIMLESS_UI_EXEC"] = (try? Native.executable(Native.app(slot))) ?? ""
+            } else {
+                env["SIMLESS_HOST_ENV_SIMLESS_SANDBOX_TOKENS"] = Sandbox.readToken(ws.root) ?? ""
+            }
             env["SIMLESS_HOST_ENV_SIMLESS_DEVICE_MODEL"] = canvas.width < 600 ? "iPhone" : "iPad"
 
             let selection = batch.map(\.xctest).joined(separator: ",")

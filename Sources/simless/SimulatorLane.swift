@@ -128,7 +128,8 @@ enum SimulatorBranches {
         guard let first = files.first else { return nil }
         let more = files.count > 1 ? " and \(files.count - 1) more" : ""
         return "note: the app checks targetEnvironment(simulator) in \(first)\(more). simless builds for a device, "
-            + "so that code runs its device branch here. A test that counts on the simulator branch needs a simulator: "
-            + "add it to tests.simulatorOnly in \(Workspace.configName)"
+            + "so that code runs its device branch here. Code that should take the simulator's branch under simless too "
+            + "(a mock store, say) can check `targetEnvironment(simulator) || SIMLESS`. A test that counts on the "
+            + "simulator itself needs one: add it to tests.simulatorOnly in \(Workspace.configName)"
     }
 }

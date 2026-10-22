@@ -22,6 +22,9 @@ enum Audit {
     static let dynamicType: UInt64 = 1 << 16, textClipped: UInt64 = 1 << 17
 
     static func run(types: UInt64) -> [[String: Any]] {
+        // The tree and the pixels the checks read must be of the same moment:
+        // a screen still scrolling or presenting has moved by the time it's drawn.
+        Idle.wait(timeout: 2)
         // Only what VoiceOver reads: elements under another element's
         // automationElements aren't audited, as in Xcode.
         let (all, _) = Snapshotter.take()
@@ -118,8 +121,25 @@ enum TextFit {
         guard let crop = image.cropping(to: r) else { return false }
         let read = OCR.text(crop)
         let trimmed = read.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Truncated text still starts like the label. A read that doesn't is
+        // of something else (the screen moved under the frame): no verdict.
+        guard startsLike(trimmed, text) else { return false }
         return trimmed.hasSuffix("…") || trimmed.hasSuffix("...") || trimmed.hasSuffix("..")
             && !text.trimmingCharacters(in: .whitespaces).hasSuffix("..")
+    }
+}
+
+extension TextFit {
+    /// Whether the first letters Vision read appear early in the label, ignoring
+    /// case, accents (it reads "zelis" for "želiš") and everything but letters.
+    static func startsLike(_ read: String, _ label: String) -> Bool {
+        func letters(_ s: String) -> String {
+            String(s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).unicodeScalars
+                .filter { CharacterSet.letters.contains($0) }.map(Character.init))
+        }
+        let r = letters(read), l = letters(label)
+        guard r.count >= 4 else { return true }   // too little read to tell: keep the old verdict
+        return l.prefix(max(12, r.count / 2 + 6)).contains(r.prefix(6))
     }
 }
 

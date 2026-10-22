@@ -13,7 +13,9 @@ enum Slots {
     /// watch app stay (tests look for them) under ids within the slot's, unless
     /// `embedded` is false.
     static func prepare(_ slot: SlotRecord, ws: Workspace, settings: Workspace.Settings, embedded: Bool = true) throws {
+        if ws.native { return try Native.prepare(slot, ws: ws, settings: settings, embedded: embedded) }
         let t = now()
+        try? FileManager.default.removeItem(atPath: Native.appDir(slot))   // a native build of this slot
         let signing = try Signing.material(team: settings.team)
         let products = "\(slot.dir)/Debug-iphoneos"
         let app = "\(products)/\(settings.wrapperName)"
@@ -161,7 +163,7 @@ enum Slots {
     }
 
     /// App extensions and watch apps (with their own extensions).
-    private static func embeddedBundles(in app: String) -> [String] {
+    static func embeddedBundles(in app: String) -> [String] {
         nestedCode(in: app).filter { $0.hasSuffix(".appex") || $0.hasSuffix(".app") }
     }
 
@@ -173,7 +175,7 @@ enum Slots {
 
     /// Rewrites every id in a nested bundle's Info.plist that is the app's id or
     /// within it (CFBundleIdentifier, WKCompanionAppBundleIdentifier, ...).
-    private static func reidentify(_ infoPlist: String, from old: String, to new: String) throws {
+    static func reidentify(_ infoPlist: String, from old: String, to new: String) throws {
         guard let d = FileManager.default.contents(atPath: infoPlist),
               let plist = try PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any] else { return }
         func map(_ v: Any) -> Any {
@@ -201,6 +203,8 @@ enum Slots {
     /// installer for DfI apps). At most 3 install at once machine-wide: a cold
     /// `simless up` installs the render slot and the test slots side by side.
     static func install(_ slot: SlotRecord, ws: Workspace) throws {
+        // A native slot runs from where it was prepared: nothing to install.
+        if Native.isNative(slot) { return }
         try withToken("install", count: 3) {
             let t = now()
             stop(slot)
@@ -235,6 +239,7 @@ enum Slots {
             extra += ["--simless-locale", locale, "-AppleLanguages", "(\(locale))",
                       "-AppleLocale", locale.replacingOccurrences(of: "-", with: "_")]
         }
+        if Native.isNative(slot) { return try launchNative(slot, idleMinutes: idleMinutes, extra: extra) }
         // Fixtures can read files in the repository (read-only), like tests can.
         if let token = Sandbox.readToken(slot.worktree) { extra += ["--simless-sandbox", token] }
         let t = now()
@@ -297,6 +302,44 @@ enum Slots {
         throw SimlessError("host \(slot.slotID) did not start; see \(slot.dir)/install.log")
     }
 
+    /// The native host: started directly, answering within a second or two. A
+    /// start that doesn't answer is retried with growing patience, like `open`.
+    private static func launchNative(_ slot: SlotRecord, idleMinutes: Int, extra: [String]) throws {
+        let t = now()
+        if slot.stats() == nil { terminateAll(slot) }
+        let args = ["--simless-port", String(slot.port), "--simless-idle", String(idleMinutes * 60)] + extra
+        let deadline = now() + 60
+        let patience: [Double] = [10, 20, 30]
+        var restarts = 0
+        var started = 0.0
+        var pid: pid_t = 0
+        var exits = 0
+        while now() < deadline {
+            let alive = pid > 0 && kill(pid, 0) == 0
+            if !alive, started > 0 {
+                exits += 1
+                // Exiting at every start is a crash in the app's startup, not load.
+                if exits == 3 { break }
+            }
+            if started == 0 || !alive || now() - started > patience[min(restarts, patience.count - 1)] {
+                if started > 0 {
+                    Log.debug(alive ? "host process not serving after \(Int(now() - started))s; restarting it" : "host exited while starting; starting it again")
+                    terminateAll(slot)
+                    restarts += 1
+                }
+                started = now()
+                pid = try Native.launch(slot, env: RuntimeHost.baseEnvironment(slot), args: args, log: "\(slot.dir)/host.log")
+            }
+            if let stats = slot.stats() {
+                Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        throw SimlessError("host \(slot.slotID) did not start\(CrashReport.hostTrap(slot).map { ": \($0)" } ?? ""); log: \(slot.dir)/host.log")
+    }
+
     /// A relaunched host starts from the installed build (plus any bundled warm
     /// patch). If live patches were applied since, load the newest one again.
     private static func reapplyPatch(_ slot: SlotRecord, hostPatch: Int) throws {
@@ -310,6 +353,7 @@ enum Slots {
 
     /// Terminates every instance of the slot's bundle id, escalating to SIGKILL.
     static func terminateAll(_ slot: SlotRecord) {
+        Native.terminate(slot)
         var apps = NSRunningApplication.runningApplications(withBundleIdentifier: slot.slotID)
         guard !apps.isEmpty else { return }
         apps.forEach { $0.forceTerminate() }

@@ -34,6 +34,13 @@ enum Patch {
         } catch {
             Log.info("  live reload failed (\(error)); falling back to warm reload")
         }
+        if mode == .warm, Native.isNative(slot) {
+            // No warm mode natively: start the host again and load the patch into it.
+            Slots.stop(slot)
+            try Slots.launch(slot, idleMinutes: ws.idleMinutes)
+            if let why = try live(dylib: dylib, slot: slot) { throw SimlessError("could not load the patch: \(why)") }
+            mode = .live
+        }
         if mode == .warm { try warm(dylib: dylib, slot: slot, ws: ws, settings: settings) }
         slot.patch += 1
         slot.lastPatch = dylib
@@ -122,8 +129,12 @@ enum Patch {
             throw SimlessError("patch compile failed:\n" + compilerErrors(r.out, originals: originals, lineOffset: modulesInvolved.count))
         }
         let ts = now()
-        let (identity, _) = try Signing.identity(team: settings.team)
-        try Signing.sign(out, identity: identity)
+        if Native.isNative(slot) {
+            try Native.adopt([out])
+        } else {
+            let (identity, _) = try Signing.identity(team: settings.team)
+            try Signing.sign(out, identity: identity)
+        }
         Log.debug("sign \(secs(ts))")
         return out
     }
@@ -194,6 +205,7 @@ enum Patch {
     /// host's own tmp dir, unquarantined, and the host dlopens it in place.
     /// Returns nil on success, or why live reload isn't available.
     static func live(dylib: String, slot: SlotRecord) throws -> String? {
+        if Native.isNative(slot) { return try liveNative(dylib: dylib, slot: slot) }
         guard let agent = try? Agent.client() else { return "agent not running" }
         guard let tmp = slot.stats()?["tmp"] as? String else { return "host not running" }
         let name = (dylib as NSString).lastPathComponent
@@ -203,6 +215,23 @@ enum Patch {
             Log.info("  live reload unavailable: \(why)")
             return why
         }
+        let r = try slot.client().call(["cmd": "load", "file": name])
+        guard r["ok"] as? Bool == true else { throw SimlessError("host failed to load patch: \(r["error"] ?? "?")") }
+        return nil
+    }
+
+    /// Live without the agent: a native host isn't sandboxed, so nothing
+    /// quarantines a file simless puts in its tmp folder.
+    private static func liveNative(dylib: String, slot: SlotRecord) throws -> String? {
+        guard let tmp = slot.stats()?["tmp"] as? String else { return "host not running" }
+        let name = (dylib as NSString).lastPathComponent
+        let placed = "\(tmp)/\(name)"
+        guard placed.hasPrefix(Native.home(slot) + "/") || URL(fileURLWithPath: placed).standardizedFileURL.path.hasPrefix(Native.home(slot) + "/") else {
+            // An app without SimlessRuntime's tmp redirect: never write into the user's shared tmp.
+            return "host tmp \(tmp) is outside the slot"
+        }
+        try? FileManager.default.removeItem(atPath: placed)
+        try FileManager.default.copyItem(atPath: dylib, toPath: placed)
         let r = try slot.client().call(["cmd": "load", "file": name])
         guard r["ok"] as? Bool == true else { throw SimlessError("host failed to load patch: \(r["error"] ?? "?")") }
         return nil

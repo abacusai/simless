@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 3
+    static let kitVersion = 4
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -121,6 +121,7 @@ enum SimlessHost {
         var file: String?
         var textSize: String?      // Dynamic Type: xs … xxxl, ax1 … ax5
         var idiom: String?         // "phone": report the phone idiom (Mac only; see render)
+        var settleMs: Double?      // time for the screen's async work (.task, loads, animations) before it's read
     }
 
     private struct Node: Encodable {
@@ -188,15 +189,32 @@ enum SimlessHost {
             }
         }
 
+        private var waiting = false
+
         private func drain() {
-            while let nl = buffer.firstIndex(of: 0x0A) {
+            while !waiting, let nl = buffer.firstIndex(of: 0x0A) {
                 let line = Data(buffer[buffer.startIndex..<nl])
                 buffer.removeSubrange(buffer.startIndex...nl)
+                // A render that settles answers later; the requests after it wait.
+                if let req = try? JSONDecoder().decode(Request.self, from: line), req.cmd == "render", (req.settleMs ?? 0) > 0 {
+                    waiting = true
+                    SimlessHost.lastRequest = Date()
+                    SimlessHost.renderSettled(req) { [self] response in
+                        send(response, nil)
+                        waiting = false
+                        drain()
+                    }
+                    return
+                }
                 let (response, after) = SimlessHost.handle(line)
-                var out = (try? JSONEncoder().encode(response)) ?? Data("{\"ok\":false}".utf8)
-                out.append(0x0A)
-                conn.send(content: out, completion: .contentProcessed { _ in after?() })
+                send(response, after)
             }
+        }
+
+        private func send(_ response: Response, _ after: (@Sendable () -> Void)?) {
+            var out = (try? JSONEncoder().encode(response)) ?? Data("{\"ok\":false}".utf8)
+            out.append(0x0A)
+            conn.send(content: out, completion: .contentProcessed { _ in after?() })
         }
     }
 
@@ -252,12 +270,54 @@ enum SimlessHost {
         return window
     }
 
+    /// A fixture put on the canvas, before its tree is read.
+    private struct Mounted {
+        let name: String
+        let host: UIHostingController<AnyView>
+        let rect: CGRect
+        let start: CFAbsoluteTime
+    }
+
     private static func render(_ req: Request) -> Response {
+        switch mount(req) {
+        case .failure(let r): return r
+        case .success(let m):
+            // One frame for SwiftUI to commit, then lay out again.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.016))
+            m.host.view.layoutIfNeeded()
+            return finish(m, req)
+        }
+    }
+
+    /// A screen that loads asynchronously (`.task`, a load) gets the time it
+    /// asked for before its tree is read. Its work runs on the main actor, which
+    /// is busy with this request, so the render gives the main queue back in
+    /// frames and answers when the time is up.
+    private static func renderSettled(_ req: Request, _ reply: @escaping (Response) -> Void) {
+        switch mount(req) {
+        case .failure(let r): reply(r)
+        case .success(let m):
+            let until = Date().addingTimeInterval(min((req.settleMs ?? 0) / 1000, 10))
+            func frame() {
+                m.host.view.layoutIfNeeded()
+                if Date() < until {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { MainActor.assumeIsolated { frame() } }
+                } else {
+                    reply(finish(m, req))
+                }
+            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { frame() } }
+        }
+    }
+
+    private enum MountResult { case success(Mounted), failure(Response) }
+
+    private static func mount(_ req: Request) -> MountResult {
         guard let name = req.fixture, let view = registry.make(name) else {
-            return Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names)
+            return .failure(Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names))
         }
         guard let window = renderWindow() else {
-            return Response(ok: false, error: "no window to render into yet (the app's scene hasn't connected)")
+            return .failure(Response(ok: false, error: "no window to render into yet (the app's scene hasn't connected)"))
         }
         let start = CFAbsoluteTimeGetCurrent()
         let rect = CGRect(x: 0, y: 0, width: req.width ?? 402, height: req.height ?? 874)
@@ -285,10 +345,12 @@ enum SimlessHost {
         window.rootViewController = host
         host.view.frame = rect
         host.view.layoutIfNeeded()
-        // One frame for SwiftUI to commit, then lay out again.
-        RunLoop.main.run(until: Date().addingTimeInterval(0.016))
-        host.view.layoutIfNeeded()
+        return .success(Mounted(name: name, host: host, rect: rect, start: start))
+    }
 
+    /// Reads the mounted fixture's tree (and PNG) into the response.
+    private static func finish(_ m: Mounted, _ req: Request) -> Response {
+        let (name, host, rect, start) = (m.name, m.host, m.rect, m.start)
         let nodes = collect(host.view)
         var png: String?
         if req.image == true {

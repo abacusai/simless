@@ -23,6 +23,24 @@ enum RuntimeBuild {
         }
     }
 
+    /// The runtime for native slots: retagged for Mac Catalyst and signed ad hoc.
+    static func nativeDylib() throws -> String {
+        let unsigned = try compiled()
+        let dir = (unsigned as NSString).deletingLastPathComponent
+        let out = "\(dir)/native/SimlessRuntime.dylib"
+        if exists(out) { return out }
+        return try withLock("runtime-build") {
+            if exists(out) { return out }
+            try mkdirp((out as NSString).deletingLastPathComponent)
+            try? FileManager.default.removeItem(atPath: out + ".tmp")
+            try FileManager.default.copyItem(atPath: unsigned, toPath: out + ".tmp")
+            try MachO.retagForCatalyst(out + ".tmp")
+            try Native.signAdHoc([out + ".tmp"])
+            try FileManager.default.moveItem(atPath: out + ".tmp", toPath: out)
+            return out
+        }
+    }
+
     /// Compiles the runtime ahead of time (`simless up` does it next to the
     /// app's build, since it needs nothing from it).
     static func prebuild() { _ = try? compiled() }
@@ -50,7 +68,8 @@ enum RuntimeBuild {
             }
             try Shell.check(["xcrun", "swiftc", "-emit-library", "-O", "-module-name", "SimlessRuntime",
                              "-target", "arm64-apple-ios17.0", "-sdk", sdk, "-swift-version", "5",
-                             "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup", "-framework", "IOKit", "-o", out + ".tmp"]
+                             "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup", "-framework", "IOKit", "-framework", "Security",
+                             "-o", out + ".tmp"]
                             + sources.filter { $0.hasSuffix(".swift") } + objects, what: "build SimlessRuntime")
             try FileManager.default.moveItem(atPath: out + ".tmp", toPath: out)
             Log.step("built SimlessRuntime in \(secs(t))")

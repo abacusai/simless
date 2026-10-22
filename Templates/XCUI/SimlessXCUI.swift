@@ -64,14 +64,35 @@ final class SimlessUIHost: @unchecked Sendable {
         guard env["SIMLESS_UI_TRACE"] != nil else { return send(request) }
         let start = Date()
         let r = send(request)
-        FileHandle.standardError.write(Data("simless-trace \(request["cmd"] ?? "") \(Int(Date().timeIntervalSince(start) * 1000)) \(r?["busy"] ?? "")\(r?["how"] ?? "")\n".utf8))
+        FileHandle.standardError.write(Data("simless-trace \(request["cmd"] ?? "") \(Int(Date().timeIntervalSince(start) * 1000)) \(r == nil ? "NOREPLY \(lastFailure)" : "")\(r?["busy"] ?? "")\(r?["how"] ?? "")\((r?["error"] as? String).map { " error: \($0)" } ?? "")\n".utf8))
         return r
     }
 
+    /// Why the last request got no answer (for SIMLESS_UI_TRACE).
+    private var lastFailure = ""
+    private var requests = 0
+    /// The app answered since it was launched: a refused connection now means its
+    /// socket was closed under it, and it listens again in a moment.
+    private var answered = false
+
+    /// Every request has an id. If its connection drops before the answer, it's
+    /// sent again with the same id, and SimlessRuntime answers it once (a tap
+    /// is never done twice); answers to other ids are left behind.
     private func send(_ request: [String: Any]) -> [String: Any]? {
-        for _ in 0..<2 {
-            guard connect(), var data = try? JSONSerialization.data(withJSONObject: request) else { return nil }
-            data.append(0x0A)
+        requests += 1
+        let rid = "\(getpid())-\(requests)"
+        var request = request
+        request["rid"] = rid
+        guard var data = try? JSONSerialization.data(withJSONObject: request) else { return nil }
+        data.append(0x0A)
+        for _ in 0..<4 {
+            if !connect() {
+                lastFailure = "connect errno \(errno)"
+                guard answered else { return nil }
+                let deadline = Date().addingTimeInterval(2)
+                while !connect() && Date() < deadline && isRunning { Thread.sleep(forTimeInterval: 0.05) }
+                guard fd >= 0 else { return nil }
+            }
             let wrote = data.withUnsafeBytes { raw -> Bool in
                 var off = 0
                 while off < raw.count {
@@ -81,16 +102,23 @@ final class SimlessUIHost: @unchecked Sendable {
                 }
                 return true
             }
-            if !wrote { disconnect(); continue }
+            if !wrote { lastFailure = "write errno \(errno)"; disconnect(); continue }
             var buf = [UInt8](repeating: 0, count: 1 << 16)
-            while true {
+            reading: while true {
                 if let nl = pending.firstIndex(of: 0x0A) {
                     let line = pending[pending.startIndex..<nl]
                     pending.removeSubrange(pending.startIndex...nl)
-                    return try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+                    guard let reply = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+                    if let id = reply["rid"] as? String, id != rid { continue }
+                    answered = true
+                    return reply
                 }
                 let n = read(fd, &buf, buf.count)
-                if n <= 0 { disconnect(); return nil }
+                if n <= 0 {
+                    lastFailure = n == 0 ? "closed by the host" : "read errno \(errno)"
+                    disconnect()
+                    break reading
+                }
                 pending.append(contentsOf: buf[0..<n])
             }
         }
@@ -99,15 +127,26 @@ final class SimlessUIHost: @unchecked Sendable {
 
     // MARK: App lifecycle
 
-    var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: slotID).isEmpty }
+    /// The app's executable when simless runs it directly (its native mode)
+    /// instead of opening the installed app.
+    var executable: String { env["SIMLESS_UI_EXEC"] ?? "" }
+    private var child: Process?
+
+    var isRunning: Bool {
+        (child?.isRunning ?? false) || !NSRunningApplication.runningApplications(withBundleIdentifier: slotID).isEmpty
+    }
 
     func terminate() {
         if isRunning { _ = call(["cmd": "ui.flush"]) }
         disconnect()
+        answered = false
+        child?.terminate()
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: slotID) { app.forceTerminate() }
         let deadline = Date().addingTimeInterval(5)
         while isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if let c = child, c.isRunning { kill(c.processIdentifier, SIGKILL) }
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: slotID) { kill(app.processIdentifier, SIGKILL) }
+        child = nil
     }
 
     /// Launches the app headless with these arguments and environment, waits
@@ -131,7 +170,30 @@ final class SimlessUIHost: @unchecked Sendable {
         for (k, v) in launchEnv.sorted(by: { $0.key < $1.key }) { cmd += ["--env", "\(k)=\(v)"] }
         cmd.append(appPath)
         if !arguments.isEmpty { cmd += ["--args"] + arguments }
+        func exec() -> String? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: executable)
+            p.arguments = arguments
+            // A login-like environment, as `open` gives an app, plus the launch's.
+            var base: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+            for key in ["USER", "LOGNAME", "SHELL", "LANG", "SIMLESS_PERMISSIONS", "SIMLESS_DYNAMIC_TYPE"] { base[key] = env[key] }
+            p.environment = base.merging(launchEnv) { $1 }
+            p.currentDirectoryURL = URL(fileURLWithPath: "/")
+            p.standardInput = FileHandle.nullDevice
+            if let log = env["SIMLESS_UI_LOG"] {
+                // Appended: a test that relaunches the app keeps the earlier launches' output.
+                if !FileManager.default.fileExists(atPath: log) { FileManager.default.createFile(atPath: log, contents: nil) }
+                if let h = FileHandle(forWritingAtPath: log) { h.seekToEndOfFile(); p.standardOutput = h; p.standardError = h }
+            } else {
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+            }
+            do { try p.run() } catch { return "\(error)" }
+            child = p
+            return nil
+        }
         func open() -> String? {
+            if !executable.isEmpty { return exec() }
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             p.arguments = cmd
@@ -212,8 +274,9 @@ struct Node {
         value = d["value"]
         title = d["title"] as? String ?? ""
         placeholder = d["placeholder"] as? String ?? ""
-        let f = d["frame"] as? [Double] ?? [0, 0, 0, 0]
-        frame = CGRect(x: f[0], y: f[1], width: f[2], height: f[3])
+        // Numbers however they came (JSON gives NSNumbers, a literal Ints or Doubles).
+        let f = (d["frame"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue } ?? []
+        frame = f.count == 4 ? CGRect(x: f[0], y: f[1], width: f[2], height: f[3]) : .zero
         enabled = d["enabled"] as? Bool ?? true
         selected = d["selected"] as? Bool ?? false
         focused = d["focused"] as? Bool ?? false
@@ -830,7 +893,10 @@ final class XCUIApplication: XCUIElement {
     override func resolve() -> Node? {
         // The application itself: a node standing for the whole window.
         let c = host.canvas
-        return Node(-1, ["type": Int(ElementType.application.rawValue), "frame": [0, 0, c.first ?? 402, c.count > 1 ? c[1] : 874],
+        // [Double] spelled out: in an Any, a literal mixing 0 and Doubles can be an
+        // [Any] of Int and Double, which `as? [Double]` rejects.
+        let frame: [Double] = [0, 0, c.first ?? 402, c.count > 1 ? c[1] : 874]
+        return Node(-1, ["type": Int(ElementType.application.rawValue), "frame": frame,
                          "label": "", "hittable": true])
     }
 
@@ -943,8 +1009,8 @@ final class NodeQuery: XCUIElementQuery {
 final class StatusBarQuery: XCUIElementQuery {
     override func evaluate(in tree: [Node]) -> [Node] {
         let c = SimlessUIHost.shared.canvas
-        return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue),
-                          "frame": [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62], "hittable": true])]
+        let frame: [Double] = [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62]
+        return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue), "frame": frame, "hittable": true])]
     }
 }
 
