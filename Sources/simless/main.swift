@@ -568,6 +568,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             if slot.stale?.contains(fixture) == true, !options.json {
                 text += "\n  note: stale: this screen reaches code edited since the last full build that the newest patch doesn't cover; `simless reload --render \(fixture)` patches it"
             }
+            if !options.json, let blocked = RuntimeHost.newlyBlocked(slot) { text += "\n  " + blocked }
             print(text)
             total += issues
             count += 1

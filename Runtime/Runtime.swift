@@ -52,6 +52,8 @@ public func simlessRuntimeStart() {
     // A test run starts with an empty tmp, so what tests leave there doesn't pile up.
     if env["SIMLESS_CLEAN_TMP"] == "1", Housekeeping.isAppData(NSTemporaryDirectory()) { Housekeeping.empty(NSTemporaryDirectory()) }
     raiseOpenFileLimit()
+    // Render hosts (and test hosts when the project asks): no network, before the app's startup makes calls.
+    if let network = env["SIMLESS_NETWORK"] { NetworkGuard.install(network) }
     // No macOS permission or review dialogs from a host (SIMLESS_PERMISSIONS=ask lets them through).
     if env["SIMLESS_PERMISSIONS"] != "ask" { Permissions.install() }
     consumeSandboxTokens(env["SIMLESS_SANDBOX_TOKENS"])

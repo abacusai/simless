@@ -171,7 +171,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
 }
 ```
 
-Then run `simless up`. `simless init` puts the kit in a folder Xcode syncs for the app target (Xcode 16's synchronized folders, also when they sit inside classic groups). When the target has none, it says so, and you add the two files to the app target first. If app startup has side effects a background host shouldn't trigger (analytics, sync), guard them with `SimlessHost.isActive`.
+Then run `simless up`. `simless init` puts the kit in a folder Xcode syncs for the app target (Xcode 16's synchronized folders, also when they sit inside classic groups). When the target has none, it says so, and you add the two files to the app target first. Render hosts get no network: every request the app makes through `URLSession` fails as if the Mac were offline, and the render lists what was blocked (see `network` under [Options](#options-in-simlessjson) to allow or stub hosts). If app startup has other side effects a background host shouldn't trigger (an SDK starting up, writing to a shared service), guard them with `SimlessHost.isActive`.
 
 Live reload works out of the box: simless puts each patch in the host's own temp folder and the host loads it, in about 0.2 s after the compile. (The `dfi` mode runs the app in the Mac's app sandbox, where simless can't place files. There, `simless agent install` and Full Disk Access for SimlessAgent take hot reload from about 10 s to about 2 s. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).)
 
@@ -337,7 +337,8 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
   "embeddedBundles": true,
   "mode": "native",
   "settle": 0,
-  "isolate": false
+  "isolate": false,
+  "network": { "allow": ["cdn.example.com"], "stub": { "https://api.example.com/config*": "Fixtures/config.json" } }
 }
 ```
 
@@ -360,6 +361,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
 - `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default.
 - `hostIdleMinutes`, `standbyIdleMinutes` and `diskLimitGB`: see [Many agents, one Mac](#many-agents-one-mac). The environment variables win, for a machine's own policy.
+- `network`: render hosts get no network by default. A request through `URLSession` (any configuration) or `NSURLConnection` fails with `URLError.notConnectedToInternet`, except to loopback, and each render after new ones says `network: blocked 6 requests: api.example.com (/v1/user, /v1/events); …` (once per request, per host). `allow` lists hosts or URLs that may go through, as globs (`"api.example.com"`, `"*.example.com"`, `"https://example.com/v1/*"`). `stub` serves a file (relative to the repository) for matching URLs, with status 200. `"block": false`, or `SIMLESS_NETWORK=allow` for one command, turns it off. Unit and UI test hosts keep the network, since tests can depend on it; `"tests": true` blocks it there too. WKWebView content and code that opens its own sockets (Network.framework, gRPC) aren't covered.
 - `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.
 
 </details>
@@ -483,7 +485,7 @@ Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pic
 ### Other limits
 
 - **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an iOS app target.
-- **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
+- **Side effects:** the host runs your app's real startup in the background. Its `URLSession` requests are blocked (see `network` in the options), but other side effects aren't: guard SDKs that start up or write somewhere with `SimlessHost.isActive`.
 - **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, touch injection, hiding the app, suppressing its windows, and in the dfi mode sandbox extensions for reading the repository). It also relies on macOS running an iOS device binary that's tagged Mac Catalyst. An OS update could break them, and they never ship in release builds.
 
 ## How it works

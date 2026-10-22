@@ -90,6 +90,9 @@ jobs:
           # Fixtures nobody wrote: the App's root view and a #Preview block.
           simless render all | tee all.txt
           grep -q "^root · " all.txt && grep -q "^LoginView.Error · " all.txt && rm all.txt
+          # The app fetches its config at startup: a render host blocks it and says so.
+          simless render Welcome | tee welcome.txt
+          grep -q "network: blocked 1 request: example.com (/simless-demo/config.json)" welcome.txt && rm welcome.txt
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
           simless test all

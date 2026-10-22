@@ -79,6 +79,8 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 - **Serves newline-delimited JSON on `127.0.0.1:<port>`**: `stats`, `render`, `load`, `stop`.
 - **Exits after 30 idle minutes.**
 
+SimlessRuntime, which every host loads before the app's own code, also takes the network away from render hosts (`Runtime/Network.swift`): a `URLProtocol` registered globally and put first in every new default and ephemeral `URLSessionConfiguration` (sessions with their own configuration only use the protocols it lists) fails each http(s) and ws(s) request with `notConnectedToInternet`, except loopback and what `.simless.json` allows or stubs. Each blocked request is a line in the host's log, which `simless render` sums up per host, so it works in the dfi mode's sandbox too. Test hosts keep the network unless `network.tests` is set.
+
 `render` hosts the fixture in a `UIHostingController`:
 - the canvas is sized to the requested device, in light or dark mode.
 - phone canvases get compact width and, on the Mac, the device's safe-area insets. iPad canvases get regular width. The traits the view actually saw are returned with every render. The idiom stays `.pad` on the Mac unless the render asks for `.phone` (`--idiom phone`), because SwiftUI's `Stepper` crashes under it. When a render takes the host down, the CLI reads the macOS crash report for the slot (`~/Library/Logs/DiagnosticReports`), reports the exception and first frames in the app or SwiftUI, relaunches the host and carries on. Under `.phone` it first retries the screen with `.pad`. `UIDevice.current.userInterfaceIdiom` can't be overridden at all.
@@ -214,5 +216,5 @@ See [How far to trust results](../README.md#how-far-to-trust-results) for what a
 - **Not covered:** system UI that UI tests don't emulate (HealthKit and StoreKit sheets, photo and file pickers, the Home Screen), features that need a permission (it's denied), the watch app, and pixel-exact rendering.
 - **The Mac's Swift runtime:** tests run against the Mac's system libraries, not the simulator's. Plain CPU work runs at the simulator's speed, but unoptimized generic code can be slower.
 - **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
-- **Side effects:** the host runs the app's real startup, so guard side effects with `SimlessHost.isActive`.
+- **Side effects:** the host runs the app's real startup. Render hosts get no network through URL Loading, but WKWebView, raw sockets and other side effects need a `SimlessHost.isActive` guard.
 - **Private APIs:** the hosts use private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`, CoreText's text-style tables, UIKit's touch and gesture-container internals) that an OS update could change.
