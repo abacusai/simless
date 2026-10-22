@@ -14,7 +14,9 @@ struct Config: Codable {
     var sourceDirs: [String]      // scanned for edited files on `simless reload`
     var device: String = "iphone" // default canvas: iphone | ipad
     var buildConcurrency: Int?    // max simultaneous full builds across all agents
-    var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30)
+    var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30; SIMLESS_HOST_IDLE_MINUTES wins)
+    var standbyIdleMinutes: Int?  // a standby test host exits after this long unused (default 10; SIMLESS_STANDBY_IDLE_MINUTES wins)
+    var diskLimitGB: Double?      // everything simless keeps on this Mac (default 25; SIMLESS_DISK_LIMIT_GB wins)
     var packages: [String]?       // local Swift packages whose views hot reload can patch (relative to root)
     var team: String?             // signing team when the project sets no DEVELOPMENT_TEAM (e.g. a shared sample)
     var idiom: String?            // "phone": phone canvases also get the phone idiom (default: the Mac's iPad idiom)
@@ -131,7 +133,10 @@ struct Workspace {
     }
 
     var work: String { Paths.workDir(forWorktree: root) }
-    var idleMinutes: Int { config.hostIdleMinutes ?? 30 }
+    var idleMinutes: Int { ProcessInfo.processInfo.environment["SIMLESS_HOST_IDLE_MINUTES"].flatMap(Int.init) ?? config.hostIdleMinutes ?? 30 }
+    var standbyIdleMinutes: Int {
+        ProcessInfo.processInfo.environment["SIMLESS_STANDBY_IDLE_MINUTES"].flatMap(Int.init) ?? config.standbyIdleMinutes ?? min(idleMinutes, 10)
+    }
     var derivedData: String { "\(work)/DerivedData" }
     var products: String { "\(derivedData)/Build/Products" }
     var productsIphoneos: String { "\(products)/Debug-iphoneos" }
@@ -333,8 +338,9 @@ struct Workspace {
             // As the build has them: patches must see the same `#if`s.
             conditions: Array(Set((bs["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "DEBUG").split(separator: " ").map(String.init) + [Self.condition])).sorted(),
             bundleID: bs["PRODUCT_BUNDLE_IDENTIFIER"] ?? "",
-            // The native mode signs ad hoc: a team is only recorded when there is one.
-            team: native ? ((try? teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "")) ?? "")
+            // The native mode signs ad hoc: a team is only recorded when one is set,
+            // never looked for in the keychain (that took 8.5 s of every `up`).
+            team: native ? explicitTeam(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "") ?? ""
                 : try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
             wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app")
         guard !s.bundleID.isEmpty else {
@@ -347,10 +353,14 @@ struct Workspace {
     /// else the team of the only Apple Development identity in the keychain.
     /// The explicit choices come first: a build machine signs with its own team
     /// whatever team the project names.
-    private func teamForSigning(fromBuildSettings team: String) throws -> String {
+    private func explicitTeam(fromBuildSettings team: String) -> String? {
         if let t = ProcessInfo.processInfo.environment["SIMLESS_TEAM"], !t.isEmpty { return t }
         if let t = config.team, !t.isEmpty { return t }
-        if !team.isEmpty { return team }
+        return team.isEmpty ? nil : team
+    }
+
+    private func teamForSigning(fromBuildSettings team: String) throws -> String {
+        if let t = explicitTeam(fromBuildSettings: team) { return t }
         var teams = try Signing.developmentTeams()
         // Several teams: only one may have the wildcard profile simless signs with.
         let usable = teams.filter { (try? Signing.wildcardProfile(team: $0)) != nil }
