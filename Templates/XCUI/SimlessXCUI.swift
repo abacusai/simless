@@ -181,7 +181,8 @@ final class SimlessUIHost: @unchecked Sendable {
             p.currentDirectoryURL = URL(fileURLWithPath: "/")
             p.standardInput = FileHandle.nullDevice
             if let log = env["SIMLESS_UI_LOG"] {
-                FileManager.default.createFile(atPath: log, contents: nil)
+                // Appended: a test that relaunches the app keeps the earlier launches' output.
+                if !FileManager.default.fileExists(atPath: log) { FileManager.default.createFile(atPath: log, contents: nil) }
                 if let h = FileHandle(forWritingAtPath: log) { h.seekToEndOfFile(); p.standardOutput = h; p.standardError = h }
             } else {
                 p.standardOutput = FileHandle.nullDevice
@@ -273,8 +274,9 @@ struct Node {
         value = d["value"]
         title = d["title"] as? String ?? ""
         placeholder = d["placeholder"] as? String ?? ""
-        let f = d["frame"] as? [Double] ?? [0, 0, 0, 0]
-        frame = CGRect(x: f[0], y: f[1], width: f[2], height: f[3])
+        // Numbers however they came (JSON gives NSNumbers, a literal Ints or Doubles).
+        let f = (d["frame"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue } ?? []
+        frame = f.count == 4 ? CGRect(x: f[0], y: f[1], width: f[2], height: f[3]) : .zero
         enabled = d["enabled"] as? Bool ?? true
         selected = d["selected"] as? Bool ?? false
         focused = d["focused"] as? Bool ?? false
@@ -891,7 +893,10 @@ final class XCUIApplication: XCUIElement {
     override func resolve() -> Node? {
         // The application itself: a node standing for the whole window.
         let c = host.canvas
-        return Node(-1, ["type": Int(ElementType.application.rawValue), "frame": [0, 0, c.first ?? 402, c.count > 1 ? c[1] : 874],
+        // [Double] spelled out: in an Any, a literal mixing 0 and Doubles can be an
+        // [Any] of Int and Double, which `as? [Double]` rejects.
+        let frame: [Double] = [0, 0, c.first ?? 402, c.count > 1 ? c[1] : 874]
+        return Node(-1, ["type": Int(ElementType.application.rawValue), "frame": frame,
                          "label": "", "hittable": true])
     }
 
@@ -1004,8 +1009,8 @@ final class NodeQuery: XCUIElementQuery {
 final class StatusBarQuery: XCUIElementQuery {
     override func evaluate(in tree: [Node]) -> [Node] {
         let c = SimlessUIHost.shared.canvas
-        return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue),
-                          "frame": [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62], "hittable": true])]
+        let frame: [Double] = [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62]
+        return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue), "frame": frame, "hittable": true])]
     }
 }
 
