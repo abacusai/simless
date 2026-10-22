@@ -37,3 +37,7 @@ struct LoginView: View {
         .padding(24)
     }
 }
+
+#Preview("Error") {
+    LoginView(showError: true)
+}

@@ -16,7 +16,9 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
         [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
         --matrix: light+dark × iphone, iphone-small, ipad
   simless reload [files...]        hot-reload edited view files (default: all edited since `simless up`)
-        [--render <fixture|all>] [--no-fallback]
+        [--render <fixture|all>] [--no-fallback] [--dry-run]
+        with --render X, only X (and the screens the last patch covered) get the edit;
+        other screens that reach it are listed as stale until the next full build
   simless test [Target[/Class[/method]]...|all]   unit tests on the Mac, no simulator
         local package test targets too; all: every unit test target
         [--skip Target[/Class[/method]]]... [--timeout <seconds per test, default 600>]
@@ -400,6 +402,8 @@ func cmdUp(_ args: Args) throws {
     let packageBuild = DispatchGroup()
     defer { packageBuild.wait() }
     DispatchQueue.global().async(group: packageBuild) { RuntimeBuild.prebuild() }
+    // Previews compile against this build: the last build's must not load meanwhile.
+    try? FileManager.default.removeItem(atPath: Previews.dir(ws))
     do { try ws.build() } catch {
         // A failed build must not hide edits from the next `simless reload`.
         if let previousSnapshot { try? previousSnapshot.write(to: URL(fileURLWithPath: ws.snapshotPath)) }
@@ -429,6 +433,8 @@ func cmdUp(_ args: Args) throws {
     slot.builtAt = buildStart
     slot.patch = 0
     slot.lastPatch = nil
+    slot.covered = nil
+    slot.stale = nil
     try GlobalState.update(slot)
     // The test hosts get ready while the render host installs and starts.
     let testsReady = DispatchGroup()
@@ -439,6 +445,14 @@ func cmdUp(_ args: Args) throws {
         }
     }
     defer { testsReady.wait() }
+    // Fixtures from #Preview blocks and the App, compiled while the slot gets ready.
+    let previewsBuilt = DispatchGroup()
+    var previewsError: Error?
+    if ws.config.previews != false {
+        DispatchQueue.global().async(group: previewsBuilt) {
+            do { try Previews.build(ws: ws, slot: slot, settings: settings) } catch { previewsError = error }
+        }
+    }
     let embedded = ws.config.embeddedBundles ?? true
     try Slots.prepare(slot, ws: ws, settings: settings, embedded: embedded)
     do {
@@ -450,6 +464,9 @@ func cmdUp(_ args: Args) throws {
         try Slots.install(slot, ws: ws)
     }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
+    previewsBuilt.wait()
+    if let previewsError { Log.info("note: fixtures from #Preview blocks weren't built: \(previewsError)") }
+    else { Previews.load(slot) }
     let stats = slot.stats() ?? [:]
     let fixtures = stats["fixtures"] as? [String] ?? []
     if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
@@ -457,6 +474,7 @@ func cmdUp(_ args: Args) throws {
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
+    if let previews = Previews.summary(ws) { print(previews) }
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")\(Native.isNative(slot) ? " (native: unsigned, no agent needed)" : "")")
     if let note = skillNote() { print(note) }
     testsReady.wait()
@@ -512,6 +530,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
             options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
             options.checks = ws.config.checks ?? .init()
+            options.patch = slot.patch
             if var png = args.values["--png"] {
                 while png.count > 1 && png.hasSuffix("/") { png.removeLast() }
                 let isDir = fixtures.count > 1 || variants.count > 1 || args.values["--png"]!.hasSuffix("/")
@@ -546,6 +565,9 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
                 count += 1
                 continue
             }
+            if slot.stale?.contains(fixture) == true, !options.json {
+                text += "\n  note: stale: this screen reaches code edited since the last full build that the newest patch doesn't cover; `simless reload --render \(fixture)` patches it"
+            }
             print(text)
             total += issues
             count += 1
@@ -559,6 +581,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
 
 func cmdReload(_ args: Args) throws {
     let ws = try Workspace.load()
+    if args.flags.contains("--dry-run") { return try reloadDryRun(ws, args) }
     var slot = try runningSlot(ws)
     let t = now()
     if args.positional.isEmpty && !exists(ws.snapshotPath) {
@@ -574,6 +597,8 @@ func cmdReload(_ args: Args) throws {
         Slots.stop(slot)
         slot.patch = 0
         slot.lastPatch = nil
+        slot.covered = nil
+        slot.stale = nil
         try GlobalState.update(slot)
         try Slots.launch(slot, idleMinutes: ws.idleMinutes)
         print("edits since the last `simless up` were undone; the host shows that build again")
@@ -584,14 +609,21 @@ func cmdReload(_ args: Args) throws {
         try cmdUp(args)
         slot = try currentSlot(ws)
     } else {
+        // `--render X` only needs the views between X and the edit.
+        let target = args.values["--render"]
+        let fixtures = target.flatMap { $0 == "all" ? nil : [$0] }
         do {
-            let r = try Patch.apply(ws: ws, slot: &slot, files: files)
+            let r = try Patch.apply(ws: ws, slot: &slot, files: files, fixtures: fixtures)
             let names = r.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
             print(String(format: "reloaded (%@) in %.1fs: compile %.1fs + apply %.1fs; files edited since `simless up`: %@",
                          r.mode.rawValue, now() - t, r.compile, r.apply, names))
             if !r.extra.isEmpty {
                 print("  also patched (they embed an edited view on the way to a fixture): "
                       + r.extra.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+            }
+            if !r.stale.isEmpty {
+                print("  stale until the next full build (they reach the edit through views this patch left out): "
+                      + r.stale.joined(separator: ", "))
             }
         } catch let error as SimlessError where error.description.hasPrefix("patch compile failed")
                     || error.description.hasPrefix("patch can't cover") {
@@ -605,6 +637,22 @@ func cmdReload(_ args: Args) throws {
         }
     }
     if let target = args.values["--render"] { try render(slot: slot, target: target, args: args, ws: ws) }
+}
+
+/// What `simless reload` would patch, without compiling or touching the host.
+func reloadDryRun(_ ws: Workspace, _ args: Args) throws {
+    let files = args.positional.isEmpty
+        ? ws.changedSources()
+        : args.positional.map { $0.hasPrefix("/") ? $0 : "\(FileManager.default.currentDirectoryPath)/\($0)" }
+    if files.isEmpty { print("nothing edited since the last `simless up`"); return }
+    let fixtures = args.values["--render"].flatMap { $0 == "all" ? nil : [$0] }
+    let slot = try? currentSlot(ws)
+    let t = now()
+    let s = try slot.map { try Patch.scope(ws: ws, slot: $0, files: files, fixtures: fixtures) }
+        ?? PatchScope.files(ws: ws, edited: files, fixtures: fixtures)
+    print("would patch \(s.all.count) file(s) (scoped in \(secs(t))): " + s.all.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+    print("  covers: \(s.covered.isEmpty ? "none" : s.covered.joined(separator: ", "))")
+    if !s.stale.isEmpty { print("  stale until the next full build: \(s.stale.joined(separator: ", "))") }
 }
 
 /// `simless status --json`, for a daemon that watches a build machine.

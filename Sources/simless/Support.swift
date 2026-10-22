@@ -273,6 +273,8 @@ struct SlotRecord: Codable {
     var builtAt: Double = 0     // reference-date seconds of the last full build
     var patch: Int = 0          // patches applied since that build
     var lastPatch: String?      // newest patch dylib; re-applied whenever the host relaunches
+    var covered: [String]?      // fixtures the newest patch renders with the edits
+    var stale: [String]?        // fixtures that reach an edit the newest patch doesn't cover
     var kind: String?           // nil: the render host. "test": unit tests. "ui1"...: UI test app hosts
     var slotID: String { "\(bundleBase).simless\(n)\(kind.map { "-" + $0 } ?? "")" }
     var dir: String { "\(Paths.slots)/\(slotID)" }
