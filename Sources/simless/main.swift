@@ -446,6 +446,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
                 count += 1
                 continue
             }
+            if !options.json, let blocked = RuntimeHost.newlyBlocked(slot) { text += "\n  " + blocked }
             print(text)
             total += issues
             count += 1

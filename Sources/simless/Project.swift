@@ -25,6 +25,14 @@ struct Config: Codable {
     var mode: String?             // "native" (default): hosts run unsigned; "dfi": signed Designed-for-iPad installs
     var settle: Double?           // default --settle: ms each render gives the screen's async work (default 0)
     var isolate: Bool?            // native hosts get a sandbox of their own: write only their slot, read only their worktree
+    var network: Network?
+
+    struct Network: Codable {
+        var block: Bool?              // render hosts get no network (default true)
+        var allow: [String]?          // hosts or URLs (globs) render hosts may reach
+        var stub: [String: String]?   // URL glob -> file (relative to the repo) served instead
+        var tests: Bool?              // block in unit and UI test hosts too (default false)
+    }
 
     struct Checks: Codable {
         var minTapTarget: Double?     // points (default 44)

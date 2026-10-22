@@ -9,6 +9,7 @@ struct SimlessDemoApp: App {
         #if DEBUG && os(iOS)
         SimlessHost.startIfRequested()
         #endif
+        RemoteConfig.fetch()
     }
 
     var body: some Scene {
