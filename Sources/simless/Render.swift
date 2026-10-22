@@ -12,6 +12,7 @@ enum Render {
         var textSize: String?        // Dynamic Type size: xs … xxxl, ax1 … ax5
         var idiom: String?           // "phone": phone idiom on phone canvases
         var settle: Double?          // ms the screen gets for async work (.task, loads) before it's read
+        var patch: Int?              // hot reloads since the build (the host also counts loading the previews)
         var notes: [String] = []     // lines after the traits
         var checks = Config.Checks()
     }
@@ -124,7 +125,7 @@ enum Render {
 
         var lines: [String] = []
         let ms = (r["renderMs"] as? Double).map { String(format: "%.0f ms", $0) } ?? ""
-        let patch = (r["patch"] as? Int).map { $0 > 0 ? " · patch \($0)" : "" } ?? ""
+        let patch = (options.patch ?? r["patch"] as? Int).map { $0 > 0 ? " · patch \($0)" : "" } ?? ""
         let extras = [r["locale"] as? String, options.textSize.map { "text \($0)" }].compactMap { $0 }.map { " · " + $0 }.joined()
         lines.append("\(fixture) · \(options.dark ? "dark" : "light") · \(options.device) \(Int(w))×\(Int(h))\(extras) · \(ms)\(patch)")
         lines += traitsText(r, device: options.device)

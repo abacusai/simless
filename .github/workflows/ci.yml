@@ -35,6 +35,9 @@ jobs:
       - name: Build the CLI
         run: swift build -c release
 
+      - name: Unit tests (hot reload scoping)
+        run: swift test
+
       - name: Build SimlessAgent
         run: swiftc -O Agent/main.swift -o "$RUNNER_TEMP/SimlessAgent"
 
@@ -84,6 +87,12 @@ jobs:
         run: |
           simless() { "$GITHUB_WORKSPACE/.build/release/simless" "$@"; }
           simless up
+          # The app fetches its config at startup: a render host blocks it and says so.
+          simless render Welcome | tee welcome.txt
+          grep -q "network: blocked 1 request: example.com (/simless-demo/config.json)" welcome.txt && rm welcome.txt
+          # Fixtures nobody wrote: the App's root view and a #Preview block.
+          simless render all | tee all.txt
+          grep -q "^root · " all.txt && grep -q "^LoginView.Error · " all.txt && rm all.txt
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
           # Interaction: a switch flips, a text field takes focus and typing.
@@ -92,6 +101,27 @@ jobs:
           simless act Login type "#login.email" "a@b.com" tap "Sign in" | tee act.txt
           grep -q '= "a@b.com" #login.email' act.txt && rm act.txt
           simless test all
+
+      # An edit to one screen, which a shared store names and another screen
+      # embeds: the patch holds only that screen for its fixture, says the
+      # other fixture is stale, and patches the embedding screen when asked.
+      - name: Demo app hot reload (native mode)
+        timeout-minutes: 5
+        working-directory: Examples/SimlessDemo
+        run: |
+          simless() { "$GITHUB_WORKSPACE/.build/release/simless" "$@"; }
+          sed -i '' 's/Button("Follow")/Button("Follow back")/' SimlessDemo/Screens/ProfileView.swift
+          simless reload --dry-run --render Profile | tee scope.txt
+          grep -q "would patch 2 file(s)" scope.txt
+          simless reload --render Profile --no-fallback | tee reload.txt
+          grep -q '"Follow back"' reload.txt
+          grep -q "stale until the next full build.*Tabs" reload.txt
+          simless reload --render Tabs --no-fallback | tee reload.txt
+          grep -q "also patched.*TabsView.swift" reload.txt
+          sed -i '' 's/Button("Follow back")/Button("Follow")/' SimlessDemo/Screens/ProfileView.swift
+          simless reload | tee reload.txt
+          grep -q "were undone" reload.txt
+          rm scope.txt reload.txt
 
       - name: Demo app UI tests (native mode, unsigned)
         timeout-minutes: 10

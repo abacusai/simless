@@ -71,7 +71,57 @@ enum RuntimeHost {
             env["SIMLESS_ORIGINAL_BUNDLE_ID"] = original
         }
         if Native.isNative(slot) { env.merge(Native.environment(slot)) { $1 } }
+        if let ws = try? Workspace.load(at: slot.worktree), let network = networkPolicy(ws, testHost: slot.kind != nil) {
+            env["SIMLESS_NETWORK"] = network
+        }
         return env
+    }
+
+    /// What a host may reach, as SimlessRuntime reads it (Runtime/Network.swift),
+    /// or nil for the real network. Render hosts get none by default, test hosts
+    /// keep it unless `network.tests` is set, and SIMLESS_NETWORK=allow lets
+    /// everything through for one command.
+    static func networkPolicy(_ ws: Workspace, testHost: Bool) -> String? {
+        let n = ws.config.network
+        if ProcessInfo.processInfo.environment["SIMLESS_NETWORK"] == "allow" || n?.block == false { return nil }
+        if testHost && n?.tests != true { return nil }
+        var stubs: [String: String] = [:]
+        for (pattern, file) in n?.stub ?? [:] { stubs[pattern] = file.hasPrefix("/") ? file : "\(ws.root)/\(file)" }
+        let policy: [String: Any] = ["allow": n?.allow ?? [], "stub": stubs]
+        return (try? JSONSerialization.data(withJSONObject: policy, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    /// Requests the host blocked that `simless render` hasn't reported yet, as
+    /// one line: per host, the first paths. Read from the host's log, so it
+    /// works in the sandbox too.
+    static func newlyBlocked(_ slot: SlotRecord) -> String? {
+        let log = "\(slot.dir)/host.log"
+        guard let text = try? String(contentsOfFile: log, encoding: .utf8) else { return nil }
+        let urls = text.split(separator: "\n").compactMap { line -> URL? in
+            guard let r = line.range(of: "simless-network: blocked ") else { return nil }
+            return line[r.upperBound...].split(separator: " ", maxSplits: 1).last.flatMap { URL(string: String($0)) }
+        }
+        // Reported already: counted per log (a relaunch starts a new one).
+        let seenPath = "\(slot.dir)/network-reported"
+        let created = (try? FileManager.default.attributesOfItem(atPath: log))?[.creationDate] as? Date
+        let stamp = "\(Int((created?.timeIntervalSince1970 ?? 0) * 1000))"
+        let seen = (try? String(contentsOfFile: seenPath, encoding: .utf8))?.split(separator: " ").map(String.init) ?? []
+        let already = seen.count == 2 && seen[0] == stamp ? Int(seen[1]) ?? 0 : 0
+        guard urls.count > already else { return nil }
+        try? "\(stamp) \(urls.count)".write(toFile: seenPath, atomically: true, encoding: .utf8)
+        var byHost: [(host: String, paths: [String])] = []
+        for u in urls.dropFirst(already) {
+            let host = u.host ?? "?", path = u.path.isEmpty ? "/" : u.path
+            if let i = byHost.firstIndex(where: { $0.host == host }) {
+                if !byHost[i].paths.contains(path) { byHost[i].paths.append(path) }
+            } else { byHost.append((host, [path])) }
+        }
+        let hosts = byHost.map { h in
+            h.host + " (" + h.paths.prefix(3).joined(separator: ", ") + (h.paths.count > 3 ? ", +\(h.paths.count - 3)" : "") + ")"
+        }
+        let n = urls.count - already
+        return "network: blocked \(n) request\(n == 1 ? "" : "s"): " + hosts.joined(separator: "; ")
+            + "; .simless.json \"network.allow\" lets a host through"
     }
 
     /// Launches the host with the runtime listening on the slot's port.

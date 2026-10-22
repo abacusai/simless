@@ -14,7 +14,9 @@ struct Config: Codable {
     var sourceDirs: [String]      // scanned for edited files on `simless reload`
     var device: String = "iphone" // default canvas: iphone | ipad
     var buildConcurrency: Int?    // max simultaneous full builds across all agents
-    var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30)
+    var hostIdleMinutes: Int?     // hosts exit after this long without requests (default 30; SIMLESS_HOST_IDLE_MINUTES wins)
+    var standbyIdleMinutes: Int?  // a standby test host exits after this long unused (default 10; SIMLESS_STANDBY_IDLE_MINUTES wins)
+    var diskLimitGB: Double?      // everything simless keeps on this Mac (default 25; SIMLESS_DISK_LIMIT_GB wins)
     var packages: [String]?       // local Swift packages whose views hot reload can patch (relative to root)
     var team: String?             // signing team when the project sets no DEVELOPMENT_TEAM (e.g. a shared sample)
     var idiom: String?            // "phone": phone canvases also get the phone idiom (default: the Mac's iPad idiom)
@@ -25,6 +27,15 @@ struct Config: Codable {
     var mode: String?             // "native" (default): hosts run unsigned; "dfi": signed Designed-for-iPad installs
     var settle: Double?           // default --settle: ms each render gives the screen's async work (default 0)
     var isolate: Bool?            // native hosts get a sandbox of their own: write only their slot, read only their worktree
+    var previews: Bool?           // fixtures from #Preview blocks and the App's root view (default true)
+    var network: Network?
+
+    struct Network: Codable {
+        var block: Bool?              // render hosts get no network (default true)
+        var allow: [String]?          // hosts or URLs (globs) render hosts may reach
+        var stub: [String: String]?   // URL glob -> file (relative to the repo) served instead
+        var tests: Bool?              // block in unit and UI test hosts too (default false)
+    }
 
     struct Checks: Codable {
         var minTapTarget: Double?     // points (default 44)
@@ -131,7 +142,10 @@ struct Workspace {
     }
 
     var work: String { Paths.workDir(forWorktree: root) }
-    var idleMinutes: Int { config.hostIdleMinutes ?? 30 }
+    var idleMinutes: Int { ProcessInfo.processInfo.environment["SIMLESS_HOST_IDLE_MINUTES"].flatMap(Int.init) ?? config.hostIdleMinutes ?? 30 }
+    var standbyIdleMinutes: Int {
+        ProcessInfo.processInfo.environment["SIMLESS_STANDBY_IDLE_MINUTES"].flatMap(Int.init) ?? config.standbyIdleMinutes ?? min(idleMinutes, 10)
+    }
     var derivedData: String { "\(work)/DerivedData" }
     var products: String { "\(derivedData)/Build/Products" }
     var productsIphoneos: String { "\(products)/Debug-iphoneos" }
@@ -342,8 +356,9 @@ struct Workspace {
             // As the build has them: patches must see the same `#if`s.
             conditions: Array(Set((bs["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "DEBUG").split(separator: " ").map(String.init) + [Self.condition])).sorted(),
             bundleID: bs["PRODUCT_BUNDLE_IDENTIFIER"] ?? "",
-            // The native mode signs ad hoc: a team is only recorded when there is one.
-            team: native ? ((try? teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "")) ?? "")
+            // The native mode signs ad hoc: a team is only recorded when one is set,
+            // never looked for in the keychain (that took 8.5 s of every `up`).
+            team: native ? explicitTeam(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "") ?? ""
                 : try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
             wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app",
             deviceFamily: bs["TARGETED_DEVICE_FAMILY"])
@@ -357,10 +372,14 @@ struct Workspace {
     /// else the team of the only Apple Development identity in the keychain.
     /// The explicit choices come first: a build machine signs with its own team
     /// whatever team the project names.
-    private func teamForSigning(fromBuildSettings team: String) throws -> String {
+    private func explicitTeam(fromBuildSettings team: String) -> String? {
         if let t = ProcessInfo.processInfo.environment["SIMLESS_TEAM"], !t.isEmpty { return t }
         if let t = config.team, !t.isEmpty { return t }
-        if !team.isEmpty { return team }
+        return team.isEmpty ? nil : team
+    }
+
+    private func teamForSigning(fromBuildSettings team: String) throws -> String {
+        if let t = explicitTeam(fromBuildSettings: team) { return t }
         var teams = try Signing.developmentTeams()
         // Several teams: only one may have the wildcard profile simless signs with.
         let usable = teams.filter { (try? Signing.wildcardProfile(team: $0)) != nil }
@@ -408,6 +427,23 @@ struct Workspace {
         for f in swiftSources() { hashes[f] = Self.digest(f) }
         try mkdirp(work)
         try JSONEncoder().encode(hashes).write(to: URL(fileURLWithPath: snapshotPath))
+        // A copy of each file as built (APFS clones, by content), so hot reload
+        // can tell which declarations an edit changed.
+        let dir = "\(work)/snapshot"
+        try mkdirp(dir)
+        let fm = FileManager.default
+        let keep = Set(hashes.values.map { "\($0).swift" })
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) {
+            try? fm.removeItem(atPath: "\(dir)/\(name)")
+        }
+        for (f, h) in hashes where !exists("\(dir)/\(h).swift") { try? fm.copyItem(atPath: f, toPath: "\(dir)/\(h).swift") }
+    }
+
+    /// The file's text as of the last full build, when there's a copy of it.
+    func snapshotText(of path: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: snapshotPath),
+              let snap = try? JSONDecoder().decode([String: String].self, from: d), let h = snap[path] else { return nil }
+        return try? String(contentsOfFile: "\(work)/snapshot/\(h).swift", encoding: .utf8)
     }
 
     /// Swift files whose contents differ from the last full build. Content, not

@@ -49,6 +49,7 @@ struct ProfileView: View {
             }
             .padding(20)
         }
+        .onAppear { AppModel.shared.didShow(Self.self) }
     }
 }
 
