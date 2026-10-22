@@ -487,6 +487,11 @@ enum PatchScope {
         let targets: Set<String>
         if let requested, requested.allSatisfy({ starts[$0] != nil && $0 != "*" }) { targets = Set(requested) }
         else { targets = Set(starts.keys) }
+        // A fixture asked for that simless can't trace (not in the fixtures file,
+        // not a preview it built) may render the last build's code: it's stale,
+        // never covered. Fixtures registered in a form this can't read ("*") are
+        // all in the patch, so those can't be told apart and aren't listed.
+        let untraced = starts["*"] == nil ? Set((requested ?? []).filter { starts[$0] == nil }) : []
 
         // Nodes: what changed and what each target fixture needs. A type is
         // patched whole, extensions in other files included, since the patch's
@@ -537,7 +542,7 @@ enum PatchScope {
         }
         let extra = all.subtracting(editedSet).subtracting([fixturesPath]).sorted()
         return Scope(all: [fixturesPath] + edited.filter { $0 != fixturesPath } + extra, extra: extra,
-                     covered: covered.sorted(), stale: reach.subtracting(covered).sorted(), texts: texts,
+                     covered: covered.sorted(), stale: reach.subtracting(covered).union(untraced).sorted(), texts: texts,
                      kept: kept, previews: previews.sorted())
     }
 }

@@ -421,8 +421,12 @@ struct Workspace {
     }
 
     /// Records source contents as of a build. Taken before the build starts, so
-    /// edits made while it runs still count as changed afterwards.
-    func snapshotSources() throws {
+    /// edits made while it runs still count as changed afterwards. Returns the
+    /// sources' id (see `sourcesID`). A failed build puts the previous record
+    /// back (`restoreSnapshot`), and only a build that worked drops the copies
+    /// the previous record used (`pruneSnapshotCopies`).
+    @discardableResult
+    func snapshotSources() throws -> String {
         var hashes: [String: String] = [:]
         for f in swiftSources() { hashes[f] = Self.digest(f) }
         try mkdirp(work)
@@ -431,18 +435,45 @@ struct Workspace {
         // can tell which declarations an edit changed.
         let dir = "\(work)/snapshot"
         try mkdirp(dir)
-        let fm = FileManager.default
-        let keep = Set(hashes.values.map { "\($0).swift" })
-        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) {
-            try? fm.removeItem(atPath: "\(dir)/\(name)")
-        }
-        for (f, h) in hashes where !exists("\(dir)/\(h).swift") { try? fm.copyItem(atPath: f, toPath: "\(dir)/\(h).swift") }
+        for (f, h) in hashes where !exists("\(dir)/\(h).swift") { try? FileManager.default.copyItem(atPath: f, toPath: "\(dir)/\(h).swift") }
+        return sourcesID(hashes)
+    }
+
+    /// After a failed build: the record (and so the copies) of the build the host still runs.
+    func restoreSnapshot(_ previous: Data?) {
+        if let previous { try? previous.write(to: URL(fileURLWithPath: snapshotPath)) }
+        else { try? FileManager.default.removeItem(atPath: snapshotPath) }
+    }
+
+    /// After a build that worked: copies no file of it has any more.
+    func pruneSnapshotCopies() {
+        let keep = Set(snapshot().values.map { "\($0).swift" })
+        let dir = "\(work)/snapshot", fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) { try? fm.removeItem(atPath: "\(dir)/\(name)") }
+    }
+
+    /// The sources as of the last full build: path -> digest.
+    func snapshot() -> [String: String] {
+        FileManager.default.contents(atPath: snapshotPath).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+    }
+
+    /// An id for a set of Swift sources (paths relative to the worktree, and
+    /// contents): the same sources give the same id, wherever they're synced to.
+    func sourcesID(_ hashes: [String: String]) -> String {
+        let lines = hashes.map { (path, digest) in
+            (path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : path) + " " + digest
+        }.sorted().joined(separator: "\n")
+        return SHA256.hash(data: Data(lines.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The id of the Swift sources as they are now.
+    func currentSourcesID() -> String {
+        sourcesID(Dictionary(uniqueKeysWithValues: swiftSources().map { ($0, Self.digest($0) ?? "") }))
     }
 
     /// The file's text as of the last full build, when there's a copy of it.
     func snapshotText(of path: String) -> String? {
-        guard let d = FileManager.default.contents(atPath: snapshotPath),
-              let snap = try? JSONDecoder().decode([String: String].self, from: d), let h = snap[path] else { return nil }
+        guard let h = snapshot()[path] else { return nil }
         return try? String(contentsOfFile: "\(work)/snapshot/\(h).swift", encoding: .utf8)
     }
 

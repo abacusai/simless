@@ -24,6 +24,8 @@ enum Patch {
     static func apply(ws: Workspace, slot: inout SlotRecord, files: [String], fixtures: [String]? = nil) throws -> Result {
         let settings = try ws.settings()
         let t0 = now()
+        // As of now: an edit made while the patch compiles isn't in it.
+        let sources = ws.currentSourcesID()
         let scope = try scope(ws: ws, slot: slot, files: files, fixtures: fixtures)
         let dylib: String
         if scope.previews.isEmpty {
@@ -55,6 +57,7 @@ enum Patch {
         slot.lastPatch = dylib
         slot.covered = scope.covered
         slot.stale = scope.stale
+        slot.sources = sources
         try GlobalState.update(slot)
         return Result(mode: mode, files: files, extra: scope.extra, stale: scope.stale, compile: tCompile, apply: now() - t1)
     }
