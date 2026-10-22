@@ -18,6 +18,15 @@ final class BehaviorUITests: XCTestCase {
         return app
     }
 
+    /// Swift Charts on macOS 15 scrolls and selects through SwiftUI's responder
+    /// gestures, which see simless's touches move but don't act on them. macOS 26
+    /// and later, and every simulator, run these tests.
+    private func skipChartGesturesOnMacOS15() throws {
+        let simless = ProcessInfo.processInfo.environment["SIMLESS_UI_PORT"] != nil
+        try XCTSkipIf(simless && ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26,
+                      "Swift Charts gestures don't take simless's touches on macOS 15")
+    }
+
     /// A Button inside a view with its own `onTapGesture` gets the tap, not the outer view.
     @MainActor
     func testTheInnerButtonWinsOverTheOuterTapGesture() throws {
@@ -73,6 +82,7 @@ final class BehaviorUITests: XCTestCase {
     /// Three swipes to the right take a scrolling chart weeks back, not days.
     @MainActor
     func testSwipesScrollAChartBackByWeeks() throws {
+        try skipChartGesturesOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 10))
@@ -92,6 +102,7 @@ final class BehaviorUITests: XCTestCase {
     /// Two slow swipes take the chart back by more than two weeks.
     @MainActor
     func testSlowSwipesScrollAChartBackByWeeks() throws {
+        try skipChartGesturesOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 10))
@@ -112,6 +123,7 @@ final class BehaviorUITests: XCTestCase {
     /// After a scrub, slow swipes still scroll, and a scrub after them selects a day back there.
     @MainActor
     func testScrubbingAfterScrollingBackSelectsADayBackThere() throws {
+        try skipChartGesturesOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         let selected = app.staticTexts["lab.chart.selected"]
