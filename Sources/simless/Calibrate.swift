@@ -77,7 +77,9 @@ enum Calibrate {
                     report.append("✗ \(label): render failed (\(a["error"] ?? b["error"] ?? "?"))")
                     continue
                 }
-                let (ok, lines) = compare(a["nodes"] as? [[String: Any]] ?? [], b["nodes"] as? [[String: Any]] ?? [])
+                let hide = ws.config.hide ?? []
+                let (ok, lines) = compare((a["nodes"] as? [[String: Any]] ?? []).filter { !Render.hidden($0, hide) },
+                                          (b["nodes"] as? [[String: Any]] ?? []).filter { !Render.hidden($0, hide) })
                 if ok { matched += 1 }
                 report.append("\(ok ? "✓" : "✗") \(label)")
                 report += lines.map { "    " + $0 }

@@ -14,6 +14,7 @@ enum Render {
         var settle: Double?          // ms the screen gets for async work (.task, loads) before it's read
         var patch: Int?              // hot reloads since the build (the host also counts loading the previews)
         var notes: [String] = []     // lines after the traits
+        var hide: [String] = []      // `hide` in .simless.json: "#id" or part of a label
         var checks = Config.Checks()
     }
 
@@ -110,13 +111,15 @@ enum Render {
         if let path = options.pngPath, let b64 = r["png"] as? String, let data = Data(base64Encoded: b64) {
             try data.write(to: URL(fileURLWithPath: path))
         }
-        let nodes = r["nodes"] as? [[String: Any]] ?? []
+        let all = r["nodes"] as? [[String: Any]] ?? []
+        let nodes = all.filter { !hidden($0, options.hide) }
         let found = findIssues(nodes, width: w, height: h, minTapTarget: options.checks.minTapTarget ?? 44)
         let ignore = options.checks.ignore ?? []
         let issues = found.filter { issue in !ignore.contains { issue.contains($0) } }
         if options.json {
             var out = r
             out.removeValue(forKey: "png")
+            out["nodes"] = nodes
             out["issues"] = issues
             out["ignoredIssues"] = found.count - issues.count
             let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
@@ -133,12 +136,13 @@ enum Render {
         for n in nodes {
             let role = n["role"] as? String ?? "element"
             let column = role.count < 7 ? role.padding(toLength: 7, withPad: " ", startingAt: 0) : role
-            var label = (n["label"] as? String).map { "\"\($0)\"" } ?? "(no label)"
-            if let p = n["placeholder"] as? String { label += " placeholder \"\(p)\"" }
-            if let v = n["value"] as? String, !v.isEmpty { label += " = \"\(v)\"" }
+            var label = (n["label"] as? String).map { quoted($0) } ?? "(no label)"
+            if let p = n["placeholder"] as? String { label += " placeholder \(quoted(p))" }
+            if let v = n["value"] as? String, !v.isEmpty { label += " = \(quoted(v))" }
             let id = (n["id"] as? String).map { " #\($0)" } ?? ""
             lines.append("  \(column) \(label)\(id)  \(frameText(n))")
         }
+        if all.count > nodes.count { lines.append("  hidden: \(all.count - nodes.count) element(s), by `hide` in \(Workspace.configName)") }
         let below = nodes.filter { frame($0).1 + frame($0).3 > h + 0.5 }.count
         if below > 0 { lines.append("  below the fold: \(below) element(s) (scroll content, listed above)") }
         if let png = options.pngPath { lines.append("  png: \(png)") }
@@ -147,6 +151,22 @@ enum Render {
         lines.append(issues.isEmpty ? "  issues: none\(ignoredText)" : "  issues (\(issues.count))\(ignoredText):")
         lines += issues.map { "    ⚠ " + $0 }
         return (lines.joined(separator: "\n"), issues.count)
+    }
+
+    /// Text longer than this is cut in the text output (`--json` keeps all of it).
+    static let longText = 200
+
+    /// `"text"`, or for long text its start and how long it is: `"start…" (4,812 chars)`.
+    static func quoted(_ text: String) -> String {
+        guard text.count > longText else { return "\"\(text)\"" }
+        return "\"\(text.prefix(longText))…\" (\(text.count.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) chars)"
+    }
+
+    /// Whether `hide` drops a node: `#id` by identifier, else part of its label.
+    static func hidden(_ n: [String: Any], _ hide: [String]) -> Bool {
+        guard !hide.isEmpty else { return false }
+        let id = n["id"] as? String, label = n["label"] as? String ?? ""
+        return hide.contains { h in h.hasPrefix("#") ? id == String(h.dropFirst()) : !h.isEmpty && label.contains(h) }
     }
 
     private static func frame(_ n: [String: Any]) -> (Double, Double, Double, Double) {
@@ -168,7 +188,7 @@ enum Render {
             let role = n["role"] as? String ?? ""
             let label = (n["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             let (x, _, w, h) = frame(n)
-            let name = label.isEmpty ? role : "\(role) \"\(label)\""
+            let name = label.isEmpty ? role : "\(role) \(quoted(label))"
             // A text field VoiceOver reads by its placeholder when it has no label.
             if role == "field", label.isEmpty, (n["placeholder"] as? String ?? "").isEmpty {
                 issues.append("text field without accessibility label or placeholder\((n["id"] as? String).map { " #\($0)" } ?? "") \(frameText(n))")
@@ -201,7 +221,7 @@ enum Render {
                 let inside = nx >= cx - 1 && ny >= cy - 1 && nx + nw <= cx + cw + 1 && ny + nh <= cy + ch + 1
                 if inside, let label = n["label"] as? String, !label.isEmpty,
                    (c["label"] as? String ?? "").contains(label) {
-                    issues.append("\"\(label)\" is exposed twice (as the \(c["role"] as? String ?? "control") and as separate text); hide the inner text from accessibility")
+                    issues.append("\(quoted(label)) is exposed twice (as the \(c["role"] as? String ?? "control") and as separate text); hide the inner text from accessibility")
                 }
             }
         }
@@ -214,7 +234,7 @@ enum Render {
                 let same = abs(ax - bx) < 1 && abs(ay - by) < 1 && abs(aw - bw) < 1 && abs(ah - bh) < 1
                 if !same, ix > 4, iy > 4 {
                     let a = controls[i]["label"] as? String ?? "?", b = controls[j]["label"] as? String ?? "?"
-                    issues.append("controls overlap: \"\(a)\" and \"\(b)\"")
+                    issues.append("controls overlap: \(quoted(a)) and \(quoted(b))")
                 }
             }
         }

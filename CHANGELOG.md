@@ -3,6 +3,11 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Long labels don't blow up the tree.** chatllm-ios has a debug element whose label is a log of thousands of characters, and it was in every tree an agent read. Text output now cuts any label or value over 200 characters and says how long it was (`"…" (4,812 chars)`), so that element costs about 60 tokens instead of over 1,000. `--json` keeps the full text.
+- **`"hide"` in `.simless.json`** drops elements from trees (text and `--json`), issue checks and calibration, by `"#identifier"` or part of the label: `"hide": ["#debugTrace"]`. Renders say how many were hidden.
+
 ## 0.7.0 (2026-10-22)
 
 This one makes simless the main UI loop for coding agents, on big apps and on shared build machines. On a production app with 702 Swift files, an edit to a checked screen takes about 3 s instead of 37 to 45 s, a fresh clone goes from `simless init` to every screen rendered with no manual step, an agent can tap and type into a screen and read it afterwards, and the whole unit test target runs in 7 min 19 s instead of more than 35 min. Run `simless init` once to get kit 6, which `simless act` and the new checks need.

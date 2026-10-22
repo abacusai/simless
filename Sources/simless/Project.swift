@@ -21,6 +21,7 @@ struct Config: Codable {
     var team: String?             // signing team when the project sets no DEVELOPMENT_TEAM (e.g. a shared sample)
     var idiom: String?            // "phone": phone canvases also get the phone idiom (default: the Mac's iPad idiom)
     var checks: Checks?
+    var hide: [String]?           // elements left out of trees and checks: "#id" or part of a label
     var tests: Tests?
     var calibrate: Calibration?
     var embeddedBundles: Bool?    // keep app extensions and the watch app in the slot (default true)
