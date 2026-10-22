@@ -65,7 +65,7 @@ enum Native {
         try mkdirp(dir)
         let app = "\(dir)/\(settings.wrapperName)"
         // APFS clone: near-free, and retagging rewrites only a few header bytes.
-        try Shell.check(["/bin/cp", "-c", "-R", "\(ws.productsIphoneos)/\(settings.wrapperName)", app], what: "clone app")
+        try cloneWritable("\(ws.productsIphoneos)/\(settings.wrapperName)", to: app, what: "clone app")
         try? fm.removeItem(atPath: "\(app)/SimlessPatches")
         try? fm.removeItem(atPath: "\(app)/embedded.mobileprovision")
 
@@ -94,10 +94,13 @@ enum Native {
         // Only the binaries that changed need a signature; a watch app's stay as built.
         let exe = executable(app)
         var changed: [String] = []
+        let bundled = Set((try? fm.contentsOfDirectory(atPath: "\(app)/Frameworks")) ?? [])
         for binary in MachO.binaries(in: app) where binary != exe {
-            if try MachO.retagForCatalyst(binary) { changed.append(binary) }
+            let retagged = try MachO.retagForCatalyst(binary)
+            if try MachO.addCatalystSwiftRpath(binary, bundled: bundled) || retagged { changed.append(binary) }
         }
         try MachO.retagForCatalyst(exe)
+        try MachO.addCatalystSwiftRpath(exe, bundled: bundled)
         // The app's own signature last: it seals the nested code and the Info.plist edits.
         try signInsideOut(changed + [exe])
 
@@ -167,7 +170,10 @@ enum Native {
         var changed: [String] = []
         for path in paths {
             let binaries = path.hasSuffix(".dylib") ? [path] : MachO.binaries(in: path)
-            for b in binaries where try MachO.retagForCatalyst(b) { changed.append(b) }
+            for b in binaries {
+                let retagged = try MachO.retagForCatalyst(b)
+                if try MachO.addCatalystSwiftRpath(b, bundled: []) || retagged { changed.append(b) }
+            }
         }
         try signInsideOut(changed)
     }

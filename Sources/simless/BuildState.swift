@@ -8,7 +8,13 @@ import Foundation
 /// must never use it once a file it was built from has changed: the run builds
 /// again first, or doesn't run.
 enum BuildState {
-    struct Entry: Codable { var size: Int; var mtime: Double; var digest: String }
+    struct Entry: Codable {
+        var size: Int
+        var mtime: Double
+        var digest: String
+        var ctime: Double?   // status change time, which tar and rsync can't set
+        var inode: Int?
+    }
 
     static func path(_ ws: Workspace) -> String { "\(ws.work)/build-inputs.json" }
 
@@ -39,18 +45,35 @@ enum BuildState {
         return out.sorted()
     }
 
-    /// The inputs as they are now, reusing digests of files whose size and
-    /// modification time didn't change.
+    /// The inputs as they are now.
     static func current(_ ws: Workspace, previous: [String: Entry] = [:]) -> [String: Entry] {
+        entries(inputs(ws), previous: previous)
+    }
+
+    /// Each file's size, times and content digest. The digest decides whether a
+    /// file changed. A previous digest is reused only for a file nothing has
+    /// touched since: same size, modification time, status change time and
+    /// inode. A build machine that replaces the sources on every sync (rm -rf,
+    /// then untar) keeps modification times, so they alone can't say a file is
+    /// the same; the new files' status change times say it may not be.
+    static func entries(_ files: [String], previous: [String: Entry] = [:]) -> [String: Entry] {
         var out: [String: Entry] = [:]
-        for file in inputs(ws) {
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: file) else { continue }
-            let size = (attrs[.size] as? NSNumber)?.intValue ?? -1
-            let time = (attrs[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
-            if let p = previous[file], p.size == size, p.mtime == time { out[file] = p; continue }
-            out[file] = Entry(size: size, mtime: time, digest: Workspace.digest(file) ?? "")
+        for file in files {
+            var st = stat()
+            guard stat(file, &st) == 0 else { continue }
+            let size = Int(st.st_size)
+            let time = Double(st.st_mtimespec.tv_sec) - Date.timeIntervalBetween1970AndReferenceDate + Double(st.st_mtimespec.tv_nsec) / 1e9
+            let changed = Double(st.st_ctimespec.tv_sec) + Double(st.st_ctimespec.tv_nsec) / 1e9
+            let inode = Int(st.st_ino)
+            if let p = previous[file], p.size == size, p.mtime == time, p.ctime == changed, p.inode == inode { out[file] = p; continue }
+            out[file] = Entry(size: size, mtime: time, digest: Workspace.digest(file) ?? "", ctime: changed, inode: inode)
         }
         return out
+    }
+
+    /// Files whose content differs between two records (added and removed ones too).
+    static func changed(from built: [String: Entry], to now: [String: Entry]) -> [String] {
+        Set(built.keys).union(now.keys).filter { built[$0]?.digest != now[$0]?.digest }.sorted()
     }
 
     static func load(_ ws: Workspace) -> [String: Entry]? {
@@ -65,8 +88,6 @@ enum BuildState {
     /// them when there's no record of it).
     static func changed(_ ws: Workspace) -> [String] {
         guard let built = load(ws) else { return ["(no record of what the last build was built from)"] }
-        let now = current(ws, previous: built)
-        let keys = Set(built.keys).union(now.keys)
-        return keys.filter { built[$0]?.digest != now[$0]?.digest }.sorted()
+        return changed(from: built, to: current(ws, previous: built))
     }
 }
