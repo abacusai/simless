@@ -82,7 +82,12 @@ enum Cleanup {
     /// and builds go. A build machine that re-extracts a project's sources on
     /// every sync (rm -rf, then untar) would otherwise lose them to another
     /// project's command running inside that window.
-    static let missingGrace: TimeInterval = 600
+    static var missingGrace: TimeInterval { env("SIMLESS_GONE_MINUTES").map { $0 * 60 } ?? 600 }
+
+    /// Days without a simless command after which a worktree's hosts, slots and builds go.
+    static var unusedDays: Double { env("SIMLESS_UNUSED_DAYS") ?? 14 }
+
+    private static func env(_ name: String) -> Double? { ProcessInfo.processInfo.environment[name].flatMap(Double.init) }
 
     /// Whether `worktree` has been gone (no .simless.json) for longer than the grace period.
     /// The first time it's seen missing is recorded in its build folder.
@@ -123,10 +128,10 @@ enum Cleanup {
             let stale = state.slots.filter { slot in
                 let work = Paths.workDir(forWorktree: slot.worktree)
                 let used = exists("\(work)/last-used") ? mtime("\(work)/last-used") : mtime(work)
-                return used > 0 && Date().timeIntervalSinceReferenceDate - used > 14 * 86_400
+                return used > 0 && Date().timeIntervalSinceReferenceDate - used > unusedDays * 86_400
             }
             for slot in stale {
-                Log.step("cleaning up \(slot.slotID): \(slot.worktree) hasn't used simless for two weeks")
+                Log.step("cleaning up \(slot.slotID): \(slot.worktree) hasn't used simless for \(Int(unusedDays)) days")
                 removeSlot(slot)
                 try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: slot.worktree))
             }
@@ -176,8 +181,11 @@ enum Cleanup {
         return try build()
     }
 
-    /// Everything simless keeps, across worktrees, in GB (SIMLESS_DISK_LIMIT_GB overrides).
-    static var diskLimitGB: Double { ProcessInfo.processInfo.environment["SIMLESS_DISK_LIMIT_GB"].flatMap(Double.init) ?? 25 }
+    /// Everything simless keeps, across worktrees, in GB: SIMLESS_DISK_LIMIT_GB,
+    /// then the project's `diskLimitGB`, then 25.
+    static func diskLimitGB(_ ws: Workspace? = nil) -> Double {
+        env("SIMLESS_DISK_LIMIT_GB") ?? (ws ?? (try? Workspace.load()))?.config.diskLimitGB ?? 25
+    }
 
     static func sizeGB(_ path: String) -> Double {
         guard exists(path), let out = try? Shell.run(["/usr/bin/du", "-sk", path], useXcode: false).out,
@@ -190,7 +198,7 @@ enum Cleanup {
     /// makes them again), then the shared compilation cache. The current
     /// worktree's are kept.
     static func enforceDiskLimit(keeping current: Workspace) {
-        let limit = diskLimitGB
+        let limit = diskLimitGB(current)
         var total = sizeGB(Paths.cache)
         guard total > limit else { return }
         _ = try? withLock("state") {

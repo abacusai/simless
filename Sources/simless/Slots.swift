@@ -22,7 +22,7 @@ enum Slots {
         try? FileManager.default.removeItem(atPath: products)
         try mkdirp(products)
         // APFS clone: near-free copy of a multi-hundred-MB app.
-        try Shell.check(["/bin/cp", "-c", "-R", "\(ws.productsIphoneos)/\(settings.wrapperName)", app], what: "clone app")
+        try cloneWritable("\(ws.productsIphoneos)/\(settings.wrapperName)", to: app, what: "clone app")
 
         let fm = FileManager.default
         try stageTestFrameworks(in: app)
@@ -294,6 +294,7 @@ enum Slots {
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                Previews.load(slot)
                 try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
                 return
             }
@@ -332,6 +333,7 @@ enum Slots {
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
+                Previews.load(slot)
                 try reapplyPatch(slot, hostPatch: stats["patch"] as? Int ?? 0)
                 return
             }
