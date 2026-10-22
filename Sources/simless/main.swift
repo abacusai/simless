@@ -413,7 +413,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             var options = Render.Options(dark: v.dark, device: v.device, json: args.flags.contains("--json"))
             options.textSize = args.values["--text-size"]
             options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
-            options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
+            options.idiom = ws.phoneIdiom(args.values["--idiom"])
             options.checks = ws.config.checks ?? .init()
             if var png = args.values["--png"] {
                 while png.count > 1 && png.hasSuffix("/") { png.removeLast() }
@@ -651,7 +651,7 @@ do {
                                          dark: args.flags.contains("--dark"),
                                          runtime: args.values["--runtime"] ?? ws.config.calibrate?.runtime,
                                          device: args.values["--sim-device"] ?? ws.config.calibrate?.device,
-                                         idiom: (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }))
+                                         idiom: ws.phoneIdiom(args.values["--idiom"])))
     case "skill": try cmdSkill(args)
     case "help", "-h", "--help": print(usage)
     case "version", "--version":

@@ -47,6 +47,7 @@ enum Calibrate {
 
         var matched = 0, total = 0
         var report: [String] = []
+        var simlessOnly: [String] = []
         var markdown: [String] = []
         for fixture in fixtures {
             for dark in options.dark ? [false, true] : [false] {
@@ -66,6 +67,12 @@ enum Calibrate {
                     a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
                 }
                 let b = try sim.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
+                // Fixtures simless generates (root, #Preview blocks) exist only in its hosts.
+                if b["ok"] as? Bool != true, (b["error"] as? String ?? "").hasPrefix("unknown fixture") {
+                    if !simlessOnly.contains(fixture) { simlessOnly.append(fixture) }
+                    total -= 1
+                    continue
+                }
                 guard a["ok"] as? Bool == true, b["ok"] as? Bool == true else {
                     report.append("✗ \(label): render failed (\(a["error"] ?? b["error"] ?? "?"))")
                     continue
@@ -91,6 +98,9 @@ enum Calibrate {
         }
         print("calibration against \(deviceType) simulator, \(simOS)\(options.idiom.map { ", simless with the \($0) idiom" } ?? "") (frames within \(Int(tolerance)) pt):")
         report.forEach { print("  " + $0) }
+        if !simlessOnly.isEmpty {
+            print("  not compared: \(simlessOnly.count) fixture(s) only simless has (root and #Preview blocks): \(simlessOnly.prefix(5).joined(separator: ", "))\(simlessOnly.count > 5 ? ", …" : "")")
+        }
         print("\(matched)/\(total) renders have the same structure and frames as in the simulator (\(secs(t)))")
         if matched < total {
             print("For mismatching screens, confirm visual changes in the simulator; simless renders of them are less trustworthy.")
@@ -182,7 +192,11 @@ enum Calibrate {
             if let k = onlySim.firstIndex(where: { s in
                 (s["label"] as? String) == (m["label"] as? String) && (m["label"] as? String) != nil
                     && zip(frame(m), frame(s)).allSatisfy { abs($0 - $1) <= 4 * tolerance } }) {
-                minor.append("\"\(m["label"] as? String ?? "")\" is a \(m["role"] ?? "?") in simless, a \(onlySim[k]["role"] ?? "?") in the simulator")
+                let (mr, sr) = (m["role"] as? String ?? "?", onlySim[k]["role"] as? String ?? "?")
+                let what = mr != sr ? "role" : (m["id"] as? String) != (onlySim[k]["id"] as? String) ? "identifier" : "value"
+                minor.append("\"\(m["label"] as? String ?? "")\" has another \(what) in simless: "
+                             + (what == "role" ? "\(mr), a \(sr) in the simulator"
+                                : "\"\((what == "identifier" ? m["id"] : m["value"]) ?? "")\", \"\((what == "identifier" ? onlySim[k]["id"] : onlySim[k]["value"]) ?? "")\" in the simulator"))
                 onlySim.remove(at: k)
             } else {
                 real.append("only in simless: \(describe(m))")
