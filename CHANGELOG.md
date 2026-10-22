@@ -23,6 +23,13 @@
   - **Read-only binary frameworks.** A binary xcframework in a SwiftPM checkout is read-only and so was the slot's copy, so preparing the slot failed with "cannot open …/TerraiOS.framework/TerraiOS". The slot's clone is made writable. The build's copy is never written.
   - **Swift libraries only Mac Catalyst has.** A framework built for an old iOS loads `@rpath/libswiftCoreNFC.dylib`, which a Mac Catalyst process only has under `/System/iOSSupport/usr/lib/swift`, where dyld doesn't look for `@rpath` libraries, so the host crashed at launch. The slot's copy of such a binary gets that folder as its last rpath, on every slot preparation.
 - **UI test sources in nested synchronized folders are found**, with the same group walk.
+- **Fits a build machine that builds many projects.**
+  - **`simless up --json` is the compile step.** It builds the iOS device slice simless runs, prints the compiler's diagnostics as JSON (file, line, column, severity, message) and leaves a host ready, so the separate simulator build isn't needed for checks. On a small xcodegen app, the simulator build took 7.7 s cold, the app build in `up` 3.3 s, and after a one-line edit `up --json` took 5.4 s. Building into the pipeline's DerivedData instead saved 0.7 s of 6.4 s, and a retagged simulator build doesn't run, so that's not the way. `simless reload --json` reports a hot reload the same way, in 0.5 to 3.4 s, but only compiles what it patches.
+  - **`simless init --template <dir>`** sets up an xcodegen app template: `.simless.json` and the kit in the target's sources, no project edits, and the App hook (and any `project.yml` change) printed to add. The project it generates builds and renders with no other step.
+  - **Edits are told by content after a sync.** A sync that deletes the sources and untars them keeps modification times, and a same-size edit with its time put back looked unchanged. A digest is now reused only for a file with the same size, modification time, change time and inode. Tested.
+  - **`simless status --json`** for a daemon (hosts, memory, CPU, test runs, disk per project and the limit) and **`simless doctor [--json]`** to gate a machine on macOS, Xcode, the iOS SDK and free disk (exit 1 when it can't run simless).
+  - **Limits a machine can set:** `SIMLESS_HOST_IDLE_MINUTES`, `SIMLESS_STANDBY_IDLE_MINUTES`, `SIMLESS_UNUSED_DAYS` and `SIMLESS_GONE_MINUTES`, plus `diskLimitGB` and `standbyIdleMinutes` per project. `SIMLESS_ISOLATE=1` already turns `isolate` on for every project.
+- **`simless up` 8.5 s faster** in the native mode for a project with no signing team: it no longer looks through the keychain and every provisioning profile for one it never uses.
 
 ## 0.6.0 (2026-10-22)
 

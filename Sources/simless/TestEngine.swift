@@ -728,7 +728,7 @@ final class Session {
             .merging(["SIMLESS_RUNTIME_PORT": String(slot.port), "SIMLESS_HOST_TOKEN": token,
                       // A standby host runs the app's idle work (animations, timers) for
                       // nothing; it goes away after 10 minutes without a run.
-                      "SIMLESS_IDLE": String(min(ws.idleMinutes, 10) * 60)]) { $1 }
+                      "SIMLESS_IDLE": String(ws.standbyIdleMinutes * 60)]) { $1 }
         guard let app = try? RuntimeHost.installedApp(slot) else { return }
         if Native.isNative(slot) {
             _ = try? Native.launch(slot, env: env, args: [], log: "\(slot.dir)/standby.log")

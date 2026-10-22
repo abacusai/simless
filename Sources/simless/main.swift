@@ -8,7 +8,7 @@ let version = "0.6.0"
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
-  simless init [--no-hook]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
+  simless init [--no-hook] [--template <dir>]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
   simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
@@ -58,7 +58,7 @@ struct Args {
     var repeated: [String: [String]] = [:]
 
     init(_ raw: [String]) {
-        let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
+        let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target", "--template",
                                    "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
@@ -75,6 +75,7 @@ struct Args {
 // MARK: - Commands
 
 func cmdInit(_ args: Args) throws {
+    if let template = args.values["--template"] { return try initTemplate(template, args) }
     let cwd = FileManager.default.currentDirectoryPath
     let root = (try? Shell.check(["git", "-C", cwd, "rev-parse", "--show-toplevel"]))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? cwd
@@ -225,6 +226,92 @@ func mainAppFolder(in dir: String) -> String? {
         return first
     }
     return nil
+}
+
+/// `simless init --template <dir>`: an xcodegen app template, whose project
+/// is generated again on every build. It writes `.simless.json` and the kit
+/// into the template's sources and touches no project file. It prints the
+/// App hook to add, and the `project.yml` change when the kit is outside the
+/// app target's sources.
+func initTemplate(_ dir: String, _ args: Args) throws {
+    let root = URL(fileURLWithPath: dir, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path
+    guard exists("\(root)/project.yml") else { throw SimlessError("\(dir) has no project.yml (`--template` takes an xcodegen app template)") }
+    let dump: String
+    do {
+        dump = try Shell.check(["xcodegen", "dump", "--type", "json", "--spec", "\(root)/project.yml"], cwd: root, stdoutOnly: true)
+    } catch {
+        throw SimlessError("couldn't read project.yml with xcodegen (`brew install xcodegen`): \(error)")
+    }
+    guard let spec = try JSONSerialization.jsonObject(with: Data(dump.utf8)) as? [String: Any], let name = spec["name"] as? String else {
+        throw SimlessError("xcodegen gave no project name for \(dir)/project.yml")
+    }
+    let targets = spec["targets"] as? [String: [String: Any]] ?? [:]
+    func sources(_ t: [String: Any]) -> [String] {
+        (t["sources"] as? [Any] ?? []).compactMap { ($0 as? String) ?? (($0 as? [String: Any])?["path"] as? String) }
+    }
+    guard let (appTarget, app) = targets.sorted(by: { $0.key < $1.key })
+            .first(where: { ($0.value["type"] as? String) == "application" && ($0.value["platform"] as? String ?? "iOS").hasPrefix("iOS") }) else {
+        throw SimlessError("project.yml has no iOS application target")
+    }
+    let testTarget = targets.first { ($0.value["type"] as? String) == "bundle.unit-test" }?.key ?? ""
+    let sourceDirs = sources(app)
+    guard let sourceDir = sourceDirs.first else { throw SimlessError("\(appTarget) lists no sources in project.yml") }
+    let kitDir = args.values["--kit-dir"] ?? "\(sourceDir)/Simless"
+    let packages = (spec["packages"] as? [String: [String: Any]] ?? [:]).compactMap { $0.value["path"] as? String }.sorted()
+
+    let configPath = "\(root)/\(Workspace.configName)"
+    let keep = exists(configPath) && !args.flags.contains("--force")
+    let config = Config(project: "\(name).xcodeproj", scheme: appTarget, appTarget: appTarget, testTarget: testTarget,
+                        kitDir: kitDir, sourceDirs: sourceDirs, packages: packages.isEmpty ? nil : packages)
+    if !keep {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(config).write(to: URL(fileURLWithPath: configPath))
+    }
+    try mkdirp("\(root)/\(kitDir)")
+    try? FileManager.default.removeItem(atPath: "\(root)/\(config.kitFile)")
+    try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessKit.swift", toPath: "\(root)/\(config.kitFile)")
+    let newFixtures = !exists("\(root)/\(config.fixturesFile)")
+    if newFixtures { try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: "\(root)/\(config.fixturesFile)") }
+
+    let compiled = sourceDirs.contains { kitDir == $0 || kitDir.hasPrefix($0 + "/") }
+    let appFile: String? = {
+        guard let e = FileManager.default.enumerator(atPath: "\(root)/\(sourceDir)") else { return nil }
+        while let rel = e.nextObject() as? String {
+            guard rel.hasSuffix(".swift"), let text = try? String(contentsOfFile: "\(root)/\(sourceDir)/\(rel)", encoding: .utf8),
+                  text.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b"#, options: .regularExpression) != nil else { continue }
+            return "\(sourceDir)/\(rel)"
+        }
+        return nil
+    }()
+    let hooked = appFile.flatMap { try? String(contentsOfFile: "\(root)/\($0)", encoding: .utf8) }?.contains("SimlessHost.startIfRequested()") == true
+    print("""
+        \(keep ? "kept" : "wrote") \(Workspace.configName): project \(name).xcodeproj, app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)
+        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
+        """)
+    if compiled {
+        print("project.yml: nothing to add, \(kitDir) is inside \(appTarget)'s sources (\(sourceDirs.joined(separator: ", ")))")
+    } else {
+        print("""
+            project.yml: add the kit to \(appTarget)'s sources:
+
+              targets:
+                \(appTarget):
+                  sources:
+                    - path: \(kitDir)
+            """)
+    }
+    if hooked {
+        print("App hook: already in \(appFile!)")
+    } else {
+        print("""
+            App hook: add this to the App's init()\(appFile.map { " in \($0)" } ?? ""), so the app answers simless:
+
+                #if DEBUG && os(iOS)
+                SimlessHost.startIfRequested()
+                #endif
+            """)
+    }
 }
 
 /// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
@@ -541,7 +628,7 @@ func cmdReload(_ args: Args) throws {
         } catch let error as SimlessError where error.description.hasPrefix("patch compile failed")
                     || error.description.hasPrefix("patch can't cover") {
             print(error.description)
-            if args.flags.contains("--no-fallback") { exit(1) }
+            if args.flags.contains("--no-fallback") { if args.flags.contains("--json") { throw error }; exit(1) }
             // Either a real compile error or an edit a patch can't express (stored
             // properties, signatures, new types used elsewhere): the full build decides.
             Log.step("falling back to a full rebuild")
@@ -568,9 +655,82 @@ func reloadDryRun(_ ws: Workspace, _ args: Args) throws {
     if !s.stale.isEmpty { print("  stale until the next full build: \(s.stale.joined(separator: ", "))") }
 }
 
+/// `simless status --json`, for a daemon that watches a build machine.
+func statusJSON() throws {
+    let state = GlobalState.load()
+    var hosts: [[String: Any]] = []
+    for s in state.slots.sorted(by: { $0.port < $1.port }) {
+        var h: [String: Any] = ["slot": s.slotID, "port": s.port, "worktree": s.worktree,
+                                "role": s.kind.map { $0.hasPrefix("test") ? "unit-tests" : "ui-tests" } ?? "renders"]
+        if let use = RuntimeHost.usage(s) {
+            h["state"] = "up"; h["memoryMB"] = (use.mb * 10).rounded() / 10; h["cpuPercent"] = (use.cpu * 10).rounded() / 10
+            if s.kind == nil, let st = s.stats() { h["patch"] = s.patch; h["renders"] = st["renders"] ?? 0 }
+        } else {
+            h["state"] = "down"
+        }
+        hosts.append(h)
+    }
+    let runs = Budget.running().map { r -> [String: Any] in
+        ["kind": r.kind == "ui" ? "ui-tests" : "unit-tests", "hosts": r.hosts, "seconds": Int(now() - r.started), "worktree": r.worktree]
+    }
+    let work = "\(Paths.cache)/work"
+    let worktrees = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []).map { dir -> [String: Any] in
+        let worktree = (try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
+        return ["worktree": worktree, "gb": (Cleanup.sizeGB("\(work)/\(dir)") * 100).rounded() / 100]
+    }
+    let cas = Cleanup.sizeGB("\(Paths.cache)/CompilationCache"), slots = Cleanup.sizeGB(Paths.slots)
+    let total = worktrees.reduce(0) { $0 + ($1["gb"] as? Double ?? 0) } + cas + slots
+    let out: [String: Any] = [
+        "simless": version, "hosts": hosts, "hostsUp": hosts.filter { $0["state"] as? String == "up" }.count, "testRuns": runs,
+        "disk": ["path": Paths.cache, "totalGB": (total * 100).rounded() / 100, "limitGB": Cleanup.diskLimitGB(),
+                 "compilationCacheGB": (cas * 100).rounded() / 100, "slotsGB": (slots * 100).rounded() / 100, "worktrees": worktrees],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+/// Whether this Mac can run simless: for a build daemon to gate on.
+func cmdDoctor(_ args: Args) throws {
+    let os = ProcessInfo.processInfo.operatingSystemVersion
+    var arm = utsname()
+    uname(&arm)
+    let machine = withUnsafeBytes(of: &arm.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    let developerDir = (try? Shell.check(["/usr/bin/xcode-select", "-p"]).trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+    let xcodeLines = (try? Shell.run(["xcodebuild", "-version"]).out.split(separator: "\n").map(String.init)) ?? []
+    let xcode = xcodeLines.first?.replacingOccurrences(of: "Xcode ", with: "")
+    let xcodeBuild = xcodeLines.dropFirst().first?.replacingOccurrences(of: "Build version ", with: "")
+    let sdk = (try? Shell.check(["xcrun", "--sdk", "iphoneos", "--show-sdk-version"]))?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let free = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemFreeSize] as? NSNumber)?.doubleValue ?? 0
+    let freeGB = (free / 1_073_741_824 * 10).rounded() / 10
+    let checks: [(String, Bool, String)] = [
+        ("Apple Silicon", machine.hasPrefix("arm64"), machine),
+        ("macOS 15 or later", os.majorVersion >= 15, "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"),
+        ("Xcode selected, not the Command Line Tools", developerDir.hasSuffix("/Contents/Developer"), developerDir),
+        ("Xcode 26 or later", (xcode.flatMap { Int($0.split(separator: ".").first ?? "") } ?? 0) >= 26, xcode ?? "not found"),
+        ("iOS SDK", sdk != nil, sdk ?? "not found"),
+        ("10 GB free in the home folder's volume", freeGB >= 10, "\(freeGB) GB free"),
+    ]
+    let ok = checks.allSatisfy(\.1)
+    if args.flags.contains("--json") {
+        let out: [String: Any] = [
+            "ok": ok, "simless": version, "macOS": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", "arch": machine,
+            "xcode": xcode ?? NSNull(), "xcodeBuild": xcodeBuild ?? NSNull(), "developerDir": developerDir, "iosSDK": sdk ?? NSNull(),
+            "freeGB": freeGB, "checks": checks.map { ["check": $0.0, "ok": $0.1, "found": $0.2] },
+        ]
+        let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+    } else {
+        print("simless \(version)")
+        for (check, passed, found) in checks { print("  \(passed ? "✓" : "✗") \(check): \(found)") }
+        print(ok ? "this Mac can run simless" : "this Mac can't run simless yet; fix what's marked ✗")
+    }
+    if !ok { exit(1) }
+}
+
 func cmdTest(_ args: Args) throws { try TestEngine.run(args) }
 
 func cmdStatus(_ args: Args) throws {
+    if args.flags.contains("--json") { return try statusJSON() }
     let state = GlobalState.load()
     if state.slots.isEmpty { print("no hosts"); return }
     var totalMB = 0.0, running = 0
@@ -693,11 +853,12 @@ do {
     if !["help", "-h", "--help", "init", "skill", "version", "--version"].contains(command) { Cleanup.collectGarbage() }
     switch command {
     case "init": try cmdInit(args)
-    case "up": try cmdUp(args)
+    case "up": if args.flags.contains("--json") { JSONReport.up(args) } else { try cmdUp(args) }
     case "render": try cmdRender(args)
-    case "reload": try cmdReload(args)
+    case "reload": if args.flags.contains("--json") { JSONReport.reload(args) } else { try cmdReload(args) }
     case "test": try cmdTest(args)
     case "status": try cmdStatus(args)
+    case "doctor": try cmdDoctor(args)
     case "down": try cmdDown(args)
     case "agent": try cmdAgent(args)
     case "clean": try Cleanup.clean(all: args.flags.contains("--all"))
