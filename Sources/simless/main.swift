@@ -12,6 +12,9 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
+  simless act <fixture> <step>...  render, then tap/type/swipe/longpress/wait, then print the tree + issues
+        steps: tap "<label|#id>"  type "<#id|label>" "<text>"  swipe up|down|left|right [on "<label|#id>"]
+               longpress "<label|#id>"  wait <ms>   (and --device, --dark, --png, --json like render)
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
         [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
         --matrix: light+dark × iphone, iphone-small, ipad
@@ -489,9 +492,9 @@ func cmdRender(_ args: Args) throws {
 }
 
 /// SimlessKit version this simless needs for every feature (see `kitVersion` in the kit).
-let requiredKit = 4
+let requiredKit = 5
 /// The kit each feature first needs (older kits keep working without it).
-let localeKit = 3, settleKit = 4
+let localeKit = 3, settleKit = 4, actKit = 5
 
 func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws {
     if let size = args.values["--text-size"], !Render.textSizes.contains(size) {
@@ -857,6 +860,7 @@ do {
     case "up": if args.flags.contains("--json") { JSONReport.up(args) } else { try cmdUp(args) }
     case "render": try cmdRender(args)
     case "reload": if args.flags.contains("--json") { JSONReport.reload(args) } else { try cmdReload(args) }
+    case "act": try Act.run(args)
     case "test": try cmdTest(args)
     case "status": try cmdStatus(args)
     case "doctor": try cmdDoctor(args)

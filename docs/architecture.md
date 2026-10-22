@@ -89,6 +89,8 @@ SimlessRuntime, which every host loads before the app's own code, also takes the
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display.
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
 
+`simless act` mounts a fixture the same way, then sends the kit `ui.*` requests (snapshot, tap, type, swipe, idle). The kit hands each to SimlessRuntime (`simless_runtime_ui`), whose UI test automation then works on the render window only, plus menus and alerts above it. The render window has no scene, but a text field in it still becomes first responder and takes typed text. A final `tree` request reads the canvas as it is, without mounting it again.
+
 Renders take ~20–60 ms. The CLI turns the tree into compact text and runs deterministic checks:
 - controls without labels,
 - text exposed twice,
