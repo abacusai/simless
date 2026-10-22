@@ -79,6 +79,7 @@ jobs:
       # Disk Access, and a hosted runner is a VM. This runs the demo app end to
       # end the way a user's CI would.
       - name: Demo app end to end (native mode, unsigned)
+        timeout-minutes: 20
         working-directory: Examples/SimlessDemo
         run: |
           simless() { "$GITHUB_WORKSPACE/.build/release/simless" "$@"; }
