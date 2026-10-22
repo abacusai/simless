@@ -136,6 +136,14 @@ final class PatchScopeTests: XCTestCase {
         XCTAssertTrue(other.stale.contains("LeafView.Card"))
     }
 
+    /// A preview simless no longer knows about (say its list went with a
+    /// failed build) renders the last build's code: it's stale, not covered.
+    func testAFixtureSimlessCantTraceIsStale() throws {
+        let s = try PatchScope.scope(input(leaf: leafEdited), edited: ["LeafView.swift"], fixtures: ["LeafView.Card"])
+        XCTAssertEqual(s.stale, ["LeafView.Card"])
+        XCTAssertFalse(s.covered.contains("LeafView.Card"))
+    }
+
     func testChunksSplitTopLevelDeclarations() {
         let c = PatchScope.chunks(leafBefore)
         XCTAssertEqual(c.map(\.key), ["type LeafView", "ext View", "type Unrelated"])

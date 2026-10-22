@@ -121,7 +121,21 @@ jobs:
           sed -i '' 's/Button("Follow back")/Button("Follow")/' SimlessDemo/Screens/ProfileView.swift
           simless reload | tee reload.txt
           grep -q "were undone" reload.txt
-          rm scope.txt reload.txt
+          # A build that fails in between: the host keeps the last one that worked,
+          # and the reload after the fix renders the fix and says it's current.
+          echo 'let simlessBroken: Int = "x"' >> SimlessDemo/Screens/LoginView.swift
+          if simless up --json > up.json; then exit 1; fi
+          grep -q '"current" : false' up.json
+          sed -i '' '$d' SimlessDemo/Screens/LoginView.swift
+          sed -i '' 's/Text("Sign in").font/Text("Sign in again").font/' SimlessDemo/Screens/LoginView.swift
+          simless reload --render LoginView.Error | tee reload.txt
+          grep -q '"Sign in again"' reload.txt
+          simless reload --json --render LoginView.Error > reload.json
+          grep -q '"current" : true' reload.json
+          sed -i '' 's/Text("Sign in again").font/Text("Sign in").font/' SimlessDemo/Screens/LoginView.swift
+          simless reload | tee reload.txt
+          grep -q "were undone" reload.txt
+          rm scope.txt reload.txt up.json reload.json
 
       - name: Demo app UI tests (native mode, unsigned)
         timeout-minutes: 10

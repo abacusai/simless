@@ -394,7 +394,7 @@ func cmdUp(_ args: Args) throws {
     try mkdirp(ws.work)
     try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
-    try ws.snapshotSources()
+    let sourcesID = try ws.snapshotSources()
     // What this build is built from, as of its start (recorded once it succeeds).
     let inputs = BuildState.current(ws, previous: BuildState.load(ws) ?? [:])
     try? FileManager.default.removeItem(atPath: BuildState.path(ws))
@@ -405,14 +405,15 @@ func cmdUp(_ args: Args) throws {
     let packageBuild = DispatchGroup()
     defer { packageBuild.wait() }
     DispatchQueue.global().async(group: packageBuild) { RuntimeBuild.prebuild() }
-    // Previews compile against this build: the last build's must not load meanwhile.
-    try? FileManager.default.removeItem(atPath: Previews.dir(ws))
     do { try ws.build() } catch {
-        // A failed build must not hide edits from the next `simless reload`.
-        if let previousSnapshot { try? previousSnapshot.write(to: URL(fileURLWithPath: ws.snapshotPath)) }
-        else { try? FileManager.default.removeItem(atPath: ws.snapshotPath) }
+        // The host still runs the last build that worked: the next `simless
+        // reload` compares with its sources and knows its previews.
+        ws.restoreSnapshot(previousSnapshot)
         throw error
     }
+    ws.pruneSnapshotCopies()
+    // Previews compile against this build: the last build's must not load meanwhile.
+    try? FileManager.default.removeItem(atPath: Previews.dir(ws))
     BuildState.save(ws, inputs)
     // Package tests the app build made are current; the rest build now, in the
     // app's build folder, while the host starts.
@@ -434,6 +435,8 @@ func cmdUp(_ args: Args) throws {
     var slot = try GlobalState.slot(bundleBase: settings.bundleID, worktree: ws.root)
     // The fresh build contains every edit; earlier patches must not be re-applied.
     slot.builtAt = buildStart
+    slot.build = sourcesID
+    slot.sources = sourcesID
     slot.patch = 0
     slot.lastPatch = nil
     slot.covered = nil
@@ -521,6 +524,11 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     }
     let fixtures = target == "all" ? (stats["fixtures"] as? [String] ?? []) : [target]
     if fixtures.isEmpty { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
+    // The host runs the last build or patch that worked: after a failed one, the
+    // sources on disk are newer than what renders.
+    if !args.flags.contains("--json"), let shown = slot.sources ?? slot.build, shown != ws.currentSourcesID() {
+        print("note: the host shows the code as of the last build or patch that worked, not the edits on disk since; `simless reload` (or `simless up`) brings it up to date")
+    }
     let variants: [(dark: Bool, device: String)] = args.flags.contains("--matrix")
         ? [false, true].flatMap { d in ["iphone", "iphone-small", "ipad"].map { (d, $0) } }
         : [(args.flags.contains("--dark"), args.values["--device"] ?? ws.config.device)]
@@ -603,6 +611,7 @@ func cmdReload(_ args: Args) throws {
         slot.lastPatch = nil
         slot.covered = nil
         slot.stale = nil
+        slot.sources = slot.build
         try GlobalState.update(slot)
         try Slots.launch(slot, idleMinutes: ws.idleMinutes)
         print("edits since the last `simless up` were undone; the host shows that build again")
@@ -626,7 +635,7 @@ func cmdReload(_ args: Args) throws {
                       + r.extra.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
             }
             if !r.stale.isEmpty {
-                print("  stale until the next full build (they reach the edit through views this patch left out): "
+                print("  stale until the next full build (they reach the edit through views this patch left out, or simless can't tell what they render): "
                       + r.stale.joined(separator: ", "))
             }
         } catch let error as SimlessError where error.description.hasPrefix("patch compile failed")
