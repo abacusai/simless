@@ -52,6 +52,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
 simless up                                   # once per worktree, and after big changes
 simless reload --render <Fixture>            # after editing views: hot reload (~2 s) + render
 simless render all                           # every fixture
+simless act Login type "#login.email" "a@b.com" tap "Sign in"   # interact, then read the screen
 simless render <Fixture> --dark --device ipad          # devices: iphone, iphone-small, iphone-max, ipad
 simless render all --matrix                  # every fixture × light/dark × iphone, iphone-small, ipad
 simless calibrate                            # once per app: compare every fixture with an iOS Simulator
@@ -88,6 +89,8 @@ NoteList.empty · light · iphone 402×874 · 31 ms · patch 2
 - **Check variants:** `--matrix` for layout changes.
 - **Look at a `--png`** when the change is visual: colors, images, clipping. Read the image file.
 - **Too much noise from a check?** If the user agrees the design is intended (for example small chips that Apple's accessibility audit accepts), set `checks.minTapTarget` or add the issue text to `checks.ignore` in `.simless.json`. Don't do that just to get a clean result.
+
+**Interacting:** `simless act <Fixture> <steps>` renders the fixture, runs the steps in order and prints the tree afterwards. Steps: `tap "<label or #id>"`, `type "<#id or label>" "<text>"` (focuses the field first), `swipe up|down|left|right [on "<label>"]`, `longpress "<label>"`, `wait <ms>`. Prefer `#id`s, they don't change with copy. Each step is checked (`✓`/`✗`), and a step that finds nothing lists what's on screen. Use it to check what a tap or typing does (a toggle's value, a validation message, a button enabling) instead of adding a fixture per state. Needs the kit from `simless init` (kit 5).
 
 `simless reload` hot-patches only the edited files plus the fixtures file. If a patch can't express a change (stored properties, function signatures, new types used elsewhere), it falls back to a full build automatically. Compiler errors point at your real `file:line`: fix them and re-run. `simless reload` with no arguments picks up every file edited since the last `simless up`.
 

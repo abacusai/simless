@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 4
+    static let kitVersion = 5
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -206,6 +206,19 @@ enum SimlessHost {
                     }
                     return
                 }
+                // `simless act`: UI commands go to SimlessRuntime, which answers later.
+                if let req = try? JSONDecoder().decode(Request.self, from: line), req.cmd.hasPrefix("ui.") {
+                    waiting = true
+                    SimlessHost.lastRequest = Date()
+                    SimlessHost.forwardToRuntime(line) { [self] reply in
+                        var out = reply
+                        out.append(0x0A)
+                        conn.send(content: out, completion: .contentProcessed { _ in })
+                        waiting = false
+                        drain()
+                    }
+                    return
+                }
                 let (response, after) = SimlessHost.handle(line)
                 send(response, after)
             }
@@ -237,6 +250,11 @@ enum SimlessHost {
             return (r, nil)
         case "render":
             return (render(req), nil)
+        case "tree":
+            // The screen as it is now, after `simless act` interacted with it.
+            guard let m = mounted else { return (Response(ok: false, error: "nothing rendered yet"), nil) }
+            m.host.view.layoutIfNeeded()
+            return (finish(Mounted(name: m.name, host: m.host, rect: m.rect, start: CFAbsoluteTimeGetCurrent()), req), nil)
         case "load":
             return (load(req), nil)
         case "stop":
@@ -277,6 +295,33 @@ enum SimlessHost {
         let rect: CGRect
         let start: CFAbsoluteTime
     }
+
+    /// Hands a `ui.*` request to SimlessRuntime (in every host simless starts),
+    /// with the canvas it acts in. The reply comes on the main thread.
+    fileprivate static func forwardToRuntime(_ line: Data, _ done: @escaping (Data) -> Void) {
+        typealias Reply = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+        typealias RuntimeUI = @convention(c) (UnsafePointer<CChar>, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, Reply) -> Void
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "simless_runtime_ui") else {
+            return done(Data(#"{"ok":false,"error":"SimlessRuntime isn't loaded in this host"}"#.utf8))
+        }
+        let box = Unmanaged.passRetained(ReplyBox(done)).toOpaque()
+        let canvas = window.map { Unmanaged.passUnretained($0).toOpaque() }
+        String(decoding: line, as: UTF8.self).withCString { json in
+            unsafeBitCast(sym, to: RuntimeUI.self)(json, canvas, box) { reply, context in
+                guard let context else { return }
+                let box = Unmanaged<ReplyBox>.fromOpaque(context).takeRetainedValue()
+                box.done(Data(reply.map { String(cString: $0) }?.utf8 ?? #"{"ok":false}"#.utf8))
+            }
+        }
+    }
+
+    private final class ReplyBox {
+        let done: (Data) -> Void
+        init(_ done: @escaping (Data) -> Void) { self.done = done }
+    }
+
+    /// The fixture on the canvas, for `tree`.
+    private static var mounted: Mounted?
 
     private static func render(_ req: Request) -> Response {
         switch mount(req) {
@@ -345,7 +390,9 @@ enum SimlessHost {
         window.rootViewController = host
         host.view.frame = rect
         host.view.layoutIfNeeded()
-        return .success(Mounted(name: name, host: host, rect: rect, start: start))
+        let m = Mounted(name: name, host: host, rect: rect, start: start)
+        mounted = m
+        return .success(m)
     }
 
     /// Reads the mounted fixture's tree (and PNG) into the response.

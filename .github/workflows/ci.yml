@@ -86,6 +86,11 @@ jobs:
           simless up
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
+          # Interaction: a switch flips, a text field takes focus and typing.
+          simless act Settings tap "Push notifications" | tee act.txt
+          grep -q '"Push notifications" = "0"' act.txt
+          simless act Login type "#login.email" "a@b.com" tap "Sign in" | tee act.txt
+          grep -q '= "a@b.com" #login.email' act.txt && rm act.txt
           simless test all
 
       - name: Demo app UI tests (native mode, unsigned)

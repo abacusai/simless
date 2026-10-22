@@ -64,10 +64,15 @@ enum Render {
     /// Renders one fixture and returns the text an agent reads (or JSON).
     static func run(slot: SlotRecord, fixture: String, options: Options) throws -> (text: String, issues: Int) {
         let c = try canvas(options.device)
-        let (w, h) = (c.width, c.height)
         let client = try slot.client(timeout: 30)
         let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
                                         textSize: options.textSize, idiom: options.idiom, settle: options.settle))
+        return try format(r, fixture: fixture, options: options, canvas: c)
+    }
+
+    /// A render's answer as the tree, the PNG it asked for and the issues.
+    static func format(_ r: [String: Any], fixture: String, options: Options, canvas c: Canvas) throws -> (text: String, issues: Int) {
+        let (w, h) = (c.width, c.height)
         guard r["ok"] as? Bool == true else {
             let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
             throw SimlessError("\(r["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))
