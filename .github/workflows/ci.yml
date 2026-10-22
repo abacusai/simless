@@ -87,11 +87,20 @@ jobs:
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
           simless test all
-          simless test ui
+
+      - name: Demo app UI tests (native mode, unsigned)
+        timeout-minutes: 10
+        working-directory: Examples/SimlessDemo
+        env:
+          SIMLESS_UI_TRACE: "1"
+        run: |
+          "$GITHUB_WORKSPACE/.build/release/simless" test ui
 
       - name: Host logs
-        if: failure()
+        if: failure() || cancelled()
         run: |
-          for f in ~/Library/Caches/simless/slots/*/host.log ~/Library/Caches/simless/work/*/build.log; do
-            echo "::group::$f"; tail -n 80 "$f"; echo "::endgroup::"
+          for f in ~/Library/Caches/simless/slots/*/host.log ~/Library/Caches/simless/work/*/build.log \
+                   ~/Library/Caches/simless/work/*/ui-artifacts/*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"
           done
