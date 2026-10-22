@@ -25,6 +25,7 @@ struct Config: Codable {
     var mode: String?             // "native" (default): hosts run unsigned; "dfi": signed Designed-for-iPad installs
     var settle: Double?           // default --settle: ms each render gives the screen's async work (default 0)
     var isolate: Bool?            // native hosts get a sandbox of their own: write only their slot, read only their worktree
+    var previews: Bool?           // fixtures from #Preview blocks and the App's root view (default true)
 
     struct Checks: Codable {
         var minTapTarget: Double?     // points (default 44)
@@ -398,6 +399,23 @@ struct Workspace {
         for f in swiftSources() { hashes[f] = Self.digest(f) }
         try mkdirp(work)
         try JSONEncoder().encode(hashes).write(to: URL(fileURLWithPath: snapshotPath))
+        // A copy of each file as built (APFS clones, by content), so hot reload
+        // can tell which declarations an edit changed.
+        let dir = "\(work)/snapshot"
+        try mkdirp(dir)
+        let fm = FileManager.default
+        let keep = Set(hashes.values.map { "\($0).swift" })
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) {
+            try? fm.removeItem(atPath: "\(dir)/\(name)")
+        }
+        for (f, h) in hashes where !exists("\(dir)/\(h).swift") { try? fm.copyItem(atPath: f, toPath: "\(dir)/\(h).swift") }
+    }
+
+    /// The file's text as of the last full build, when there's a copy of it.
+    func snapshotText(of path: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: snapshotPath),
+              let snap = try? JSONDecoder().decode([String: String].self, from: d), let h = snap[path] else { return nil }
+        return try? String(contentsOfFile: "\(work)/snapshot/\(h).swift", encoding: .utf8)
     }
 
     /// Swift files whose contents differ from the last full build. Content, not

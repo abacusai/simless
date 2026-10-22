@@ -25,6 +25,8 @@ If it isn't set up, do it yourself:
 
 ## 2. Fixtures: the screens simless can render
 
+Some exist without any code: `root` (the app's first window, as the `@main` App builds it) and one per `#Preview` block, named `<File>.<preview name or number>`. `simless up` lists them. Render those first. Add fixtures for states the previews don't show.
+
 `SimlessFixtures.swift` is normal app code:
 
 ```swift

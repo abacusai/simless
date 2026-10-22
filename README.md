@@ -158,6 +158,8 @@ SimlessHost.startIfRequested()
 #endif
 ```
 
+Some fixtures come for free. `root` is the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`, like `LoginView.Error` or `NoteRow.2`. `simless up` compiles them against the build, and `simless render all` lists them after yours. A preview that can't be built outside Xcode is left out, and `up` says which and why.
+
 Register the screens agents should be able to render, each in a deterministic state:
 
 ```swift
@@ -183,7 +185,7 @@ simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
 simless reload [files...]         hot-reload everything edited since `simless up`
-      [--render <fixture|all>] [--matrix] [--no-fallback]
+      [--render <fixture|all>] [--matrix] [--no-fallback] [--dry-run]
 simless test [Target/Class/method...|all]   unit tests on the Mac, local package tests included
       [--skip Target/Class/method]... [--timeout <seconds per test>] [--hosts <n>] [--jobs <tests at once>]
       [--from <file|->]               test ids from a file or stdin, unit and UI ids mixed
@@ -331,6 +333,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 - `mode`: `"native"` (the default) runs the app unsigned. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
+- `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default.
 - `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.
 
 </details>
@@ -372,7 +375,7 @@ simless also cleans up after itself, so nothing piles up between runs or after a
 
 What simless does to stay accurate:
 
-- **Hot reload patches more than the edited files.** It also patches every view between your fixtures and the edit, including views in local Swift packages, so a parent view never renders a stale subview. Edits it can't trace safely (an extension of another type, a public or top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically.
+- **Hot reload patches more than the edited files.** It also patches every view between the fixture you render and the edit, including views in local Swift packages, so a parent view never renders a stale subview. With `--render X` it only patches X's way to the edit: other fixtures that reach the edited view are listed as stale until the next full build, and `simless render` notes it on them. A store or model that merely names a view doesn't count as rendering it. Edits it can't trace safely (an extension of a type outside your sources, an internal or public top-level function) and patches that mix modules with different compiler settings fall back to a full build automatically. `simless reload --dry-run` shows what a reload would patch.
 - **Phone canvases get phone size classes.** That means compact width and the device's safe areas (notch, home indicator). The idiom stays iPad on the Mac unless you pass `--idiom phone`. Every render prints the traits the view saw.
 - **`simless calibrate` compares against a real simulator.** It renders every fixture on the Mac and in one iOS Simulator, and reports any element or frame that differs by more than 2 pt.
 
