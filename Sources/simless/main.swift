@@ -3,7 +3,7 @@
 
 import Foundation
 
-let version = "0.5.3"
+let version = "0.6.0"
 
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
@@ -13,7 +13,7 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
         [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
-        [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone]
+        [--locale <lang, e.g. hr>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]
         --matrix: light+dark × iphone, iphone-small, ipad
   simless reload [files...]        hot-reload edited view files (default: all edited since `simless up`)
         [--render <fixture|all>] [--no-fallback]
@@ -57,7 +57,7 @@ struct Args {
 
     init(_ raw: [String]) {
         let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target",
-                                   "--locale", "--text-size", "--idiom", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
+                                   "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
@@ -95,15 +95,17 @@ func cmdInit(_ args: Args) throws {
     let targets = p["targets"] as? [String] ?? []
     let scheme = args.values["--scheme"] ?? (schemes.contains(base) ? base : schemes.first ?? base)
     let appTarget = targets.contains(scheme) ? scheme : base
+    // Only the dfi mode needs one (it installs hosts through it); without one, `simless test` has no app targets.
     let testTarget = args.values["--test-target"]
         ?? (targets.contains("\(appTarget)Tests") ? "\(appTarget)Tests"
-            : targets.first { $0.hasSuffix("Tests") && !$0.hasSuffix("UITests") })
-    guard let testTarget else {
-        throw SimlessError("no unit-test target found; simless installs hosts through an app-hosted unit-test target (pass --test-target)")
-    }
+            : targets.first { $0.hasSuffix("Tests") && !$0.hasSuffix("UITests") }) ?? ""
     // The app's sources usually sit next to the project, in a folder named like the target.
+    // Else (a generated project, say, with everything under Sources/) the top
+    // folder of the one holding the `@main` App: the kit must sit among the
+    // files the target compiles.
     let sourceDir = fm.fileExists(atPath: "\(root)/\(inProjectDir(appTarget))") ? inProjectDir(appTarget)
-        : (projectDir.isEmpty ? "." : projectDir)
+        : mainAppFolder(in: projectDir.isEmpty ? root : "\(root)/\(projectDir)").map(inProjectDir)
+        ?? (projectDir.isEmpty ? "." : projectDir)
     let kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
 
     // Local Swift packages the project references: their views can be hot-reloaded too.
@@ -149,7 +151,7 @@ func cmdInit(_ args: Args) throws {
     let synced = pbx.contains("PBXFileSystemSynchronizedRootGroup")
     let hook = args.flags.contains("--no-hook") ? nil : try insertHook(in: "\(root)/\(sourceDir)")
     let configLine = existing != nil ? "kept \(Workspace.configName) (--force rewrites it)"
-        : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
+        : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
     print("""
         \(configLine)
         wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
@@ -194,6 +196,21 @@ func findProject(in root: String) throws -> String {
     return candidates[0]
 }
 
+
+/// The top-level folder (relative to `dir`) of the file that declares the `@main` App.
+func mainAppFolder(in dir: String) -> String? {
+    let skip: Set<String> = ["Pods", "node_modules", "Carthage", "DerivedData", "build", ".build", "vendor"]
+    guard let e = FileManager.default.enumerator(atPath: dir) else { return nil }
+    while let rel = e.nextObject() as? String {
+        let first = String(rel.split(separator: "/").first ?? "")
+        if skip.contains(first) || first.hasPrefix(".") || first.hasSuffix(".xcodeproj") { e.skipDescendants(); continue }
+        guard rel.hasSuffix(".swift"), rel.contains("/"),
+              let s = try? String(contentsOfFile: "\(dir)/\(rel)", encoding: .utf8),
+              s.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b"#, options: .regularExpression) != nil else { continue }
+        return first
+    }
+    return nil
+}
 
 /// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
 /// Returns what it did, or nil when it couldn't find a safe place.
@@ -340,7 +357,7 @@ func cmdUp(_ args: Args) throws {
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
-    print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")")
+    print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")\(Native.isNative(slot) ? " (native: unsigned, no agent needed)" : "")")
     if let note = skillNote() { print(note) }
     testsReady.wait()
     Cleanup.enforceDiskLimit(keeping: ws)
@@ -354,7 +371,9 @@ func cmdRender(_ args: Args) throws {
 }
 
 /// SimlessKit version this simless needs for every feature (see `kitVersion` in the kit).
-let requiredKit = 3
+let requiredKit = 4
+/// The kit each feature first needs (older kits keep working without it).
+let localeKit = 3, settleKit = 4
 
 func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws {
     if let size = args.values["--text-size"], !Render.textSizes.contains(size) {
@@ -367,7 +386,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     let locale = args.values["--locale"]
     var stats = slot.stats() ?? [:]
     if stats["locale"] as? String != locale {
-        if locale != nil, (stats["kit"] as? Int ?? 1) < requiredKit {
+        if locale != nil, (stats["kit"] as? Int ?? 1) < localeKit {
             throw SimlessError("--locale needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
         }
         if locale != nil || stats["locale"] != nil {
@@ -375,6 +394,9 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
             stats = slot.stats() ?? [:]
         }
+    }
+    if (args.values["--settle"].flatMap(Double.init) ?? ws.config.settle ?? 0) > 0, (stats["kit"] as? Int ?? 1) < settleKit {
+        throw SimlessError("--settle needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
     }
     let fixtures = target == "all" ? (stats["fixtures"] as? [String] ?? []) : [target]
     if fixtures.isEmpty { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
@@ -387,6 +409,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
         for v in variants {
             var options = Render.Options(dark: v.dark, device: v.device, json: args.flags.contains("--json"))
             options.textSize = args.values["--text-size"]
+            options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
             options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
             options.checks = ws.config.checks ?? .init()
             if var png = args.values["--png"] {
@@ -445,7 +468,16 @@ func cmdReload(_ args: Args) throws {
         ? ws.changedSources()
         : args.positional.map { $0.hasPrefix("/") ? $0 : "\(FileManager.default.currentDirectoryPath)/\($0)" }
     let kit = "\(ws.root)/\(ws.config.kitFile)"
-    if files.isEmpty {
+    if files.isEmpty && slot.patch > 0 {
+        // The edits were undone: the host still runs the last patch, so start it
+        // again from the build, which is what the sources say now.
+        Slots.stop(slot)
+        slot.patch = 0
+        slot.lastPatch = nil
+        try GlobalState.update(slot)
+        try Slots.launch(slot, idleMinutes: ws.idleMinutes)
+        print("edits since the last `simless up` were undone; the host shows that build again")
+    } else if files.isEmpty {
         print("nothing edited since the last `simless up`")
     } else if files.contains(kit) {
         Log.step("SimlessKit changed; full rebuild")

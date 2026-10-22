@@ -58,7 +58,7 @@ enum TestEngine {
         for p in Packages.testTargets(ws: ws) where !p.targets.isEmpty {
             let products = ws.productsIphoneos
             let bundles = p.targets.map { "\(products)/\($0).xctest" }.filter(exists)
-            try prepareBundles(bundles, products: products, team: settings.team)
+            try prepareBundles(bundles, products: products, team: settings.team, native: ws.native)
             count += bundles.count
         }
         let appTargets = (try? appTestTargets(ws)) ?? []
@@ -181,6 +181,9 @@ enum TestEngine {
         let all = args.positional == ["all"]
         let filters = all ? [] : args.positional.isEmpty ? [ws.config.testTarget] : args.positional
         let known = Set(appTargets + packageTargets)
+        if known.isEmpty {
+            throw SimlessError("\(ws.config.scheme) has no unit-test targets (and no local package has tests), so there's nothing to run")
+        }
         for f in filters where !known.contains(String(f.split(separator: "/").first ?? "")) {
             throw SimlessError("unknown test target in \(f); targets: \((appTargets + packageTargets).sorted().joined(separator: ", "))")
         }
@@ -200,7 +203,7 @@ enum TestEngine {
             let names = p.targets.filter(wanted.contains)
             if names.isEmpty { continue }
             let products = try Packages.buildTests(p, targets: names, ws: ws)
-            try prepareBundles(names.map { "\(products)/\($0).xctest" }, products: products, team: settings.team)
+            try prepareBundles(names.map { "\(products)/\($0).xctest" }, products: products, team: settings.team, native: ws.native)
             targets += names.map { Target(name: $0, module: moduleName($0), bundle: "\(products)/\($0).xctest") }
         }
         let firstSlot = try RuntimeHost.slot(kind: "test", ws: ws)
@@ -380,6 +383,8 @@ enum TestEngine {
     /// The app's hosted unit-test targets, from the build's .xctestrun (UI test
     /// bundles excluded).
     static func appTestTargets(_ ws: Workspace) throws -> [String] {
+        // A scheme without tests builds no .xctestrun: the app has no test targets.
+        if ws.appXCTestRun == nil, ws.config.testTarget.isEmpty, exists(ws.settingsPath) { return [] }
         guard let file = ws.appXCTestRun,
               let data = FileManager.default.contents(atPath: file),
               let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
@@ -401,14 +406,14 @@ enum TestEngine {
     /// Package test bundles are built unsigned: sign them so the host can load
     /// them, and put the package's resource bundles inside each, where
     /// `Bundle.module` looks.
-    static func prepareBundles(_ bundles: [String], products: String, team: String) throws {
+    static func prepareBundles(_ bundles: [String], products: String, team: String, native: Bool) throws {
         let fm = FileManager.default
-        let identity = try Signing.identity(team: team).0
+        let identity = native ? "-" : try Signing.identity(team: team).0
         let resources = ((try? fm.contentsOfDirectory(atPath: products)) ?? []).filter { $0.hasSuffix(".bundle") }
         // Skip what hasn't changed since its last signature.
         let stale = bundles.filter { bundle in
             let exe = "\(bundle)/\(((bundle as NSString).lastPathComponent as NSString).deletingPathExtension)"
-            let stamp = "\(bundle)/.simless-signed"
+            let stamp = "\(bundle)/.simless-\(native ? "native" : "signed")"
             return !(exists(stamp) && mtime(stamp) >= mtime(exe))
         }
         guard !stale.isEmpty else { return }
@@ -422,8 +427,9 @@ enum TestEngine {
                     try? FileManager.default.removeItem(atPath: "\(bundle)/\(r)")
                     try Shell.check(["/bin/cp", "-c", "-R", "\(products)/\(r)", "\(bundle)/\(r)"], what: "copy \(r)")
                 }
-                try Signing.sign(bundle, identity: identity)
-                FileManager.default.createFile(atPath: "\(bundle)/.simless-signed", contents: nil)
+                if native { try Native.adopt([bundle]) } else { try Signing.sign(bundle, identity: identity) }
+                try? FileManager.default.removeItem(atPath: "\(bundle)/.simless-\(native ? "signed" : "native")")
+                FileManager.default.createFile(atPath: "\(bundle)/.simless-\(native ? "native" : "signed")", contents: nil)
             } catch {
                 errors.mutate { $0.append(error) }
             }
@@ -640,7 +646,8 @@ final class Session {
             let dir = URL(fileURLWithPath: "\(ws.root)/\(p)").standardizedFileURL.path
             if !dir.hasPrefix(URL(fileURLWithPath: ws.root).standardizedFileURL.path + "/") { dirs.append(dir) }
         }
-        env["SIMLESS_SANDBOX_TOKENS"] = dirs.compactMap(Sandbox.readToken).joined(separator: "\n")
+        // A native host isn't sandboxed: it reads them as they are.
+        if !Native.isNative(slot) { env["SIMLESS_SANDBOX_TOKENS"] = dirs.compactMap(Sandbox.readToken).joined(separator: "\n") }
         env["SIMLESS_IDLE"] = String(ws.idleMinutes * 60)
         // Windows tests make get the device's size and safe areas.
         if let c = try? Render.canvas(ws.config.device) { env["SIMLESS_UNIT_CANVAS"] = "\(c.width),\(c.height),\(c.safeTop),\(c.safeBottom)" }
@@ -654,6 +661,7 @@ final class Session {
     /// files, preferences and caches earlier runs saved would make results
     /// depend on how often the tests ran before.
     private func wipe() {
+        if Native.isNative(slot) { return Native.wipe(slot) }
         guard let app = try? RuntimeHost.installedApp(slot) else { return }
         Cleanup.wipeContainer(app: app, runtime: "\(slot.dir)/SimlessRuntime.dylib")
     }
@@ -699,6 +707,10 @@ final class Session {
                       // nothing; it goes away after 10 minutes without a run.
                       "SIMLESS_IDLE": String(min(ws.idleMinutes, 10) * 60)]) { $1 }
         guard let app = try? RuntimeHost.installedApp(slot) else { return }
+        if Native.isNative(slot) {
+            _ = try? Native.launch(slot, env: env, args: [], log: "\(slot.dir)/standby.log")
+            return
+        }
         var cmd = ["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/standby.log", "--stdout", "\(slot.dir)/standby.log"]
         for (k, v) in env.sorted(by: { $0.key < $1.key }) { cmd += ["--env", "\(k)=\(v)"] }
         try? FileManager.default.removeItem(atPath: "\(slot.dir)/standby.log")

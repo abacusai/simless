@@ -4,6 +4,8 @@
 
 Your real iOS app runs natively on your Mac as an invisible render host. Agents render any screen as a compact accessibility tree in milliseconds, hot-reload edited views in about 2 seconds, and run unit tests and your existing XCUITest UI tests, all without booting an iOS Simulator. Many agents across many projects can work in parallel on one Mac.
 
+Nothing to set up beyond Xcode: no certificate, provisioning profile or Full Disk Access, and no login session needed, so it runs the same on a laptop, over SSH, on a CI runner or in a VM.
+
 ```
 $ simless reload --render Welcome.sheet
 reloaded (live) in 1.9s: compile 1.7s + apply 0.2s; files edited since `simless up`: WelcomeSheet.swift
@@ -21,8 +23,9 @@ Welcome.sheet · light · iphone 402×874 · 25 ms · patch 1
 Coding agents check UI changes by building for the iOS Simulator, installing, launching and taking screenshots. Each agent pays for its own booted simulator (we measured ~2.2 GB of private memory and ~210 processes per simulator running a real app) plus its own `xcodebuild`. With 4–5 agents in parallel, a 32 GB Mac swaps and everything slows to a crawl.
 
 simless replaces that loop:
-- **No simulator:** the app's iOS slice runs natively on Apple Silicon ("Designed for iPad"). It's your real app target, views and dependencies, at ~30 MB per host.
-- **Headless:** no windows, no Dock icons, no focus stealing, including during installs and test runs.
+- **No simulator:** the app's iOS build runs natively on Apple Silicon. It's your real app target, views and dependencies, at ~30 MB per host.
+- **No signing:** simless tags the iOS binaries for Mac Catalyst and signs them ad hoc, then starts the app directly. Nothing is installed or registered.
+- **Headless:** no windows, no Dock icons, no focus stealing, including during test runs. It doesn't need a window server session either.
 - **Text first:** agents read an accessibility tree (~150 tokens per screen), plus automatic checks for unlabeled controls, off-screen elements, small tap targets and overlaps. PNGs are produced only on request.
 - **Hot reload:** only the edited files are compiled into a patch and loaded into the running host.
 - **Built for many agents:** one host per git worktree, coordinated with file locks, and everything cleaned up automatically.
@@ -44,6 +47,8 @@ Measured on a production SwiftUI app (~280 Swift files, several large Swift pack
 | 20 named tests, nothing rebuilt | 25.5 s | **about 1 s** | 25× |
 | UI tests (106 XCUITests, iPhone and iPad, 5 simulator clones vs. 4 hidden hosts) | 19.2 min | **7.5 to 9.4 min** | 2.3× |
 
+Since 0.6.0 hosts run unsigned (the native mode). Against the signed "Designed for iPad" install of earlier versions, on the second production app with every host stopped between runs (M-series Mac, 10 cores): a warm `simless up` takes 28.5 s instead of 53.2 s, the 107 UI tests 432 s instead of 545 s, and the 2,345 unit tests the same time (303 to 327 s against 320 s), with the same outcome for every test and the same renders.
+
 Legacy gets slower with every agent you add, simless stays at ~2 s per edit. The test rows are from a second production app (about 2,200 unit tests across 41 targets, most of them in a local Swift package), against an iPhone 17 simulator on iOS 26.5, with the same results test by test. The whole unit suite's time is set by one CPU-heavy test target that the Mac's Swift runtime runs slower than the simulator does (see [Unit tests](#unit-tests)). Full method, caveats and reproduction steps: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Does it look the same?
@@ -59,9 +64,10 @@ Mostly. Here are screens from the [demo app](Examples/SimlessDemo), rendered by 
 
 ## Requirements
 
-- An Apple Silicon Mac with Xcode 26 or later.
-- A SwiftUI iOS app in an `.xcodeproj` (at the repository root or in a subfolder such as `ios/`), with an app-hosted unit-test target (simless installs hosts through it). Views can live in the app target or in local Swift packages, and both hot-reload. Swift 5 and Swift 6 language modes, with or without MainActor default isolation, are supported.
-- An **Apple Development** certificate, and the team's wildcard development profile ("iOS Team Provisioning Profile: \*") that includes this Mac. Xcode creates it the first time you run any app on "My Mac (Designed for iPad)". simless never registers anything in your developer account.
+- An Apple Silicon Mac (a VM works too) with Xcode 26 or later. The iOS SDK that ships with Xcode is enough: no simulator runtime is needed.
+- A SwiftUI iOS app in an `.xcodeproj` (at the repository root or in a subfolder such as `ios/`). Views can live in the app target or in local Swift packages, and both hot-reload. Swift 5 and Swift 6 language modes, with or without MainActor default isolation, are supported. A unit-test target is optional: `simless test` runs it when there is one.
+
+That's all. Older versions of simless ran the app as a signed "Designed for iPad" install, which needed an Apple Development certificate and a wildcard profile that includes the Mac. That mode is still there (`"mode": "dfi"`, see [Options](#options-in-simlessjson)), but nothing needs it.
 
 ## Install
 
@@ -105,19 +111,17 @@ func simlessFixtures(_ r: SimlessRegistry) {
 
 Then run `simless up`. If your project doesn't use synchronized folders, add the two files to the app target first. If app startup has side effects a background host shouldn't trigger (analytics, sync), guard them with `SimlessHost.isActive`.
 
-### Live reload (optional, recommended)
+### Live reload
 
-```sh
-simless agent install
-```
+Live reload works out of the box: simless places each patch in the host's own temp folder and the host loads it, in about 0.2 s after the compile.
 
-Then grant **SimlessAgent** Full Disk Access (System Settings → Privacy & Security → Full Disk Access). This takes hot reload from about 10 s to about 2 s. The agent can do exactly one thing: copy a patch built by simless into the temp folder of a simless host's sandbox container. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).
+The `dfi` mode runs the app in the Mac's app sandbox, where simless can't place files. There, `simless agent install` and Full Disk Access for **SimlessAgent** take hot reload from about 10 s to about 2 s. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).
 
 ## Commands
 
 ```
 simless init [--no-hook]          set up a repo
-simless up [--no-tests]           build, install this worktree's host, start it, and prepare local packages'
+simless up [--no-tests]           build, prepare this worktree's host, start it, and prepare local packages'
                                   tests and the test hosts, so the first `simless test` only runs tests
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
@@ -136,7 +140,7 @@ simless status                    hosts, test runs going on and their share of t
 simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every worktree's,
                                   said before it stops them, except where a test run is going on)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
-simless agent install             install SimlessAgent (live reload)
+simless agent install             install SimlessAgent (live reload in the dfi mode only)
 simless skill install             install the Claude Code skill
 simless version                   version, Xcode and macOS
 ```
@@ -185,7 +189,10 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
   },
   "calibrate": { "runtime": "26.5", "device": "iPhone 17 Pro" },
   "idiom": "phone",
-  "embeddedBundles": true
+  "embeddedBundles": true,
+  "mode": "native",
+  "settle": 0,
+  "isolate": false
 }
 ```
 
@@ -199,6 +206,32 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against and the simulator-only command runs on (default: the newest runtime, iPhone 17 Pro).
 - `idiom`: `"phone"` renders phone canvases with the phone idiom (see below).
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
+- `mode`: `"native"` (the default) runs the app unsigned, as described above. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
+- `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0: a fixture that injects its data needs none.
+- `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.
+
+## In CI
+
+The native mode needs nothing on the runner but Xcode, so a GitHub-hosted macOS runner works as it is:
+
+```yaml
+jobs:
+  ui-checks:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install simless
+        run: |
+          git clone --depth 1 https://github.com/abacusai/simless "$RUNNER_TEMP/simless"
+          swift build -c release --package-path "$RUNNER_TEMP/simless"
+          echo "$RUNNER_TEMP/simless/.build/release" >> "$GITHUB_PATH"
+      - run: simless up
+      - run: simless render all --matrix
+      - run: simless test all
+      - run: simless test ui
+```
+
+`simless test` exits non-zero on any failed, crashed or missing test (see [Using simless as a merge check](#using-simless-as-a-merge-check)), and its results files are plain JSON for a report step. A runner without a login session (a LaunchDaemon, SSH) works too: hosts render without a window server.
 
 ## Using it from AI agents
 
@@ -233,9 +266,9 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 ## Cleanup is automatic
 
 simless cleans up after itself, so nothing piles up between runs or after a worktree is gone:
-- **Deleted worktrees:** every command removes the hosts, slots and build cache of any worktree that no longer exists.
+- **Deleted worktrees:** every command removes the hosts, slots and build cache of any worktree that has been gone for 10 minutes. The wait is for build machines that replace a project's files on every sync: a worktree that disappears for a moment keeps its builds.
 - **Unused worktrees:** a worktree that hasn't used simless for two weeks loses its hosts, slots and builds too (its `.simless.json` stays, and `simless up` builds again).
-- **App data:** every test run starts with a fresh install's data, like a simulator's clones: the app's data container is emptied and its saved preferences cleared before a UI run and before each unit test host starts. Removing a slot empties it too. macOS lets no other process touch it, so simless launches the app once to delete its own files.
+- **App data:** every test run starts with a fresh install's data, like a simulator's clones: the app's home folder in the slot (documents, caches, tmp, its keychain) is emptied and its preferences cleared before a UI run and before each unit test host starts. Removing a slot empties it too. (In the dfi mode the data sits in a sandbox container that only the app may touch, so simless launches the app once to delete its own files.)
 - **Hosts:** a host exits after 30 idle minutes (`hostIdleMinutes`), a standby test host after 10. `simless down` stops this worktree's hosts, test and UI hosts included.
 - **Crash reports** that macOS writes for simless hosts are deleted after a day.
 - **Patches:** only the newest 3 are kept, and patch files are deleted as soon as they're loaded.
@@ -283,12 +316,13 @@ Agents often work in parallel worktrees. Each worktree has its own hosts, slots 
 ### Unit tests
 
 - **Local package tests.** Package test targets run in the slot app, like the app's own tests. simless builds them for iOS devices, in the app's build folder with the app build's settings, so the package's code is compiled once for both. Xcode won't run a test bundle without a host app on "My Mac (Designed for iPad)", and `swift test` builds for macOS, where iOS-only imports fail. The bundle links its own copy of the package, so state it shares with the app (singletons, globals) isn't shared.
-- **The repository is readable.** Tests (and fixtures) can read files in the repository, for example next to `#filePath`, but not write them. The app sandbox would block it, so simless grants read access when it starts the app.
-- **App groups.** `containerURL(forSecurityApplicationGroupIdentifier:)` returns a private folder per group inside the slot's container, so reads and writes work but nothing is shared with other apps.
+- **The app's own folders.** Home, documents, caches and tmp are a folder in the slot, so every slot has its own and `simless test` empties them. The app isn't in a sandbox, so tests and fixtures can read files in the repository (next to `#filePath`, say) and write them, as in a simulator. (The dfi mode's sandbox lets them read the repository only.)
+- **App groups.** `containerURL(forSecurityApplicationGroupIdentifier:)` returns a private folder per group inside the slot, so reads and writes work but nothing is shared with other apps. `UserDefaults(suiteName:)` is kept per slot too.
+- **Keychain.** The app gets a keychain of its own for generic and internet passwords (where apps keep tokens), emptied with the rest of its data. Key and certificate items aren't supported.
 - **Other capabilities are missing.** Hosts run without iCloud/CloudKit, keychain sharing or push. Tests that need them can fail or take other code paths.
 - **App extensions and the watch app stay in the app.** They're re-identified under the slot's bundle id so tests can find them. macOS registers the extensions, and simless sets each one to "ignore" so a slot's widgets never show up in the widget gallery.
-- **Device-only tests run.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` instead, or on the `SIMLESS_HEADLESS` environment variable, which is set only in simless runs.
-- **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice`, file-system locations, the sandbox.
+- **Device-only tests run.** `targetEnvironment(simulator)` is false on the Mac, so tests gated on it run. Gate them on `ProcessInfo.processInfo.isiOSAppOnMac` instead, or on the `SIMLESS_HEADLESS` environment variable, which is set only in simless runs. At compile time, simless builds define `SIMLESS`: code that should take its simulator branch under simless too (a StoreKit mock, say) can check `#if targetEnvironment(simulator) || SIMLESS`.
+- **Mac behavior.** Some APIs behave differently when an iOS app runs on a Mac: `UIDevice`, file-system locations. The app reports itself as an iOS app on a Mac (`isiOSAppOnMac` is true), like a "Designed for iPad" app.
 - **Current build.** App tests run against a full build, never against hot-reload patches, and `simless test` builds again first when a file the build reads has changed. Package tests are built from the current sources.
 - **Windows tests make** on the connected scene have the emulated device's size and safe areas (62 pt on top on an iPhone), and their content is laid out within them.
 - **Bundle ids.** The app, its extensions and the watch app report their original bundle ids to tests, not the slot's, in `bundleIdentifier` and in Info.plist values such as a watch app's companion id.
@@ -309,7 +343,7 @@ Agents often work in parallel worktrees. Each worktree has its own hosts, slots 
 
 `performAccessibilityAudit` runs simless's own checks with Xcode's audit types: hit regions under 24 pt, elements without a description, clipped text (read with Vision), text that doesn't scale with Dynamic Type, and contrast. elementDetection and trait aren't checked.
 
-**Permission prompts never reach your screen.** The hosts are real Mac apps, so a request for calendar, notifications, microphone, camera, speech, photos, contacts, location or tracking access would show macOS's dialog, and so would a review request. The runtime answers them itself: access is denied and review requests do nothing. Granting isn't an option, because the app's next access would make macOS ask anyway. Set `SIMLESS_PERMISSIONS=ask` to let the requests through to macOS.
+**Permission prompts never reach your screen.** The hosts are real Mac apps, so a request for calendar, notifications, microphone, camera, speech, photos, contacts, location or tracking access would show macOS's dialog, and so would a review request. The runtime answers them itself: access is denied and review requests do nothing. For location that's what an iPhone does after a denial: the delegate hears the status change, `authorizationStatus` reads denied, and asking for a fix fails with `kCLErrorDenied`, so an app waiting for a location doesn't wait forever. Granting isn't an option, because the app's next access would make macOS ask anyway. Set `SIMLESS_PERMISSIONS=ask` to let the requests through to macOS.
 
 What needs a simulator: HealthKit permission sheets and data, the StoreKit purchase sheet and products from a StoreKit configuration file, the photo and file pickers (unless your app stubs them in UI tests), recording from the microphone, sharing to a target, the Home Screen, and the watch app. The same goes for a test that counts on app code behind `#if targetEnvironment(simulator)`, since simless runs the device branch (a failing run points it out). Mark those tests in `tests.simulatorOnly`, and `simless test --simulator-only` lists them with the command to run them in one.
 
@@ -321,7 +355,7 @@ Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pic
 
 - **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an app-hosted unit-test target.
 - **Side effects:** the host runs your app's real startup in the background. Guard analytics and network with `SimlessHost.isActive`.
-- **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app, suppressing its windows, sandbox extensions for reading the repository). An OS update could break them, and they never ship in release builds.
+- **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, hiding the app, suppressing its windows, and in the dfi mode sandbox extensions for reading the repository). The native mode also relies on macOS running an iOS device binary that's tagged Mac Catalyst. An OS update could break them, and they never ship in release builds.
 
 ## How it works
 

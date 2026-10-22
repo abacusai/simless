@@ -3,32 +3,57 @@
 simless gives coding agents a fast, headless way to check SwiftUI screens and run unit and UI tests without the iOS Simulator. This document explains how it works. [findings.md](findings.md) explains why it works this way.
 
 ```
- agent ──► simless CLI ──► xcodebuild (Designed-for-iPad build, unsigned)
+ agent ──► simless CLI ──► xcodebuild (generic/platform=iOS, unsigned)
               │                 │
               │                 ▼
-              │          slot: <bundle id>.simlessN   (clone, re-signed, LSUIElement)
-              │                 │  installed via a zero-test xcodebuild run
+              │          slot: <bundle id>.simlessN   (APFS clone, retagged Mac Catalyst,
+              │                 │                      signed ad hoc, LSUIElement)
+              │                 │  started directly (posix_spawn), home folder in the slot
               │                 ▼
-              ├──── TCP ───► render host = your app, hidden, running SimlessKit
+              ├──── TCP ───► render host = your app, hidden, running SimlessKit + SimlessRuntime
               │                 ▲
-              │   patch dylib   │ dlopen
-              └──► SimlessAgent ┘ (places patches into the host's sandbox tmp)
+              └─ patch dylib ───┘ copied into the host's tmp, dlopen'd
 ```
 
-## 1. Your app runs natively on the Mac ("Designed for iPad")
+That's the native mode, the default. The `dfi` mode (`"mode": "dfi"`) is what simless did before: a "Designed for iPad" build, re-signed with the team's wildcard development profile, installed through xcodebuild, running in the app sandbox, with SimlessAgent placing patches. Sections 1 and 2 describe both. The rest is the same for both modes.
 
-Apple Silicon Macs run iOS arm64 apps natively. simless builds the app's normal iOS device slice for the `platform=macOS,arch=arm64,variant=Designed for iPad` destination:
+## 0. The native mode: no signing, no install
+
+An iOS device binary and a Mac Catalyst binary are the same arm64 code against the same frameworks (`/System/iOSSupport`). What differs is one field, the platform in each Mach-O's `LC_BUILD_VERSION`: macOS runs a binary tagged iOS only as a provisioned "Designed for iPad" install, and runs one tagged Mac Catalyst like any Mac program, signed ad hoc. So simless:
+
+- builds the plain iOS device slice (`generic/platform=iOS`), which needs no Mac destination and so works in a VM too, and no project variant.
+- clones the app into the slot and rewrites the platform field of every iOS-tagged Mach-O in it (main executable, debug dylib, frameworks, test bundles) to Mac Catalyst, in place: a few bytes per binary (`MachO.swift`, with `vtool` for old binaries that only have `LC_VERSION_MIN_IPHONEOS`).
+- signs what changed ad hoc (`codesign -s -`): no identity, no keychain, no profile.
+- starts the executable directly with `posix_spawn`, in a session of its own, with the runtime in `DYLD_INSERT_LIBRARIES`. No xcodebuild install, no LaunchServices, no window server session needed.
+
+The app now runs outside the app sandbox, so simless gives it what the sandbox gave it:
+
+| What the app sees | How |
+|---|---|
+| Its own home, documents, caches, tmp | `CFFIXED_USER_HOME` and `HOME` point into the slot, and SimlessRuntime interposes `confstr` for the per-user temp and cache folders, which `NSTemporaryDirectory` reads |
+| Its own preferences | the standard domain is the slot's id, and `UserDefaults(suiteName:)` suites are renamed under it |
+| A keychain | SimlessRuntime interposes `SecItemAdd`/`CopyMatching`/`Update`/`Delete` with a store in the slot's home. The real keychain refuses an app without an application identifier (`errSecMissingEntitlement`) |
+| `isiOSAppOnMac == true` | as for a "Designed for iPad" app, since SimlessKit and apps branch on it |
+| An iOS process's malloc, in render hosts | `MallocSpaceEfficient=1`. A Mac process keeps freed pages, and without it a render host grew ~20 MB more over a few dozen renders. It costs CPU-bound code ~4%, so test hosts, which are short-lived and CPU-bound, run without it |
+
+On a machine shared by many projects, `"isolate": true` (or `SIMLESS_ISOLATE=1`) gives each native host a sandbox of its own. SimlessRuntime applies it in its constructor, before any of the app's code runs (`sandbox_init_with_parameters`, the mechanism behind `sandbox-exec`, which needs no entitlement): writes only into the slot, reads in the user's home only of the slot, the worktree, its build folder and local packages, and no connections to other hosts' ports. A host that can't be isolated exits instead of running unisolated.
+
+Wiping a slot's data is then a folder delete plus clearing the slot's preferences domains through CFPreferences, so nothing has to launch for it, and live reload copies the patch into the host's tmp itself: an unsandboxed process's files aren't quarantined, so SimlessAgent isn't needed.
+
+## 1. Your app runs natively on the Mac
+
+Apple Silicon Macs run iOS arm64 apps natively. simless builds the app's normal iOS device slice (for `generic/platform=iOS` in the native mode, for the `platform=macOS,arch=arm64,variant=Designed for iPad` destination in the dfi mode):
 - **No simulator runtime**, so no SpringBoard or simulator daemons.
 - **Third-party SDKs keep working**, because they use the iOS slice they already ship.
 - **Your real views, real dependencies, and the real app target.** No porting and no separately written copies of your screens.
 
-Xcode hides the Designed-for-iPad destination for targets that also ship native macOS or opt out of it. In that case simless builds from a generated sibling copy of the project (`<Name>.simless.xcodeproj`, next to the original, wherever it is in the repository) with `macosx` removed from `SUPPORTED_PLATFORMS` and Designed for iPad enabled. Shared schemes and test plans are copied and rewritten to point at the copy. The original project is never modified, and the generated files are added to `.git/info/exclude`.
+In the dfi mode, Xcode hides the Designed-for-iPad destination for targets that also ship native macOS or opt out of it. In that case simless builds from a generated sibling copy of the project (`<Name>.simless.xcodeproj`, next to the original, wherever it is in the repository) with `macosx` removed from `SUPPORTED_PLATFORMS` and Designed for iPad enabled. Shared schemes and test plans are copied and rewritten to point at the copy. The original project is never modified, and the generated files are added to `.git/info/exclude`.
 
-Builds run with `CODE_SIGNING_ALLOWED=NO`. All signing happens when a slot is created (below), so builds never need provisioning and never touch the developer account.
+Builds run with `CODE_SIGNING_ALLOWED=NO`. All signing happens when a slot is created (below), so builds never need provisioning and never touch the developer account. Without a unit-test target the build is a plain `build` instead of `build-for-testing`.
 
-## 2. Slots: one installed copy per worktree
+## 2. Slots: one copy per worktree
 
-macOS runs one instance per bundle id. Several agents need several hosts, so each worktree gets a **slot**: an APFS clone of the build (near-free), modified as follows:
+macOS runs one instance per bundle id. Several agents need several hosts, so each worktree gets a **slot**: an APFS clone of the build (near-free). In the native mode it's prepared as in section 0, with the id, Info.plist keys and extension handling below, and is ready to start (about 0.3 s for the demo app). In the dfi mode it's modified as follows:
 
 - `CFBundleIdentifier` becomes `<bundle id>.simless<N>`.
 - App extensions (`PlugIns/*.appex`) and the watch app (`Watch/`) stay, with every id in their Info.plists that starts with the app's id moved under the slot's (installd checks that prefix). Each extension gets the profile and its own `application-identifier`. After install, simless sets each extension to "ignore" with `pluginkit`, so a slot's widgets never reach the widget gallery. If an install with them fails, simless installs without them. `"embeddedBundles": false` always removes them.
@@ -137,9 +162,9 @@ Tests are spread over several hosts (`--jobs`) by their last durations. Each hos
 
 `simless calibrate` builds the app for the iOS Simulator, boots one dedicated simulator and launches the app there with the same `--simless-port` argument. The same SimlessKit then serves renders from real iOS, with the device's own safe areas and traits. For every fixture it renders on both, aligns the two accessibility trees by role, label and identifier (longest common subsequence), and reports elements present on only one side, and frames that differ by more than 2 pt. It's the only command that boots a simulator, and it deletes the device afterwards.
 
-## 5. SimlessAgent and its security model
+## 5. SimlessAgent and its security model (dfi mode)
 
-A file written by the sandboxed host is quarantined, and `dlopen` of quarantined code blocks on a Gatekeeper prompt, which would hang a headless host. Something outside the sandbox therefore has to place the patch in the host's container. Containers are protected ("App Data"), so that process needs **Full Disk Access**. SimlessAgent is that process: a tiny unsandboxed app (`ai.abacus.simless.agent`) listening on a Unix socket. It has exactly one write operation, `place`, and accepts it only when all of these hold:
+The native mode doesn't use it: its hosts aren't sandboxed, so simless places patches itself. In the dfi mode, a file written by the sandboxed host is quarantined, and `dlopen` of quarantined code blocks on a Gatekeeper prompt, which would hang a headless host. Something outside the sandbox therefore has to place the patch in the host's container. Containers are protected ("App Data"), so that process needs **Full Disk Access**. SimlessAgent is that process: a tiny unsandboxed app (`ai.abacus.simless.agent`) listening on a Unix socket. It has exactly one write operation, `place`, and accepts it only when all of these hold:
 
 - the source is a `.dylib` under `~/Library/Caches/simless/`, with no symlinks.
 - the destination is `~/Library/Containers/<UUID>/Data/tmp/<file>.dylib`, with no symlinks on the path, and the write is atomic, so a planted symlink is replaced rather than followed.

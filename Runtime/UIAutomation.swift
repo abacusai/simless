@@ -17,12 +17,18 @@ enum UIAutomation {
     static func handles(_ cmd: String) -> Bool { commands.contains(cmd) }
 
     static func handle(_ cmd: String, _ req: [String: Any], _ connection: Connection) {
+        // A request sent again after its connection went (see Replies) gets the
+        // first attempt's answer: a tap or a drag is never done twice.
+        let rid = req["rid"] as? String
+        if let rid, Replies.answer(rid, on: connection) { return }
         // A run loop block, not the main queue: commands spin the run loop while
         // they wait (idle, touches, dismissals), and inside a main-queue block
         // the main queue couldn't drain, so the app's own async work would stall.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
             enableAutomation()
-            connection.send(perform(cmd, req))
+            var reply = perform(cmd, req)
+            if let rid { reply["rid"] = rid; Replies.store(rid, reply) }
+            connection.send(reply)
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
@@ -214,6 +220,46 @@ enum UIAutomation {
     }
 
     static var keyWindow: UIWindow? { appWindows.last(where: \.isKeyWindow) ?? appWindows.last }
+}
+
+// MARK: - Replies
+
+/// The answers to the last few hundred requests, by the id the UI test shim
+/// gives each one. A native host's socket can be closed under it (by something
+/// in the app's process while it launches): the shim then sends the request
+/// again on a new connection, and gets the answer the first attempt made, or
+/// waits for it if that one is still running. Exactly once, whatever the socket did.
+enum Replies {
+    private static let lock = NSLock()
+    private static var done: [String: [String: Any]] = [:]
+    private static var order: [String] = []
+    private static var running: Set<String> = []
+
+    /// True when the request was answered here (seen before); false when it's
+    /// new and the caller runs it, then stores its reply.
+    static func answer(_ rid: String, on connection: Connection) -> Bool {
+        lock.lock()
+        if let reply = done[rid] { lock.unlock(); connection.send(reply); return true }
+        guard running.contains(rid) else { running.insert(rid); lock.unlock(); return false }
+        lock.unlock()
+        // The first attempt still runs on the main thread; this is the connection's own thread.
+        let deadline = Date().addingTimeInterval(900)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+            lock.lock(); let reply = done[rid]; lock.unlock()
+            if let reply { connection.send(reply); return true }
+        }
+        connection.send(["ok": false, "error": "request \(rid) didn't finish", "rid": rid])
+        return true
+    }
+
+    static func store(_ rid: String, _ reply: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        running.remove(rid)
+        done[rid] = reply
+        order.append(rid)
+        if order.count > 512 { for old in order.prefix(order.count - 512) { done[old] = nil }; order.removeFirst(order.count - 512) }
+    }
 }
 
 // MARK: - Session (launch set-up)

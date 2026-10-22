@@ -33,7 +33,13 @@ public func simlessRuntimeStart() {
     let env = ProcessInfo.processInfo.environment
     // simless removing a slot: the app empties its own data container (macOS
     // lets nothing else touch it) and quits before anything else runs.
+    // A native host on a shared machine: its own sandbox first, before any of the app's code.
+    if env["SIMLESS_NATIVE"] == "1", env["SIMLESS_ISOLATE_SLOT"] != nil { Isolation.apply(env: env) }
+    // A native host (unsandboxed, its home redirected into the slot) before anything reads its data.
+    if env["SIMLESS_NATIVE"] == "1" { NativeHost.install() }
     if env["SIMLESS_WIPE"] == "1" {
+        // Only ever the app's own container or slot home, never a real home folder.
+        guard Housekeeping.isAppData(NSHomeDirectory()) else { exit(1) }
         // Preferences go through cfprefsd: deleting its files behind its back
         // made the next launch's settings vanish.
         Housekeeping.resetDefaults()
@@ -41,7 +47,7 @@ public func simlessRuntimeStart() {
         exit(0)
     }
     // A test run starts with an empty tmp, so what tests leave there doesn't pile up.
-    if env["SIMLESS_CLEAN_TMP"] == "1" { Housekeeping.empty(NSTemporaryDirectory()) }
+    if env["SIMLESS_CLEAN_TMP"] == "1", Housekeeping.isAppData(NSTemporaryDirectory()) { Housekeeping.empty(NSTemporaryDirectory()) }
     raiseOpenFileLimit()
     // No macOS permission or review dialogs from a host (SIMLESS_PERMISSIONS=ask lets them through).
     if env["SIMLESS_PERMISSIONS"] != "ask" { Permissions.install() }
@@ -184,23 +190,26 @@ enum BundleIDs {
 /// One thread per connection; work that touches UIKit or XCTest hops to the main thread.
 enum Server {
     static func start(port: UInt16) {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
-        var yes: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(port.bigEndian)
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let bound = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-        }
-        guard bound == 0, listen(fd, 16) == 0 else { runtimeLog("port \(port) unavailable"); close(fd); return }
+        guard var fd = listenSocket(port) else { runtimeLog("port \(port) unavailable"); return }
         Thread.detachNewThread {
             while true {
                 let c = accept(fd, nil, nil)
-                if c < 0 { continue }
-                Thread.detachNewThread { Connection(fd: c).serve() }
+                if c >= 0 { let conn = highNumbered(c); Thread.detachNewThread { Connection(fd: conn).serve() }; continue }
+                if errno == EINTR { continue }
+                runtimeLog("listener on \(port) lost (\(String(cString: strerror(errno)))); listening again")
+                // An app launched directly (a native host) closes, while it starts,
+                // descriptors it didn't open, this listener's among them: listen
+                // again. Its number may be another file's by now, so it's closed
+                // only while it's still this socket.
+                if isListener(fd, port: port) { close(fd) }
+                var again: Int32?
+                for _ in 0..<100 {
+                    again = listenSocket(port)
+                    if again != nil { break }
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                guard let again else { runtimeLog("port \(port) unavailable"); return }
+                fd = again
             }
         }
         // A host nobody talks to exits, so a standby host never lingers.
@@ -214,6 +223,46 @@ enum Server {
                 if quiet { exit(0) }
             }
         }
+    }
+
+    private static func listenSocket(_ port: UInt16) -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port.bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard bound == 0, listen(fd, 16) == 0 else { close(fd); return nil }
+        return highNumbered(fd)
+    }
+
+    /// Moves a descriptor to a number above the ones that get reused. While an
+    /// app started directly (a native host) launches, something closes a
+    /// descriptor number a second time after it was given out again: a socket
+    /// that got that number died with EBADF. Numbers this high are never handed out by then.
+    static func highNumbered(_ fd: Int32) -> Int32 {
+        let high = fcntl(fd, F_DUPFD_CLOEXEC, 1000)
+        guard high >= 0 else { return fd }
+        close(fd)
+        return high
+    }
+
+    /// Whether `fd` is a listening socket on `port`.
+    private static func isListener(_ fd: Int32, port: UInt16) -> Bool {
+        var accepting: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &accepting, &len) == 0, accepting != 0 else { return false }
+        var addr = sockaddr_in()
+        var alen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let ok = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &alen) }
+        }
+        return ok == 0 && UInt16(bigEndian: addr.sin_port) == port
     }
 
     static let activity = NSLock()
@@ -331,6 +380,13 @@ enum TestBundles {
 
 /// The host's own files, which only the app itself may touch.
 enum Housekeeping {
+    /// Whether a folder belongs to this app alone: inside its sandbox container,
+    /// or inside its simless slot (a native host's home).
+    static func isAppData(_ dir: String) -> Bool {
+        let path = URL(fileURLWithPath: dir).standardizedFileURL.path
+        return path.contains("/Library/Containers/") || path.contains("/Library/Caches/simless/slots/")
+    }
+
     /// Removes everything inside `dir`, keeping `dir`. With `keepFolders`,
     /// folders down to that depth stay, empty: an app container's skeleton
     /// (Library, Library/Caches, tmp, ...) has to be there for macOS to

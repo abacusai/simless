@@ -74,3 +74,23 @@ jobs:
         run: |
           .build/release/simless --help >/dev/null
           .build/release/simless version
+
+      # The native mode needs nothing but Xcode: no certificate, profile or Full
+      # Disk Access, and a hosted runner is a VM. This runs the demo app end to
+      # end the way a user's CI would.
+      - name: Demo app end to end (native mode, unsigned)
+        working-directory: Examples/SimlessDemo
+        run: |
+          simless() { "$GITHUB_WORKSPACE/.build/release/simless" "$@"; }
+          simless up
+          simless render all --matrix
+          simless render all --png "$RUNNER_TEMP/renders/"
+          simless test all
+          simless test ui
+
+      - name: Host logs
+        if: failure()
+        run: |
+          for f in ~/Library/Caches/simless/slots/*/host.log ~/Library/Caches/simless/work/*/build.log; do
+            echo "::group::$f"; tail -n 80 "$f"; echo "::endgroup::"
+          done

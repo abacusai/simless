@@ -9,7 +9,7 @@ struct Config: Codable {
     var project: String           // App.xcodeproj or ios/App.xcodeproj (relative to the repo root)
     var scheme: String
     var appTarget: String
-    var testTarget: String        // an app-hosted unit-test bundle; used to install slots
+    var testTarget: String        // an app-hosted unit-test bundle ("" for none; the dfi mode installs slots through it)
     var kitDir: String            // where SimlessKit.swift + SimlessFixtures.swift live
     var sourceDirs: [String]      // scanned for edited files on `simless reload`
     var device: String = "iphone" // default canvas: iphone | ipad
@@ -22,6 +22,9 @@ struct Config: Codable {
     var tests: Tests?
     var calibrate: Calibration?
     var embeddedBundles: Bool?    // keep app extensions and the watch app in the slot (default true)
+    var mode: String?             // "native" (default): hosts run unsigned; "dfi": signed Designed-for-iPad installs
+    var settle: Double?           // default --settle: ms each render gives the screen's async work (default 0)
+    var isolate: Bool?            // native hosts get a sandbox of their own: write only their slot, read only their worktree
 
     struct Checks: Codable {
         var minTapTarget: Double?     // points (default 44)
@@ -67,7 +70,12 @@ struct Workspace {
         // crashes their functions from the symbol table. Without it builds are
         // faster and test bundles a fraction of the size.
         "COMPILER_INDEX_STORE_ENABLE=NO", "GCC_GENERATE_DEBUGGING_SYMBOLS=NO",
+        // Code can tell a simless build apart at compile time, the way it tells
+        // a simulator's: `#if targetEnvironment(simulator) || SIMLESS` (a mock
+        // store, say). `targetEnvironment(simulator)` is false here, a device build.
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) \(Self.condition)",
     ]
+    static let condition = "SIMLESS"
 
     /// One xcodebuild at a time in this worktree's build folder.
     func withBuildFolder<T>(_ body: () throws -> T) throws -> T {
@@ -75,6 +83,11 @@ struct Workspace {
     }
 
     static let dfiDestination = "platform=macOS,arch=arm64,variant=Designed for iPad"
+    /// The native mode builds the plain iOS device slice: it needs no Mac
+    /// destination (none exists in a VM), and no project variant.
+    static let iosDestination = "generic/platform=iOS"
+    var native: Bool { Native.enabled(self) }
+    var destination: String { native ? Self.iosDestination : Self.dfiDestination }
 
     static func findRoot(from start: String = FileManager.default.currentDirectoryPath) -> String? {
         var url = URL(fileURLWithPath: start)
@@ -160,6 +173,7 @@ struct Workspace {
 
     func buildProject() throws -> String {
         let original = "\(root)/\(config.project)"
+        if native { return original }
         let name = projectBase
         let variant = "\(projectDir)/\(name).simless.xcodeproj"
         let pbx = try String(contentsOfFile: "\(original)/project.pbxproj", encoding: .utf8)
@@ -231,8 +245,8 @@ struct Workspace {
 
     // MARK: - Build
 
-    /// Full DfI build of the app + unit-test bundle, unsigned (simless signs slots
-    /// itself with the team wildcard profile, so builds never need provisioning).
+    /// Full build of the app + unit-test bundle, unsigned (slots are signed by
+    /// simless: ad hoc in the native mode, with the team wildcard profile in dfi).
     func build() throws {
         let project = try buildProject()
         try mkdirp(work)
@@ -241,13 +255,19 @@ struct Workspace {
         let tokens = config.buildConcurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 5)
         try withBuildFolder { try withBuildToken(count: tokens) {
             let t = now()
-            Log.step("building \(config.scheme) for Designed-for-iPad (log: \(buildLog))")
-            let r = try Cleanup.retryingPoisonedCache {
-                try Shell.run(["xcodebuild", "build-for-testing",
-                             "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
-                             "-destination", Self.dfiDestination, "-derivedDataPath", derivedData] + Self.buildSettings,
-                            cwd: root, logPath: buildLog)
+            Log.step("building \(config.scheme) for \(native ? "iOS" : "Designed-for-iPad") (log: \(buildLog))")
+            func run(_ action: String) throws -> Shell.Result {
+                try Cleanup.retryingPoisonedCache {
+                    try Shell.run(["xcodebuild", action,
+                                 "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
+                                 "-destination", destination, "-derivedDataPath", derivedData] + Self.buildSettings,
+                                cwd: root, logPath: buildLog)
+                }
             }
+            var r = try run("build-for-testing")
+            // A scheme without tests (a generated project's, say) has no test action
+            // to build for: build the app alone.
+            if r.code != 0, r.out.contains("is not currently configured for the test action") { r = try run("build") }
             guard r.code == 0 else {
                 throw SimlessError("build failed (log: \(buildLog)):\n" + Patch.compilerErrors(r.out))
             }
@@ -276,7 +296,7 @@ struct Workspace {
         // destination this way ("Found no destinations"); then query the target
         // directly, which can't take -derivedDataPath, and clean up after it.
         let attempts: [[String]] = [
-            ["-scheme", config.scheme, "-destination", Self.dfiDestination, "-derivedDataPath", derivedData],
+            ["-scheme", config.scheme, "-destination", destination, "-derivedDataPath", derivedData],
             ["-target", config.appTarget, "-sdk", "iphoneos"],
         ]
         var bs: [String: String]?
@@ -310,9 +330,12 @@ struct Workspace {
             swiftVersion: (bs["SWIFT_VERSION"] ?? "5").split(separator: ".").first.map(String.init) ?? "5",
             defaultIsolation: bs["SWIFT_DEFAULT_ACTOR_ISOLATION"],
             upcomingFeatures: Array(Set(features)).sorted(),
-            conditions: (bs["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "DEBUG").split(separator: " ").map(String.init),
+            // As the build has them: patches must see the same `#if`s.
+            conditions: Array(Set((bs["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] ?? "DEBUG").split(separator: " ").map(String.init) + [Self.condition])).sorted(),
             bundleID: bs["PRODUCT_BUNDLE_IDENTIFIER"] ?? "",
-            team: try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
+            // The native mode signs ad hoc: a team is only recorded when there is one.
+            team: native ? ((try? teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "")) ?? "")
+                : try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
             wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app")
         guard !s.bundleID.isEmpty else {
             throw SimlessError("\(config.appTarget) needs a PRODUCT_BUNDLE_IDENTIFIER")
@@ -320,12 +343,14 @@ struct Workspace {
         try JSONEncoder().encode(s).write(to: URL(fileURLWithPath: settingsPath))
     }
 
-    /// The project's team; else `team` from .simless.json; else $SIMLESS_TEAM;
+    /// $SIMLESS_TEAM; else `team` from .simless.json; else the project's team;
     /// else the team of the only Apple Development identity in the keychain.
+    /// The explicit choices come first: a build machine signs with its own team
+    /// whatever team the project names.
     private func teamForSigning(fromBuildSettings team: String) throws -> String {
-        if !team.isEmpty { return team }
-        if let t = config.team, !t.isEmpty { return t }
         if let t = ProcessInfo.processInfo.environment["SIMLESS_TEAM"], !t.isEmpty { return t }
+        if let t = config.team, !t.isEmpty { return t }
+        if !team.isEmpty { return team }
         var teams = try Signing.developmentTeams()
         // Several teams: only one may have the wildcard profile simless signs with.
         let usable = teams.filter { (try? Signing.wildcardProfile(team: $0)) != nil }

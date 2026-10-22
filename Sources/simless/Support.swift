@@ -33,8 +33,19 @@ enum Paths {
     static let agentApp = "\(support)/SimlessAgent.app"
     static let agentSocket = "\(support)/agent.sock"
 
-    /// The simless source checkout (templates, agent source). Resolved at compile time.
+    /// The simless checkout (templates, runtime and agent sources): $SIMLESS_ROOT,
+    /// else the checkout the running binary sits in (so a checkout moved or
+    /// restored from a CI cache still works), else where it was compiled.
     static let toolRoot: String = {
+        func isRoot(_ dir: String) -> Bool { exists("\(dir)/Templates/SimlessKit.swift") && exists("\(dir)/Runtime") }
+        if let env = ProcessInfo.processInfo.environment["SIMLESS_ROOT"], isRoot(env) { return env }
+        if let exe = Bundle.main.executableURL?.resolvingSymlinksInPath() {
+            var dir = exe.deletingLastPathComponent()
+            for _ in 0..<6 {
+                if isRoot(dir.path) { return dir.path }
+                dir.deleteLastPathComponent()
+            }
+        }
         var url = URL(fileURLWithPath: #filePath)   // <root>/Sources/simless/Support.swift
         for _ in 0..<3 { url.deleteLastPathComponent() }
         return url.path
@@ -285,7 +296,8 @@ struct GlobalState: Codable {
             let usedPorts = Set(s.slots.map(\.port))
             let sibling = s.slots.first { $0.bundleBase == bundleBase && $0.worktree == worktree && $0.kind == nil }?.n
             let n = sibling.flatMap { usedN.contains($0) ? nil : $0 } ?? (1...).first { !usedN.contains($0) }!
-            let port = (47800...).first { !usedPorts.contains($0) }!
+            // Free in the records and on the machine: another program may hold one.
+            let port = (47800...65000).first { !usedPorts.contains($0) && portIsFree($0) } ?? (47800...).first { !usedPorts.contains($0) }!
             var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: port)
             r.kind = kind
             s.slots.append(r)
@@ -310,6 +322,20 @@ struct GlobalState: Codable {
             try s.save()
         }
     }
+}
+
+/// Whether nothing listens on 127.0.0.1:`port`.
+func portIsFree(_ port: Int) -> Bool {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return true }
+    defer { close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = in_port_t(UInt16(port).bigEndian)
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    return withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    } == 0
 }
 
 /// A value shared between threads, behind a lock.
