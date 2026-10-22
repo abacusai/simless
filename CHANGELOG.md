@@ -3,6 +3,11 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **A reload after a failed build renders the fix.** The agent's most common loop, a compile error, then the fix, then a check, showed the old screen and said it was current: on a small xcodegen app, `reload --render NoteListView.Empty` after a failed `up` said it reloaded and still showed "Notes C" where the code said "Notes D". The failed `up` had deleted the list of previews (so the reload didn't know that fixture was a preview, and didn't patch it) and the copies of the sources the host runs. Now a failed build leaves both alone, and only a build that works replaces them. A fixture the reload can't trace is listed as stale instead of passing silently. A failed `reload` (a compile error in the patch, with or without `--no-fallback`) followed by a fixed one renders the fix too.
+- **`--json` says which code the host runs.** `up --json` and `reload --json` report `build` (an id of the sources the last good build was made from), `hostSources` (what the host's code reflects, patch included), `sources` (what's on disk), `stale` and `current`, which is true only when the rendered fixtures show the sources on disk. The same sources give the same id after a sync. `simless render` notes when the host is behind the sources. A unit test covers the failed build, and CI runs the sequence on the demo app.
+
 ## 0.7.0 (2026-10-22)
 
 This one makes simless the main UI loop for coding agents, on big apps and on shared build machines. On a production app with 702 Swift files, an edit to a checked screen takes about 3 s instead of 37 to 45 s, a fresh clone goes from `simless init` to every screen rendered with no manual step, an agent can tap and type into a screen and read it afterwards, and the whole unit test target runs in 7 min 19 s instead of more than 35 min. Run `simless init` once to get kit 6, which `simless act` and the new checks need.
