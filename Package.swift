@@ -15,5 +15,11 @@ let package = Package(
             path: "Sources/simless",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "SimlessTests",
+            dependencies: ["simless"],
+            path: "Tests/SimlessTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
