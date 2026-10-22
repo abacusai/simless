@@ -398,6 +398,23 @@ struct Workspace {
         for f in swiftSources() { hashes[f] = Self.digest(f) }
         try mkdirp(work)
         try JSONEncoder().encode(hashes).write(to: URL(fileURLWithPath: snapshotPath))
+        // A copy of each file as built (APFS clones, by content), so hot reload
+        // can tell which declarations an edit changed.
+        let dir = "\(work)/snapshot"
+        try mkdirp(dir)
+        let fm = FileManager.default
+        let keep = Set(hashes.values.map { "\($0).swift" })
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) {
+            try? fm.removeItem(atPath: "\(dir)/\(name)")
+        }
+        for (f, h) in hashes where !exists("\(dir)/\(h).swift") { try? fm.copyItem(atPath: f, toPath: "\(dir)/\(h).swift") }
+    }
+
+    /// The file's text as of the last full build, when there's a copy of it.
+    func snapshotText(of path: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: snapshotPath),
+              let snap = try? JSONDecoder().decode([String: String].self, from: d), let h = snap[path] else { return nil }
+        return try? String(contentsOfFile: "\(work)/snapshot/\(h).swift", encoding: .utf8)
     }
 
     /// Swift files whose contents differ from the last full build. Content, not

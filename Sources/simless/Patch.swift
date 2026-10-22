@@ -15,15 +15,17 @@ enum Patch {
         let mode: Mode
         let files: [String]
         let extra: [String]     // unedited files patched because they embed an edited view
+        let stale: [String]     // fixtures that reach the edit but still render the last build
         let compile: Double
         let apply: Double
     }
 
-    static func apply(ws: Workspace, slot: inout SlotRecord, files: [String]) throws -> Result {
+    /// Patches `files` so that `fixtures` (all of them when nil) render them.
+    static func apply(ws: Workspace, slot: inout SlotRecord, files: [String], fixtures: [String]? = nil) throws -> Result {
         let settings = try ws.settings()
         let t0 = now()
-        let scope = try PatchScope.files(ws: ws, edited: files)
-        let dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all)
+        let scope = try scope(ws: ws, slot: slot, files: files, fixtures: fixtures)
+        let dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: scope.texts)
         Cleanup.prunePatches(ws: ws)
         let tCompile = now() - t0
 
@@ -44,13 +46,26 @@ enum Patch {
         if mode == .warm { try warm(dylib: dylib, slot: slot, ws: ws, settings: settings) }
         slot.patch += 1
         slot.lastPatch = dylib
+        slot.covered = scope.covered
+        slot.stale = scope.stale
         try GlobalState.update(slot)
-        return Result(mode: mode, files: files, extra: scope.extra, compile: tCompile, apply: now() - t1)
+        return Result(mode: mode, files: files, extra: scope.extra, stale: scope.stale, compile: tCompile, apply: now() - t1)
+    }
+
+    /// The requested fixtures plus the ones the last patch covered, so a reload
+    /// for one screen doesn't make the previous one stale; just the requested
+    /// ones when both don't fit in one patch.
+    static func scope(ws: Workspace, slot: SlotRecord, files: [String], fixtures: [String]?) throws -> PatchScope.Scope {
+        guard let fixtures else { return try PatchScope.files(ws: ws, edited: files) }
+        let previous = (slot.covered ?? []).filter { !fixtures.contains($0) }
+        if !previous.isEmpty, let both = try? PatchScope.files(ws: ws, edited: files, fixtures: fixtures + previous) { return both }
+        return try PatchScope.files(ws: ws, edited: files, fixtures: fixtures)
     }
 
     // MARK: - Compile
 
-    static func compile(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings, files: [String]) throws -> String {
+    static func compile(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings, files: [String],
+                        texts: [String: String] = [:]) throws -> String {
         let dir = "\(ws.work)/patches"
         try mkdirp(dir)
         let module = "SimlessPatch\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
@@ -89,7 +104,7 @@ enum Patch {
         for file in [fixtures] + files.filter({ $0 != fixtures }) {
             let dst = "\(dir)/\(module)_\(sources.count)_\((file as NSString).lastPathComponent)"
             originals[dst] = file
-            let body = try String(contentsOfFile: file, encoding: .utf8)
+            let body = try texts[file] ?? String(contentsOfFile: file, encoding: .utf8)
             try (imports + body).write(toFile: dst, atomically: true, encoding: .utf8)
             sources.append(dst)
         }
@@ -115,13 +130,21 @@ enum Patch {
         var args = ["xcrun", "swiftc", "-module-name", module, "-emit-library", "-o", out,
                     "-target", "arm64-apple-ios\(settings.deploymentTarget)", "-sdk", sdk, "-Onone",
                     "-swift-version", effective.swiftVersion,
-                    "-I", ws.productsIphoneos, "-F", ws.productsIphoneos,
+                    "-I", ws.productsIphoneos, "-F", ws.productsIphoneos, "-Xcc", "-I\(ws.productsIphoneos)/include",
                     "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
-                    "-suppress-warnings", "-module-cache-path", "\(ws.work)/ModuleCache"]
+                    "-suppress-warnings", "-module-cache-path", "\(ws.work)/ModuleCache",
+                    // One frontend job per file: each loads the app's modules once, side by
+                    // side (the driver runs one job without -j: 3.5 s against 2.1 s for two
+                    // edited files in a 700-file app).
+                    "-j", "\(max(1, min(files.count + 1, ProcessInfo.processInfo.activeProcessorCount)))"]
         if let iso = effective.isolation { args += ["-default-isolation", iso] }
         for f in effective.features { args += ["-enable-upcoming-feature", f] }
         for c in settings.conditions { args += ["-D", c] }
-        for map in moduleMaps(ws: ws) { args += ["-Xcc", "-fmodule-map-file=\(map)", "-Xcc", "-I\((map as NSString).deletingLastPathComponent)"] }
+        var includes = Set<String>()
+        for map in moduleMaps(ws: ws) {
+            args += ["-Xcc", "-fmodule-map-file=\(map)"]
+            for dir in includeDirs(map: map) where includes.insert(dir).inserted { args += ["-Xcc", "-I\(dir)"] }
+        }
         let tc = now()
         let r = try Shell.run(args + sources)
         Log.debug("swiftc \(secs(tc))")
@@ -187,16 +210,52 @@ enum Patch {
         // find(1), not a recursive glob: package checkouts contain symlink cycles.
         // Stdout only, and only when there are checkouts: find's "No such file"
         // on stderr would otherwise become a module map path and fail the patch.
+        // Cached until package resolution changes: find takes 0.25 s on a big app.
         let dir = "\(ws.derivedData)/SourcePackages/checkouts"
-        let checkouts = exists(dir) ? (try? Shell.run(["/usr/bin/find", dir, "-name", "module.modulemap"],
-                                                      stdoutOnly: true).out) ?? "" : ""
+        let resolved = "\(ws.derivedData)/SourcePackages/workspace-state.json"
+        let cache = "\(ws.work)/checkout-modulemaps-\(Int(mtime(dir) * 1000))-\(Int(mtime(resolved) * 1000)).txt"
+        var checkouts = (try? String(contentsOfFile: cache, encoding: .utf8)) ?? ""
+        if checkouts.isEmpty, exists(dir) {
+            checkouts = (try? Shell.run(["/usr/bin/find", dir, "-name", "module.modulemap"], stdoutOnly: true).out) ?? ""
+            for old in ((try? FileManager.default.contentsOfDirectory(atPath: ws.work)) ?? []) where old.hasPrefix("checkout-modulemaps-") {
+                try? FileManager.default.removeItem(atPath: "\(ws.work)/\(old)")
+            }
+            try? checkouts.write(toFile: cache, atomically: true, encoding: .utf8)
+        }
         maps += checkouts.split(separator: "\n").map(String.init).filter { path in
             path.hasSuffix("module.modulemap") &&
-            !["/Tests/", "/Examples/", "/Example/", "/.build/", "/Benchmarks/"].contains { path.contains($0) }
+            !["/Tests/", "/Examples/", "/Example/", "/.build/", "/Benchmarks/", "-simulator/", "-maccatalyst/"].contains { path.contains($0) }
         }
-        let include = "\(ws.productsIphoneos)/include/module.modulemap"
-        if exists(include) { maps.append(include) }
+        // Binary frameworks' headers copied to Products/include: one map at the
+        // top, and static xcframeworks' each in a folder of their own.
+        let include = "\(ws.productsIphoneos)/include"
+        if exists("\(include)/module.modulemap") { maps.append("\(include)/module.modulemap") }
+        for dir in (try? FileManager.default.contentsOfDirectory(atPath: include)) ?? [] where exists("\(include)/\(dir)/module.modulemap") {
+            maps.append("\(include)/\(dir)/module.modulemap")
+        }
         return maps
+    }
+
+    /// Header search paths a module map's headers need: its own folder, and
+    /// for a generated map (a package's C target) the folder its umbrella is
+    /// in, which is where that target's `#include <Module/Header.h>`s resolve,
+    /// as Xcode passes it.
+    static func includeDirs(map: String) -> [String] {
+        var dirs = [(map as NSString).deletingLastPathComponent]
+        let text = (try? String(contentsOfFile: map, encoding: .utf8)) ?? ""
+        let umbrella = try! NSRegularExpression(pattern: #"umbrella\s+(header\s+)?"([^"]+)""#)
+        for m in umbrella.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)) {
+            let path = (text as NSString).substring(with: m.range(at: 2))
+            guard path.hasPrefix("/") else { continue }
+            if m.range(at: 1).location == NSNotFound {
+                dirs.append(path)                                    // umbrella "<Public>"
+            } else {
+                let folder = (path as NSString).deletingLastPathComponent   // <Public>/<Module>/<Module>.h
+                dirs += [folder, (folder as NSString).deletingLastPathComponent]
+            }
+        }
+        var seen = Set<String>()
+        return dirs.filter { seen.insert($0).inserted }
     }
 
     // MARK: - Apply
