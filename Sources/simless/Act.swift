@@ -71,7 +71,7 @@ enum Act {
                                      json: args.flags.contains("--json"))
         options.textSize = args.values["--text-size"]
         options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
-        options.idiom = (args.values["--idiom"] ?? ws.config.idiom).flatMap { $0 == "phone" ? $0 : nil }
+        options.idiom = ws.phoneIdiom(args.values["--idiom"])
         options.checks = ws.config.checks ?? .init()
         if let png = args.values["--png"] {
             if png.hasSuffix("/") { try mkdirp(png) }
@@ -79,6 +79,7 @@ enum Act {
         }
         let c = try Render.canvas(options.device)
         let client = try slot.client(timeout: 120)
+        try Render.avoidStepperCrash(slot: slot, fixture: fixture, options: &options, canvas: c, client: client)
         var render = Render.request(fixture: fixture, dark: options.dark, canvas: c, image: false,
                                     textSize: options.textSize, idiom: options.idiom, settle: options.settle)
         let mounted = try client.call(render)

@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 5
+    static let kitVersion = 6
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -131,6 +131,7 @@ enum SimlessHost {
         let id: String?
         let frame: [Double]
         var system: Bool?          // UIKit's own control (e.g. a bar button); its size isn't the app's to fix
+        var placeholder: String?   // a text field's
     }
 
     private struct Traits: Encodable {
@@ -195,8 +196,9 @@ enum SimlessHost {
             while !waiting, let nl = buffer.firstIndex(of: 0x0A) {
                 let line = Data(buffer[buffer.startIndex..<nl])
                 buffer.removeSubrange(buffer.startIndex...nl)
-                // A render that settles answers later; the requests after it wait.
-                if let req = try? JSONDecoder().decode(Request.self, from: line), req.cmd == "render", (req.settleMs ?? 0) > 0 {
+                // A render answers after the main queue has turned (see renderSettled);
+                // the requests after it wait.
+                if let req = try? JSONDecoder().decode(Request.self, from: line), req.cmd == "render" {
                     waiting = true
                     SimlessHost.lastRequest = Date()
                     SimlessHost.renderSettled(req) { [self] response in
@@ -320,6 +322,16 @@ enum SimlessHost {
         init(_ done: @escaping (Data) -> Void) { self.done = done }
     }
 
+    private static func iOSColor(_ light: Int, dark: Int) -> UIColor {
+        func color(_ rgb: Int) -> UIColor {
+            UIColor(red: CGFloat(rgb >> 16 & 0xFF) / 255, green: CGFloat(rgb >> 8 & 0xFF) / 255, blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
+        }
+        return UIColor { $0.userInterfaceStyle == .dark ? color(dark) : color(light) }
+    }
+
+    private static let appAccent: UIColor = (Bundle.main.object(forInfoDictionaryKey: "NSAccentColorName") as? String)
+        .flatMap { UIColor(named: $0) } ?? UIColor(named: "AccentColor") ?? iOSColor(0x007AFF, dark: 0x0A84FF)
+
     /// The fixture on the canvas, for `tree`.
     private static var mounted: Mounted?
 
@@ -342,6 +354,10 @@ enum SimlessHost {
         switch mount(req) {
         case .failure(let r): reply(r)
         case .success(let m):
+            // SwiftUI fills in some labels (a Menu's custom label on the Mac) only
+            // after something has read them once, on a later turn of the main
+            // queue. Read once now; the tree is read after that turn.
+            _ = collect(m.host.view)
             let until = Date().addingTimeInterval(min((req.settleMs ?? 0) / 1000, 10))
             func frame() {
                 m.host.view.layoutIfNeeded()
@@ -386,6 +402,10 @@ enum SimlessHost {
         if req.idiom == "phone" { host.traitOverrides.userInterfaceIdiom = .phone }
         if ProcessInfo.processInfo.isiOSAppOnMac {
             host.additionalSafeAreaInsets = UIEdgeInsets(top: req.safeTop ?? 0, left: 0, bottom: req.safeBottom ?? 0, right: 0)
+            // iOS's colors, not the Mac's accent: the app's accent color when it
+            // has one, else iOS blue, and iOS green for switches that are on.
+            host.view.tintColor = appAccent
+            if UISwitch.appearance().onTintColor == nil { UISwitch.appearance().onTintColor = iOSColor(0x34C759, dark: 0x30D158) }
         }
         window.rootViewController = host
         host.view.frame = rect
@@ -459,11 +479,14 @@ enum SimlessHost {
                 let a = obj.accessibilityFrame
                 let id = obj.responds(to: NSSelectorFromString("accessibilityIdentifier"))
                     ? obj.value(forKey: "accessibilityIdentifier") as? String : nil
-                out.append(Node(role: role(obj.accessibilityTraits), label: obj.accessibilityLabel,
-                                value: obj.accessibilityValue, id: (id?.isEmpty ?? true) ? nil : id,
+                let traits = obj.accessibilityTraits
+                let field = obj is UITextField || (obj as? UITextView)?.isEditable == true
+                out.append(Node(role: field ? "field" : traits.contains(.toggleButton) ? "switch" : role(traits),
+                                label: label(of: obj), value: obj.accessibilityValue, id: (id?.isEmpty ?? true) ? nil : id,
                                 frame: [a.minX - origin.x, a.minY - origin.y, a.width, a.height]
                                     .map { (Double($0) * 10).rounded() / 10 },
-                                system: cls.hasPrefix("_UI") ? true : nil))
+                                system: cls.hasPrefix("_UI") ? true : nil,
+                                placeholder: (obj as? UITextField)?.placeholder.flatMap { $0.isEmpty ? nil : $0 }))
                 // VoiceOver treats an element as one unit and doesn't descend into it
                 // (a Toggle row's switch, a Picker's value text). Neither do we.
                 return
@@ -484,6 +507,22 @@ enum SimlessHost {
         }
         visit(root, depth: 0)
         return out
+    }
+
+    /// An element's label. On the Mac a control with a custom label (a Menu
+    /// row) can have none, where iOS reads its texts: "Landing page, Chats".
+    /// Those texts are its automation elements, as XCUITest sees them.
+    private static func label(of obj: NSObject) -> String? {
+        if let l = obj.accessibilityLabel, !l.isEmpty { return l }
+        // Asking for them is what makes SwiftUI fill in the label, the first time.
+        let children = (obj.automationElements as? [NSObject]) ?? []
+        if let l = obj.accessibilityLabel, !l.isEmpty { return l }
+        let texts = children.compactMap { e -> String? in
+            let t = e.accessibilityTraits
+            guard t.contains(.staticText), !t.contains(.image), let l = e.accessibilityLabel, !l.isEmpty else { return nil }
+            return l
+        }
+        return texts.isEmpty ? obj.accessibilityLabel : texts.joined(separator: ", ")
     }
 
     private static func role(_ t: UIAccessibilityTraits) -> String {

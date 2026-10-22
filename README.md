@@ -23,8 +23,8 @@ simless runs your real iOS app natively on a Mac, as an invisible host. An agent
 $ simless render Settings --png out/
 Settings · light · iphone 402×874 · 131 ms
   traits: compact/regular size class, idiom pad, safe area top 62 bottom 34
-  button  "Push notifications" = "1"  @16,208.5 370×58
-  button  "Weekly summary" = "0"  @16,266.5 370×58
+  switch  "Push notifications" = "1"  @16,208.5 370×58
+  switch  "Weekly summary" = "0"  @16,266.5 370×58
   button  "Theme, System"  @32,397.5 338×34.5
   button  "Text size: 3, Decrement" = "3" #Decrement  @276,462 47×32
   button  "Text size: 3, Increment" = "3" #Increment  @323,462 47×32
@@ -34,10 +34,8 @@ Settings · light · iphone 402×874 · 131 ms
   text    "Version 1.0 (demo)"  @16,596 370×30
   header  "Settings"  @16,119 133×40.5
   png: out/Settings-iphone.png
-  issues (3):
+  issues (1):
     ⚠ button "Theme, System" tap target 338×34 is smaller than 44×44
-    ⚠ button "Text size: 3, Decrement" tap target 47×32 is smaller than 44×44
-    ⚠ button "Text size: 3, Increment" tap target 47×32 is smaller than 44×44
 ```
 
 </td>
@@ -361,7 +359,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `tests.uiSources`: a UI test target's source folder, when it isn't a synchronized folder simless can find.
 - `tests.uiDevices`: more devices for `simless test ui`, each with the tests that run on it (`[]` for all of them). The device in `device` runs every UI test.
 - `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against and the simulator-only command runs on (default: the newest runtime, iPhone 17 Pro).
-- `idiom`: `"phone"` renders phone canvases with the phone idiom (see [Known differences](#known-differences-from-an-iphone)).
+- `idiom`: `"phone"` or `"pad"` for phone canvases. The default is the phone idiom for an iPhone-only app and the iPad idiom otherwise (see [Known differences](#known-differences-from-an-iphone)).
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 - `mode`: `"native"` (the default) runs the app unsigned. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
@@ -420,11 +418,12 @@ What simless does to stay accurate:
 
 <br>
 
-- **The idiom is `.pad` by default** (UI test hosts excepted, which report an iPhone's). Code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and renders print a note about it. `--idiom phone` (or `"idiom": "phone"`) gives views the phone idiom. It's opt-in because SwiftUI's `Stepper` crashes on the Mac under it, and it has been seen crashing under the iPad idiom too. When the phone idiom crashes a screen, simless restarts the host, renders that screen with the iPad idiom and says so. On the demo app it fixed the navigation bar of a split view, but didn't close the other gaps below, so run `simless calibrate --idiom phone` to see whether it helps your screens. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
+- **The idiom.** An iPhone-only app (`TARGETED_DEVICE_FAMILY = 1`) renders phone canvases with the phone idiom, as on an iPhone. Others keep the Mac's iPad idiom unless you pass `--idiom phone` (or set `"idiom": "phone"` or `"pad"`). Under the iPad idiom, code that checks the trait collection's `userInterfaceIdiom` takes its iPad branch, and controls get iPad metrics. Renders print the traits the view saw. SwiftUI's `Stepper` crashes on the Mac under the phone idiom (its default style resolves to itself until the stack overflows, see [findings](docs/findings.md#rendering-on-the-mac)), so a screen that shows one renders with the iPad idiom and says so. simless finds out from rendering the screen with the iPad idiom once per build. `UIDevice.current.userInterfaceIdiom` stays `.pad` either way.
 - **Text renders 2 to 4% wider.** Usually lines break the same way, but long or centered text can need an extra line. Treat exact line breaks and truncation as unverified until calibration shows they match.
 - **Platform rows are taller.** `List` rows came out 2 pt taller and `Form` toggle rows 6 pt taller, so content below them sits lower.
-- **System colors follow the Mac.** Controls use the macOS accent color (an "on" toggle can be gray instead of green), which an accessibility tree can't show.
-- **Some controls are exposed differently to accessibility.** In calibration, a `Menu` with a custom label was unlabeled in simless but labeled on iOS, so simless reported an issue that isn't one on a phone. Confirm accessibility flags on `Menu` and other platform-backed controls with `simless calibrate`.
+- **Colors.** Renders use the app's accent color, or iOS blue when it has none, and iOS green for switches that are on, not the Mac's accent color. Other system colors can still differ from an iPhone's, which an accessibility tree can't show.
+- **A font the app doesn't ship.** A custom font that isn't registered (missing from `UIAppFonts`) falls back to Helvetica on both, but macOS's Helvetica has a tighter line (1.0 em against 1.175 em on iOS), so such text sits higher in a render. Registering the font closes the gap, and it's the same font on an iPhone too.
+- **Some controls are exposed differently to accessibility.** On the Mac, SwiftUI fills in a `Menu`'s custom label only after it's been read once, so simless reads the tree twice and a `Menu` row is labeled as on iOS ("Landing page, Chats"). Switches are `switch`, text fields are `field` (with their placeholder), and switches, text fields and a stepper's halves aren't flagged as small tap targets, since the system sizes them. A text field with neither a label nor a placeholder is flagged. Confirm other accessibility flags on platform-backed controls with `simless calibrate`.
 - **Text size:** `--text-size` and `-UIPreferredContentSizeCategoryName` scale text the way an iPhone does. An iOS app on the Mac normally resolves every text style to one size, so simless's runtime makes CoreText use iOS's sizes instead (body is 17 pt by default and 53 pt at AX5, as on an iPhone). Set `SIMLESS_DYNAMIC_TYPE=0` to turn that off.
 - **Pixels and images:** rendering is close to an iPhone's but not identical, and the Mac loads and draws images its own way. Use the simulator for final pixels and image checks.
 - **Crashes:** a screen that crashes the render host is reported with the crash's first frames in your code or SwiftUI, and `render all` carries on with the other screens. SwiftUI itself can crash on the Mac where an iPhone doesn't (`Stepper` is the known case), so confirm such a crash in a simulator.

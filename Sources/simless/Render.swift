@@ -13,6 +13,7 @@ enum Render {
         var idiom: String?           // "phone": phone idiom on phone canvases
         var settle: Double?          // ms the screen gets for async work (.task, loads) before it's read
         var patch: Int?              // hot reloads since the build (the host also counts loading the previews)
+        var notes: [String] = []     // lines after the traits
         var checks = Config.Checks()
     }
 
@@ -64,11 +65,39 @@ enum Render {
 
     /// Renders one fixture and returns the text an agent reads (or JSON).
     static func run(slot: SlotRecord, fixture: String, options: Options) throws -> (text: String, issues: Int) {
+        var options = options
         let c = try canvas(options.device)
         let client = try slot.client(timeout: 30)
+        try avoidStepperCrash(slot: slot, fixture: fixture, options: &options, canvas: c, client: client)
         let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
                                         textSize: options.textSize, idiom: options.idiom, settle: options.settle))
         return try format(r, fixture: fixture, options: options, canvas: c)
+    }
+
+    /// SwiftUI's Stepper takes the Mac host down under the phone idiom: its
+    /// default style resolves to itself until the stack overflows (findings.md).
+    /// A fixture that shows one renders with the iPad idiom instead. Whether it
+    /// does comes from rendering it with the iPad idiom once, kept per fixture
+    /// until the next build or patch.
+    static func avoidStepperCrash(slot: SlotRecord, fixture: String, options: inout Options, canvas c: Canvas, client: LineClient) throws {
+        guard options.idiom == "phone", c.width < 600 else { return }
+        struct Probe: Codable { var build: String; var fixtures: [String: Bool] }
+        let path = "\(slot.dir)/stepper-fixtures.json", build = "\(slot.builtAt) \(slot.patch)"
+        var probe = FileManager.default.contents(atPath: path).flatMap { try? JSONDecoder().decode(Probe.self, from: $0) }
+            .flatMap { $0.build == build ? $0 : nil } ?? Probe(build: build, fixtures: [:])
+        var shows = probe.fixtures[fixture]
+        if shows == nil {
+            let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: false,
+                                            textSize: options.textSize, idiom: nil, settle: options.settle))
+            guard r["ok"] as? Bool == true else { return }
+            shows = (r["nodes"] as? [[String: Any]] ?? []).contains { ["Increment", "Decrement"].contains($0["id"] as? String ?? "") }
+            probe.fixtures[fixture] = shows
+            try? JSONEncoder().encode(probe).write(to: URL(fileURLWithPath: path))
+        }
+        if shows == true {
+            options.idiom = nil
+            options.notes.append("  note: rendered with the iPad idiom: this screen shows a Stepper, which crashes SwiftUI on the Mac under the phone idiom")
+        }
     }
 
     /// A render's answer as the tree, the PNG it asked for and the issues.
@@ -100,10 +129,12 @@ enum Render {
         let extras = [r["locale"] as? String, options.textSize.map { "text \($0)" }].compactMap { $0 }.map { " · " + $0 }.joined()
         lines.append("\(fixture) · \(options.dark ? "dark" : "light") · \(options.device) \(Int(w))×\(Int(h))\(extras) · \(ms)\(patch)")
         lines += traitsText(r, device: options.device)
+        lines += options.notes
         for n in nodes {
             let role = n["role"] as? String ?? "element"
             let column = role.count < 7 ? role.padding(toLength: 7, withPad: " ", startingAt: 0) : role
             var label = (n["label"] as? String).map { "\"\($0)\"" } ?? "(no label)"
+            if let p = n["placeholder"] as? String { label += " placeholder \"\(p)\"" }
             if let v = n["value"] as? String, !v.isEmpty { label += " = \"\(v)\"" }
             let id = (n["id"] as? String).map { " #\($0)" } ?? ""
             lines.append("  \(column) \(label)\(id)  \(frameText(n))")
@@ -132,13 +163,16 @@ enum Render {
     /// Deterministic checks; an agent should look at the tree for the rest.
     static func findIssues(_ nodes: [[String: Any]], width: Double, height: Double, minTapTarget: Double = 44) -> [String] {
         var issues: [String] = []
-        let interactive: Set<String> = ["button", "link", "search", "adjustable"]
+        let interactive: Set<String> = ["button", "link", "search", "adjustable", "switch", "field"]
         for n in nodes {
             let role = n["role"] as? String ?? ""
             let label = (n["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             let (x, _, w, h) = frame(n)
             let name = label.isEmpty ? role : "\(role) \"\(label)\""
-            if interactive.contains(role), label.isEmpty {
+            // A text field VoiceOver reads by its placeholder when it has no label.
+            if role == "field", label.isEmpty, (n["placeholder"] as? String ?? "").isEmpty {
+                issues.append("text field without accessibility label or placeholder\((n["id"] as? String).map { " #\($0)" } ?? "") \(frameText(n))")
+            } else if interactive.contains(role), role != "field", label.isEmpty {
                 issues.append("\(role) without accessibility label \(frameText(n))")
             }
             if w <= 0 || h <= 0 {
@@ -149,8 +183,11 @@ enum Render {
                 // layout problem, so only partial clipping is flagged.
                 issues.append("\(name) is cut off at the \(x < 0 ? "left" : "right") edge \(frameText(n))")
             }
-            // UIKit's own controls (bar buttons) are sized by the system, not the app.
-            if interactive.contains(role), n["system"] as? Bool != true, w > 0, h > 0, w < minTapTarget || h < minTapTarget {
+            // UIKit's own controls (bar buttons), switches, text fields and a stepper's
+            // halves are sized by the system, not the app.
+            let systemSized = n["system"] as? Bool == true || role == "switch" || role == "field"
+                || ["Increment", "Decrement"].contains(n["id"] as? String ?? "")
+            if interactive.contains(role), !systemSized, w > 0, h > 0, w < minTapTarget || h < minTapTarget {
                 let m = Int(minTapTarget)
                 issues.append("\(name) tap target \(Int(w))×\(Int(h)) is smaller than \(m)×\(m)")
             }

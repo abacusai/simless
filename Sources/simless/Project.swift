@@ -302,6 +302,15 @@ struct Workspace {
         var bundleID: String
         var team: String
         var wrapperName: String
+        var deviceFamily: String? = nil   // TARGETED_DEVICE_FAMILY: "1" is iPhone only
+    }
+
+    /// The idiom phone canvases render with: `--idiom`, then `"idiom"`, then
+    /// the phone's for an iPhone-only app (what it gets on an iPhone), else the
+    /// Mac's iPad idiom. nil means the iPad idiom.
+    func phoneIdiom(_ flag: String?) -> String? {
+        let chosen = flag ?? config.idiom ?? ((try? settings().deviceFamily)?.trimmingCharacters(in: .whitespaces) == "1" ? "phone" : nil)
+        return chosen == "phone" ? "phone" : nil
     }
 
     private func captureSettings(project: String) throws {
@@ -351,7 +360,8 @@ struct Workspace {
             // never looked for in the keychain (that took 8.5 s of every `up`).
             team: native ? explicitTeam(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? "") ?? ""
                 : try teamForSigning(fromBuildSettings: bs["DEVELOPMENT_TEAM"] ?? ""),
-            wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app")
+            wrapperName: bs["WRAPPER_NAME"] ?? "\(config.appTarget).app",
+            deviceFamily: bs["TARGETED_DEVICE_FAMILY"])
         guard !s.bundleID.isEmpty else {
             throw SimlessError("\(config.appTarget) needs a PRODUCT_BUNDLE_IDENTIFIER")
         }
