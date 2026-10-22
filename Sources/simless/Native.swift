@@ -41,7 +41,11 @@ enum Native {
 
     static func executable(_ app: String) -> String {
         let info = NSDictionary(contentsOfFile: "\(app)/Info.plist")
-        let name = info?["CFBundleExecutable"] as? String ?? ((app as NSString).lastPathComponent as NSString).deletingPathExtension
+        let fallback = ((app as NSString).lastPathComponent as NSString).deletingPathExtension
+        let wanted = info?["CFBundleExecutable"] as? String ?? fallback
+        // A file directly in the bundle, never a path the Info.plist makes up.
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: app)) ?? []
+        let name = entries.first { $0 == wanted } ?? fallback
         return "\(app)/\(name)"
     }
 
