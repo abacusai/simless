@@ -73,6 +73,7 @@ enum Act {
         options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
         options.idiom = ws.phoneIdiom(args.values["--idiom"])
         options.checks = ws.config.checks ?? .init()
+        options.hide = ws.config.hide ?? []
         if let png = args.values["--png"] {
             if png.hasSuffix("/") { try mkdirp(png) }
             options.pngPath = png.hasSuffix("/") ? "\(png)\(fixture)-act.png" : png

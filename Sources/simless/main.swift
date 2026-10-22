@@ -541,6 +541,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
             options.settle = args.values["--settle"].flatMap(Double.init) ?? ws.config.settle
             options.idiom = ws.phoneIdiom(args.values["--idiom"])
             options.checks = ws.config.checks ?? .init()
+            options.hide = ws.config.hide ?? []
             options.patch = slot.patch
             if var png = args.values["--png"] {
                 while png.count > 1 && png.hasSuffix("/") { png.removeLast() }

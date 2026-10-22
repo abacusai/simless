@@ -333,6 +333,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 ```json
 {
   "checks": { "minTapTarget": 32, "ignore": ["\"Daily\" tap target", "Show Sidebar"] },
+  "hide": ["#debugTrace"],
   "tests": {
     "timeout": 120, "skip": ["AppTests/DeviceOnlyTests"],
     "simulatorOnly": { "AppUITests/HealthUITests/testPermissionSheet": "the HealthKit sheet" },
@@ -356,6 +357,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 
 - `checks.minTapTarget`: the smallest tap target in points that isn't reported (default 44).
 - `checks.ignore`: issues containing any of these strings aren't reported. Renders say how many were ignored.
+- `hide`: elements left out of every tree (text and `--json`) and of the checks, by `"#identifier"` or by part of the label, such as a debug overlay whose label is a log. Renders say how many were hidden. Separately, text output cuts any label or value over 200 characters and says how long it was (`"…" (4,812 chars)`), while `--json` keeps all of it.
 - `tests.timeout` and `tests.skip`: defaults for `--timeout` and `--skip`.
 - `tests.simulatorOnly`: tests that need a simulator, with the reason. They're skipped and counted apart, and `simless test --simulator-only` lists them. A test skipped with a reason that starts with "simulator only" counts too.
 - `tests.hosts` and `tests.jobs`: test hosts running side by side (default: up to 4 when there are 4 or more targets), and tests running at once in each. `tests.uiJobs` and `tests.uiTimeout`: hosts for UI tests, and seconds one UI test may run (default 600).
