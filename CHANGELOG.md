@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Render hosts get no network.** A render host runs the app's real startup, and on a production app every host start made 6 real calls: user info, analytics events and SSO client ids on the production API, plus Firebase Remote Config and logging. Now every `URLSession` request in a render host fails as if the Mac were offline, sessions with their own configuration included, and the render says once per host what was blocked: `network: blocked 6 requests: abacus.ai (/api/v0/_getUserInfo, /api/v0/_logMobileEvents); …`. `.simless.json` `"network": {"allow": [...], "stub": {"<url glob>": "<file>"}}` lets hosts through or serves a file, and `SIMLESS_NETWORK=allow` turns it off for one command. Test hosts keep the network, because tests can depend on it (`"tests": true` blocks it there too). It's in SimlessRuntime, so it needs no `simless init`. The demo app fetches a config at startup, and CI checks that a render blocks it.
+
 ## 0.6.0 (2026-10-22)
 
 Install it and it works: simless no longer needs an Apple Development certificate, a provisioning profile, Full Disk Access for SimlessAgent, or a login session. It runs the same on a laptop, over SSH, on a CI runner and in a VM, and it's faster.

@@ -92,6 +92,9 @@ These are the platform facts behind simless's design, found by building it again
 - **Writing to a non-existent `~/Library/Containers/<bundle id>/` path** creates a directory that containermanagerd then adopts as a protected stub, and you can't delete it from a shell afterwards.
 - **InjectionNext** reports xcodebuild-only workflows broken on recent Xcode, and it targets function-body swaps. simless's approach compiles a separate module whose types shadow the app's, rebuilds fixtures from it, and needs no interposing.
 
+- **A render host made production calls.** chatllm-ios's fixtures render with the app's real startup, which called `_getUserInfo`, `_logMobileEvents` and `_getSSOClientIds` on the production API and Firebase Remote Config and logging, even with an early return in its AppDelegate. Six requests per host start.
+- **`URLProtocol.registerClass` doesn't reach most sessions.** It covers `URLSession.shared` and `NSURLConnection`, but a session made with its own `URLSessionConfiguration` only uses that configuration's `protocolClasses`, and SDKs make their own (GTMSessionFetcher, Firebase). Replacing `+[NSURLSessionConfiguration defaultSessionConfiguration]` and `ephemeralSessionConfiguration` to put the blocking protocol first covers them, as long as it happens before the app's code runs: SimlessRuntime's constructor does it.
+
 ## Tests on the Mac
 
 - **App Nap slows hosts down a lot.** A host is a hidden background app, and macOS naps it: timers stretch and work runs at background priority. Reading a drawn lab report with Vision took about 40 s in a UI host and under 5 s with `beginActivity(options: [.userInitiated, .latencyCritical])`.
