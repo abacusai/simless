@@ -970,6 +970,8 @@ enum Input {
         if dy > 0, ShareSheet.swipeDown(at: start) || Presentations.dismissSheet(at: start) { return nil }
         // A finger eases off before it lifts, so the glide after a swipe
         // doesn't carry a list more than about a screen.
+        simless_touch_set_swipe(true)
+        defer { simless_touch_set_swipe(false) }
         return drag(from: CGPoint(x: start.x - CGFloat(dx) * 4, y: start.y - CGFloat(dy) * 4), to: end, press: 0,
                     velocity: velocity, hold: 0, release: velocity * 0.4)
     }

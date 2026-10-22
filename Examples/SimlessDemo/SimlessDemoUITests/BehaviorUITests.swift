@@ -18,13 +18,13 @@ final class BehaviorUITests: XCTestCase {
         return app
     }
 
-    /// Swift Charts on macOS 15 scrolls and selects through SwiftUI's responder
-    /// gestures, which see simless's touches move but don't act on them. macOS 26
-    /// and later, and every simulator, run these tests.
-    private func skipChartGesturesOnMacOS15() throws {
+    /// On macOS 15 a press-and-drag on a scrollable chart scrolls it instead of
+    /// selecting: that UIKit gives simless's touch to the chart's scroll view, not
+    /// to Charts' selection gesture. macOS 26 and later, and every simulator, run it.
+    private func skipChartSelectionOnMacOS15() throws {
         let simless = ProcessInfo.processInfo.environment["SIMLESS_UI_PORT"] != nil
         try XCTSkipIf(simless && ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26,
-                      "Swift Charts gestures don't take simless's touches on macOS 15")
+                      "a scrollable chart's press-and-drag selection doesn't take simless's touches on macOS 15")
     }
 
     /// A Button inside a view with its own `onTapGesture` gets the tap, not the outer view.
@@ -82,7 +82,6 @@ final class BehaviorUITests: XCTestCase {
     /// Three swipes to the right take a scrolling chart weeks back, not days.
     @MainActor
     func testSwipesScrollAChartBackByWeeks() throws {
-        try skipChartGesturesOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 10))
@@ -102,7 +101,6 @@ final class BehaviorUITests: XCTestCase {
     /// Two slow swipes take the chart back by more than two weeks.
     @MainActor
     func testSlowSwipesScrollAChartBackByWeeks() throws {
-        try skipChartGesturesOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 10))
@@ -123,7 +121,7 @@ final class BehaviorUITests: XCTestCase {
     /// After a scrub, slow swipes still scroll, and a scrub after them selects a day back there.
     @MainActor
     func testScrubbingAfterScrollingBackSelectsADayBackThere() throws {
-        try skipChartGesturesOnMacOS15()
+        try skipChartSelectionOnMacOS15()
         let app = launch("chart")
         let position = app.staticTexts["lab.chart.position"]
         let selected = app.staticTexts["lab.chart.selected"]

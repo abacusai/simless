@@ -94,6 +94,16 @@ static BOOL touchDebug(void) {
     return on;
 }
 
+/// Whether the touches being sent are a swipe (see simless_touch_set_swipe).
+static BOOL swiping;
+
+/// Set around a swipe. On macOS 15 a touch given the gesture container's
+/// recognizers goes to SwiftUI's responder gesture even where a scroll view
+/// should take it (a scrollable chart then never scrolls), so there a swipe
+/// gets only the views' own recognizers, the scroll view's pan among them.
+/// macOS 26 and later make hit test contexts with the event and need no help.
+void simless_touch_set_swipe(BOOL swipe) { swiping = swipe; }
+
 /// Why the last touch failed (an exception UIKit threw), or NULL.
 static char *lastError;
 const char *simless_touch_error(void) { return lastError; }
@@ -175,7 +185,9 @@ static BOOL simless_touch_unguarded(UIWindow *window, CGPoint point, int phase) 
     // test, and the touch carries the recognizers from there up.
     if (p == UITouchPhaseBegan) {
         NSString *found = @"no hit test";
-        if ([window respondsToSelector:@selector(_hitTestWithContext:)]
+        BOOL olderUIKit = ![NSClassFromString(@"_UIHitTestContext") instancesRespondToSelector:@selector(initWithPoint:radius:event:)];
+        if (swiping && olderUIKit) found = @"a swipe on macOS 15: the views' recognizers";
+        else if ([window respondsToSelector:@selector(_hitTestWithContext:)]
             && [event respondsToSelector:@selector(_addGestureRecognizersFromContainer:toTouch:)]) {
             // Asked of the view under the finger (and up), in its own coordinates.
             for (UIView *v = current.view; v != nil; v = v.superview) {

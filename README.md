@@ -441,7 +441,7 @@ Where the Mac shows things differently from an iPhone, simless shows the iPhone'
 
 **Permission prompts never reach your screen.** The hosts are real Mac apps, so a request for calendar, notifications, microphone, camera, speech, photos, contacts, location or tracking access would show macOS's dialog, and so would a review request. The runtime answers them itself: access is denied and review requests do nothing. For location that's what an iPhone does after a denial: the delegate hears the status change, `authorizationStatus` reads denied, and asking for a fix fails with `kCLErrorDenied`, so an app waiting for a location doesn't wait forever. Granting isn't an option, because the app's next access would make macOS ask anyway. Set `SIMLESS_PERMISSIONS=ask` to let the requests through to macOS.
 
-**On macOS 15**, Swift Charts' scroll and selection gestures don't respond to simless's touches (everything else does). On macOS 26 and later they do.
+**On macOS 15**, a press-and-drag selection on a scrollable Swift Charts chart doesn't select (swipes, scrolling and taps on charts work). On macOS 26 and later it does.
 
 What needs a simulator: HealthKit permission sheets and data, the StoreKit purchase sheet and products from a StoreKit configuration file, the photo and file pickers (unless your app stubs them in UI tests), recording from the microphone, sharing to a target, the Home Screen, and the watch app. The same goes for a test that counts on app code behind `#if targetEnvironment(simulator)`, since simless runs the device branch (a failing run points it out). Mark those tests in `tests.simulatorOnly`, and `simless test --simulator-only` lists them with the command to run them in one.
 
