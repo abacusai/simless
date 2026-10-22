@@ -69,6 +69,14 @@ func mkdirp(_ path: String) throws {
 
 func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: path) }
 
+/// An APFS clone of `src` at `dst`, writable by its owner. Build products from
+/// a read-only SwiftPM checkout (a binary xcframework) keep its mode, and
+/// retagging and signing write into the clone. The original is never written.
+func cloneWritable(_ src: String, to dst: String, what: String) throws {
+    try Shell.check(["/bin/cp", "-c", "-R", src, dst], what: what)
+    try Shell.check(["/bin/chmod", "-R", "u+w", dst], what: "make the \((dst as NSString).lastPathComponent) clone writable")
+}
+
 func mtime(_ path: String) -> Double {
     ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date)?
         .timeIntervalSinceReferenceDate ?? 0

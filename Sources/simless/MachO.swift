@@ -64,6 +64,56 @@ enum MachO {
         return changed
     }
 
+    /// Where a Mac Catalyst process's iOS-only Swift libraries are, in the dyld shared cache.
+    static let iOSSupportSwift = "/System/iOSSupport/usr/lib/swift"
+    private static let lcLoadDylibs: Set<UInt32> = [0xc, 0x20, 0x80000018, 0x8000001f, 0x80000023]
+    private static let lcRpath: UInt32 = 0x8000001c
+
+    /// The `@rpath/` libraries a binary loads and the rpaths it has.
+    static func rpathLoads(_ path: String) -> (loads: [String], rpaths: [String]) {
+        let fd = open(path, O_RDONLY)
+        guard fd >= 0 else { return ([], []) }
+        defer { close(fd) }
+        var loads: [String] = [], rpaths: [String] = []
+        for offset in sliceOffsets(fd) {
+            guard read32(fd, offset) == mhMagic64, let ncmds = read32(fd, offset + 16) else { continue }
+            var at = offset + 32
+            for _ in 0..<ncmds {
+                guard let cmd = read32(fd, at), let size = read32(fd, at + 4), size >= 12, let nameAt = read32(fd, at + 8) else { break }
+                if lcLoadDylibs.contains(cmd) || cmd == lcRpath, let name = readCString(fd, at + UInt64(nameAt), max: Int(size) - Int(nameAt)) {
+                    if cmd == lcRpath { rpaths.append(name) } else if name.hasPrefix("@rpath/") { loads.append(String(name.dropFirst(7))) }
+                }
+                at += UInt64(size)
+            }
+        }
+        return (Array(Set(loads)).sorted(), Array(Set(rpaths)))
+    }
+
+    /// Lets a binary find the Swift libraries only Mac Catalyst has (such as
+    /// libswiftCoreNFC) when it loads them through `@rpath`, as binaries built
+    /// for iOS 12 and older do. A Catalyst process looks up absolute
+    /// `/usr/lib/swift` paths in iOSSupport too, but not `@rpath` ones, so the
+    /// host died at launch. Adds iOSSupport's Swift folder as the binary's last
+    /// rpath (in the slot's copy). Returns whether the binary changed.
+    @discardableResult
+    static func addCatalystSwiftRpath(_ path: String, bundled: Set<String>) throws -> Bool {
+        let (loads, rpaths) = rpathLoads(path)
+        guard !rpaths.contains(iOSSupportSwift) else { return false }
+        let missing = loads.filter {
+            $0.hasPrefix("libswift") && !bundled.contains($0)
+                && !inSystem("/usr/lib/swift/\($0)") && inSystem("\(iOSSupportSwift)/\($0)")
+        }
+        guard !missing.isEmpty else { return false }
+        try Shell.check(["xcrun", "install_name_tool", "-add_rpath", iOSSupportSwift, path],
+                        what: "add \(iOSSupportSwift) to \((path as NSString).lastPathComponent)'s rpaths (for \(missing.joined(separator: ", ")))")
+        return true
+    }
+
+    /// Whether macOS has a library at `path`, in the dyld shared cache or on disk.
+    static func inSystem(_ path: String) -> Bool {
+        _dyld_shared_cache_contains_path(path) || FileManager.default.fileExists(atPath: path)
+    }
+
     /// The Mach-O files of a bundle (executables, dylibs, frameworks, test
     /// bundles), found by their magic among executable files and dylibs.
     static func binaries(in bundle: String) -> [String] {
@@ -110,6 +160,13 @@ enum MachO {
     private static func read32(_ fd: Int32, _ offset: UInt64) -> UInt32? {
         var v: UInt32 = 0
         return pread(fd, &v, 4, off_t(offset)) == 4 ? v : nil
+    }
+
+    private static func readCString(_ fd: Int32, _ offset: UInt64, max: Int) -> String? {
+        guard max > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: max)
+        guard pread(fd, &buf, max, off_t(offset)) == max else { return nil }
+        return String(decoding: buf.prefix { $0 != 0 }, as: UTF8.self)
     }
 
     private static func read64(_ fd: Int32, _ offset: UInt64) -> UInt64? {

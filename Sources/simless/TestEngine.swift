@@ -430,7 +430,7 @@ enum TestEngine {
             let bundle = stale[i], copy = prepared(stale[i])
             do {
                 try? fm.removeItem(atPath: copy)
-                try Shell.check(["/bin/cp", "-c", "-R", bundle, copy], what: "clone \((bundle as NSString).lastPathComponent)")
+                try cloneWritable(bundle, to: copy, what: "clone \((bundle as NSString).lastPathComponent)")
                 for r in resources {
                     try? fm.removeItem(atPath: "\(copy)/\(r)")
                     try Shell.check(["/bin/cp", "-c", "-R", "\(products)/\(r)", "\(copy)/\(r)"], what: "copy \(r)")
