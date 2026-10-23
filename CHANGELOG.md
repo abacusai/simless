@@ -3,6 +3,13 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **A List that loads after the first frame is read.** On a habit tracker in our pipeline, `root` and `HabitListView.Loaded` rendered 4 elements, the empty state, while `act` on the same screen showed every habit. On a repro whose List appears once a `.task` loads its data, the render read 4 elements, `--settle 300` read 2 and `act` read 2, against 9 on screen. Two things were wrong:
+  - **`--settle` couldn't fix it.** The render window has no scene, so nothing drives its screen updates, and a List that appears later never gets its rows or a place in the window, however long the render waits. The PNG looked right because drawing it runs that update. SimlessRuntime now runs it before a read when the screen has a view that isn't in the window yet, so no `simless init` is needed.
+  - **The first read can come before the data.** After the first read, a render runs that update and reads again while the screen keeps changing, for up to a second. A screen of 5 elements or fewer, which may be an empty state, gets one more look 100 ms later. The render says so (`changedAfterFirstRead` in `--json`): `note: the screen changed after the first read (4 elements, then 9 after 152 ms)`, 130 to 265 ms over three runs. All three reads of the repro now show 9.
+  - **The cost:** about 13 ms per render to check, plus 100 ms for a screen of 5 elements or fewer. `render all` on the demo app went from 0.44 s to 0.67 s for 10 fixtures. The demo app has a screen like that (`InboxView.Loaded`), and CI reads its rows with and without `--settle`.
+
 ## 0.7.1 (2026-10-22)
 
 Fixes from putting simless in our pipeline as the compile-and-check step: a reload after a failed build now shows the fix and `--json` says which code the host runs, and long labels no longer blow up the tree.

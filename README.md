@@ -213,7 +213,7 @@ simless version                   version, Xcode and macOS
 
 `--matrix` renders light and dark on `iphone`, `iphone-small` and `ipad`.
 
-`--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone. `--settle <ms>` gives a screen time for its async work (`.task`, loads) before the tree is read.
+`--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone. `--settle <ms>` gives a screen time for its async work (`.task`, loads) before the tree is read. Without it, a render that changes after its first read (a List that appears once data loads) is read again until it holds still, and a screen of 5 elements or fewer gets one more look 100 ms later. Either way the render says so.
 
 `simless act Settings tap "Push notifications"` renders the fixture, works it like a finger and a keyboard would, and prints the tree afterwards (`"Push notifications" = "0"`). It uses the same automation as `simless test ui`: a tap is an accessibility activation where the element has an action and a real touch elsewhere, and `type` focuses the field first, so SwiftUI text fields take typing and their bindings update. Steps chain in one call and each one is reported as done or not, with what's on screen when an element isn't found. It needs kit 5 (`simless init`).
 

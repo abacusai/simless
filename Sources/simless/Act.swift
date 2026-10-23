@@ -102,6 +102,8 @@ enum Act {
         }
         render["cmd"] = "tree"
         render["image"] = options.pngPath != nil
+        // What the steps changed, on screen (see Render.held).
+        _ = try? client.call(["cmd": "ui.update"])
         let (text, _) = try Render.format(try client.call(render), fixture: fixture, options: options, canvas: c)
         if !options.json { print(lines.joined(separator: "\n")) }
         print(text)
