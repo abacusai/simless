@@ -104,8 +104,18 @@ enum Act {
         render["image"] = options.pngPath != nil
         // What the steps changed, on screen (see Render.held).
         _ = try? client.call(["cmd": "ui.update"])
-        let (text, _) = try Render.format(try client.call(render), fixture: fixture, options: options, canvas: c)
-        if !options.json { print(lines.joined(separator: "\n")) }
+        var tree = try client.call(render)
+        let inside = nested((try? client.call(["cmd": "ui.snapshot"])) ?? [:])
+        if options.json { tree["nested"] = inside.map { ["inside": $0.outer, "elements": $0.parts] } }
+        var (text, _) = try Render.format(tree, fixture: fixture, options: options, canvas: c)
+        if !options.json {
+            print(lines.joined(separator: "\n"))
+            let insideLines = inside.map { group in
+                "\n  inside \(Render.quoted(group.outer)): " + group.parts.map { "\($0["role"]!) \($0["label"].map(Render.quoted) ?? "#\($0["id"]!)")" }.joined(separator: ", ")
+            }.joined()
+            let at = text.range(of: "\n  issues")?.lowerBound ?? text.endIndex
+            text.insert(contentsOf: insideLines, at: at)
+        }
         print(text)
         if let failed { throw SimlessError("step failed: \(failed)") }
     }
@@ -174,10 +184,36 @@ enum Act {
         }
     }
 
+    /// Controls inside an element that reads as one (a button in a card that is
+    /// itself a button): the tree shows only the outer element, and `tap`
+    /// reaches these by their own label or `#id`.
+    static func nested(_ snapshot: [String: Any]) -> [(outer: String, parts: [[String: String]])] {
+        let nodes = snapshot["nodes"] as? [[String: Any]] ?? []
+        let roles = [9: "button", 40: "switch", 42: "link", 49: "field"]
+        var groups: [(outer: String, parts: [[String: String]])] = []
+        for n in nodes where n["automationOnly"] as? Bool == true {
+            guard let role = roles[n["type"] as? Int ?? 0], n["label"] != nil || n["id"] != nil else { continue }
+            var p = n["parent"] as? Int ?? -1
+            while nodes.indices.contains(p), nodes[p]["automationOnly"] as? Bool == true { p = nodes[p]["parent"] as? Int ?? -1 }
+            guard nodes.indices.contains(p), let outer = nodes[p]["label"] as? String ?? (nodes[p]["id"] as? String).map({ "#\($0)" }) else { continue }
+            var part = ["role": role]
+            part["label"] = n["label"] as? String
+            part["id"] = n["id"] as? String
+            if let i = groups.firstIndex(where: { $0.outer == outer }) { groups[i].parts.append(part) } else { groups.append((outer, [part])) }
+        }
+        return groups
+    }
+
     /// `#id` by identifier; otherwise the label, exactly, then ignoring case, then
-    /// as a part of it (then the identifier or placeholder). On-screen elements first.
+    /// as a part of it (then the identifier or placeholder). On-screen elements
+    /// first. Elements inside another one (a button in a card that reads as one
+    /// button) only when nothing else matches, as XCUITest's descendants.
     static func find(_ query: String, in nodes: [[String: Any]]) -> [String: Any]? {
-        let candidates = nodes.filter { $0["automationOnly"] as? Bool != true }
+        let outer = nodes.filter { $0["automationOnly"] as? Bool != true }
+        return find(query, among: outer) ?? find(query, among: nodes.filter { $0["automationOnly"] as? Bool == true })
+    }
+
+    private static func find(_ query: String, among candidates: [[String: Any]]) -> [String: Any]? {
         let ranked = candidates.filter { $0["hittable"] as? Bool == true } + candidates.filter { $0["hittable"] as? Bool != true }
         if query.hasPrefix("#") {
             let id = String(query.dropFirst())

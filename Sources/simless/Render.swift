@@ -149,8 +149,17 @@ enum Render {
             .flatMap { $0.build == build ? $0 : nil } ?? Probe(build: build, fixtures: [:])
         var shows = probe.fixtures[fixture]
         if shows == nil {
-            let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: false,
+            let r: [String: Any]
+            do {
+                r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: false,
                                             textSize: options.textSize, idiom: nil, settle: options.settle))
+            } catch let error as SimlessError where slot.stats() == nil {
+                // The iPad idiom is what crashes this screen: the next try renders
+                // it with the phone idiom, without looking for a Stepper again.
+                probe.fixtures[fixture] = false
+                try? JSONEncoder().encode(probe).write(to: URL(fileURLWithPath: path))
+                throw ProbeCrash(description: error.description)
+            }
             guard r["ok"] as? Bool == true else { return }
             shows = (r["nodes"] as? [[String: Any]] ?? []).contains { ["Increment", "Decrement"].contains($0["id"] as? String ?? "") }
             probe.fixtures[fixture] = shows
@@ -160,6 +169,11 @@ enum Render {
             options.idiom = nil
             options.notes.append("  note: rendered with the iPad idiom: this screen shows a Stepper, which crashes SwiftUI on the Mac under the phone idiom")
         }
+    }
+
+    /// The iPad-idiom render that looks for a Stepper took the host down.
+    struct ProbeCrash: Error, CustomStringConvertible {
+        let description: String
     }
 
     /// A render's answer as the tree, the PNG it asked for and the issues.

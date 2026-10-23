@@ -63,6 +63,7 @@ public func simlessRuntimeStart() {
     AppGroups.redirect()
     TabSidebar.install()
     if let model = env["SIMLESS_DEVICE_MODEL"], !model.isEmpty { DeviceModel.apply(model) }
+    Idiom.install(windows: env["SIMLESS_UI"] != "1")
     // Unit test hosts: windows tests make get the device's size and safe areas.
     if env["SIMLESS_UI"] != "1", let canvas = env["SIMLESS_UNIT_CANVAS"] { UnitCanvas.install(canvas) }
     if env["SIMLESS_UI"] == "1" {
