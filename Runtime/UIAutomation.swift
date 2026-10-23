@@ -12,7 +12,7 @@ enum UIAutomation {
     static let commands: Set<String> = [
         "ui.ready", "ui.snapshot", "ui.idle", "ui.tap", "ui.drag", "ui.swipe", "ui.type", "ui.scrollToVisible",
         "ui.pickerWheel", "ui.slider", "ui.screenshot", "ui.orientation", "ui.background", "ui.foreground",
-        "ui.state", "ui.openURL", "ui.externalURLs", "ui.audit", "ui.appearance", "ui.flush",
+        "ui.state", "ui.openURL", "ui.externalURLs", "ui.audit", "ui.appearance", "ui.flush", "ui.update",
     ]
     static func handles(_ cmd: String) -> Bool { commands.contains(cmd) }
 
@@ -57,6 +57,7 @@ enum UIAutomation {
         case "ui.ready":
             return ["ok": true, "ready": Session.ready()]
         case "ui.snapshot":
+            ScreenUpdates.apply()
             let (nodes, generation) = Snapshotter.take()
             return ["ok": true, "nodes": nodes, "generation": generation]
         case "ui.flush":
@@ -65,6 +66,8 @@ enum UIAutomation {
             UserDefaults.standard.synchronize()
             CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
             return ["ok": true]
+        case "ui.update":
+            return ["ok": true, "updated": ScreenUpdates.apply()]
         case "ui.idle":
             let settled = Idle.wait(timeout: req["timeout"] as? Double ?? 2)
             return ["ok": true, "settled": settled, "busy": settled ? "" : Idle.lastBusy]
@@ -727,6 +730,36 @@ enum Hit {
         }
         guard let hit = w.hitTest(p, with: nil) else { return false }
         return hit === view || hit.isDescendant(of: view) || view.isDescendant(of: hit)
+    }
+}
+
+// MARK: - Screen updates
+
+/// The render window has no scene, so nothing drives its screen updates: a
+/// change SwiftUI makes after the first frame (a List that appears once a
+/// `.task` loads its data) stays in the view graph, and the List's collection
+/// view never gets its cells or a place in the window. Taking a snapshot after
+/// screen updates is what runs that update (a flush or a layout pass doesn't),
+/// and it costs 40 to 70 ms, so it runs only when a view the screen lists
+/// isn't in the window yet, or a collection view has updates it hasn't shown.
+enum ScreenUpdates {
+    /// Whether there was an update to run.
+    @discardableResult
+    static func apply() -> Bool {
+        guard let w = UIAutomation.renderWindow, w.windowScene == nil else { return false }
+        let root = w.rootViewController?.view ?? w
+        guard pending(root, depth: 0) else { return false }
+        _ = root.snapshotView(afterScreenUpdates: true)
+        return true
+    }
+
+    private static func pending(_ obj: NSObject, depth: Int) -> Bool {
+        guard depth < 80 else { return false }
+        if let v = obj as? UIView, v.window == nil || (v as? UICollectionView)?.hasUncommittedUpdates == true { return true }
+        if obj.isAccessibilityElement { return false }
+        let elements = (obj.accessibilityElements as? [NSObject]) ?? []
+        let children = elements.isEmpty ? (obj as? UIView)?.subviews ?? [] : elements
+        return children.contains { pending($0, depth: depth + 1) }
     }
 }
 

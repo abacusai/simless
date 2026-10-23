@@ -100,6 +100,12 @@ jobs:
           simless render EditProfileView.Sheet --idiom phone | tee sheet.txt
           grep -q "idiom phone" sheet.txt && rm sheet.txt
           simless render all --idiom phone
+          # A List that a .task brings in after the first frame: its rows are read,
+          # with and without --settle.
+          simless render InboxView.Loaded | tee inbox.txt
+          grep -q '"Someone followed you"' inbox.txt && grep -q "changed after the first read" inbox.txt
+          simless render InboxView.Loaded --settle 300 | tee inbox.txt
+          grep -q '"Someone followed you"' inbox.txt && rm inbox.txt
           # Interaction: a switch flips, a text field takes focus and typing.
           simless act Settings tap "Push notifications" | tee act.txt
           grep -q '"Push notifications" = "0"' act.txt

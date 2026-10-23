@@ -70,9 +70,70 @@ enum Render {
         let c = try canvas(options.device)
         let client = try slot.client(timeout: 30)
         try avoidStepperCrash(slot: slot, fixture: fixture, options: &options, canvas: c, client: client)
-        let r = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
-                                        textSize: options.textSize, idiom: options.idiom, settle: options.settle))
+        let first = try client.call(request(fixture: fixture, dark: options.dark, canvas: c, image: options.pngPath != nil,
+                                            textSize: options.textSize, idiom: options.idiom, settle: options.settle))
+        let (r, note) = try held(first, fixture: fixture, options: options, canvas: c, client: client)
+        if let note { options.notes.append(note) }
         return try format(r, fixture: fixture, options: options, canvas: c)
+    }
+
+    /// The screen once it holds still. The render window has no scene, so
+    /// nothing drives its screen updates: a change after the first frame that
+    /// brings UIKit views (a List that appears once a `.task` loads its data)
+    /// only lands when the host is asked for one (`ui.update`), and until then
+    /// every read, `--settle`'s included, showed the screen from before. So
+    /// after the first read the render asks for one, which costs a few ms when
+    /// there's nothing to update, and reads again while updates change the
+    /// screen, for up to a second. A screen of a few elements may not have
+    /// loaded yet (an empty state before a `.task` fills it): without
+    /// `--settle`, it gets one more look 100 ms later. Kits before 5 can't, and
+    /// keep the first read.
+    static func held(_ first: [String: Any], fixture: String, options: Options, canvas c: Canvas,
+                     client: LineClient) throws -> ([String: Any], String?) {
+        guard first["ok"] as? Bool == true else { return (first, nil) }
+        var tree = request(fixture: fixture, dark: options.dark, canvas: c, image: false,
+                           textSize: options.textSize, idiom: options.idiom)
+        tree["cmd"] = "tree"
+        func elements(_ r: [String: Any]) -> [String] {
+            (r["nodes"] as? [[String: Any]] ?? []).map { n in ["role", "label", "value", "id"].map { "\(n[$0] ?? "")" }.joined(separator: "|") }
+        }
+        let count = { (r: [String: Any]) in (r["nodes"] as? [Any] ?? []).count }
+        let start = Date()
+        var last = first, changed = false, still = false
+        /// Whether there was an update to run; nil when the kit can't (before 5).
+        func update() -> Bool? {
+            guard let u = try? client.call(["cmd": "ui.update"]), u["ok"] as? Bool == true else { return nil }
+            return u["updated"] as? Bool == true
+        }
+        /// Reads the screen again; whether it changed.
+        func reread() throws -> Bool {
+            let r = try client.call(tree)
+            guard r["ok"] as? Bool == true else { return false }
+            defer { last = r }
+            return elements(r) != elements(last)
+        }
+        guard var updated = update() else { return (first, nil) }
+        if !updated, options.settle == nil, count(first) <= 5 {
+            Thread.sleep(forTimeInterval: 0.1)
+            updated = update() ?? false
+            if !updated, try reread() { changed = true }
+        }
+        while updated, try reread() {
+            changed = true
+            if Date().timeIntervalSince(start) > 1 { still = true; break }
+            Thread.sleep(forTimeInterval: 0.05)
+            updated = update() ?? false
+        }
+        guard changed else { return (first, nil) }
+        if options.pngPath != nil {
+            tree["image"] = true
+            last = try client.call(tree)
+        }
+        let ms = Date().timeIntervalSince(start) * 1000
+        last["renderMs"] = (first["renderMs"] as? Double ?? 0) + ms
+        last["changedAfterFirstRead"] = ["firstElements": count(first), "ms": Int(ms), "stillChanging": still]
+        return (last, "  note: the screen changed after the first read (\(count(first)) elements, then \(count(last)) after \(Int(ms)) ms), as when a .task loads data; this is the screen once it held still"
+                    + (still ? ", except it was still changing after 1 s" : ""))
     }
 
     /// SwiftUI's Stepper takes the Mac host down under the phone idiom: its

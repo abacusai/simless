@@ -102,6 +102,8 @@ enum Act {
         }
         render["cmd"] = "tree"
         render["image"] = options.pngPath != nil
+        // What the steps changed, on screen (see Render.held).
+        _ = try? client.call(["cmd": "ui.update"])
         var tree = try client.call(render)
         let inside = nested((try? client.call(["cmd": "ui.snapshot"])) ?? [:])
         if options.json { tree["nested"] = inside.map { ["inside": $0.outer, "elements": $0.parts] } }
