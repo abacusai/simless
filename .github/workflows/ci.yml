@@ -105,6 +105,13 @@ jobs:
           grep -q '"Push notifications" = "0"' act.txt
           simless act Login type "#login.email" "a@b.com" tap "Sign in" | tee act.txt
           grep -q '= "a@b.com" #login.email' act.txt && rm act.txt
+          # A button inside a card that is a button: tapped by its label or #id, and
+          # listed under the card. The card's own label still taps the card.
+          simless act TaskCardsView.Cards tap "Mark done" | tee act.txt
+          grep -q '"Call the bank, Done" #card_Call the bank' act.txt
+          grep -q 'inside "Call the bank, Done": button "Mark not done"' act.txt
+          simless act TaskCardsView.Cards tap "#toggle_Book a table" tap "Book a table" | tee act.txt
+          grep -q '"Book a table, Done"' act.txt && grep -q '"Opened Book a table"' act.txt && rm act.txt
           simless test all
 
       # An edit to one screen, which a shared store names and another screen
