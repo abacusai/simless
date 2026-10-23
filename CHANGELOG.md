@@ -3,6 +3,11 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **`act` taps a button inside another button.** On a habit tracker in our pipeline, each habit card is a button with a smaller "Mark incomplete" button in it. `act HabitListView.Loaded tap "Mark incomplete"` failed with "nothing on screen matches", and then listed "Mark incomplete" as on screen. The inner button is one of the elements XCUITest sees under the card, and `tap` now reaches it by its label or `#id` when nothing outside a card matches, so `tap "Drink Water"` still taps the card. Two taps on that screen marked its two done habits not done, and a third found no "Mark incomplete" left.
+- **`act` shows what's inside a card.** The tree has the card only, so after a tap an agent couldn't see the inner button change. `act` now lists such controls under the tree, `inside "Drink Water, 5 day streak": button "Mark complete"`, and `--json` has them as `nested`. The demo app has a screen of cards like that (`TaskCardsView.Cards`), and CI taps the inner button by label and by `#id`, and the card by its own label.
+
 ## 0.7.1 (2026-10-22)
 
 Fixes from putting simless in our pipeline as the compile-and-check step: a reload after a failed build now shows the fix and `--json` says which code the host runs, and long labels no longer blow up the tree.
