@@ -95,6 +95,11 @@ jobs:
           grep -q "^root · " all.txt && grep -q "^LoginView.Error · " all.txt && rm all.txt
           simless render all --matrix
           simless render all --png "$RUNNER_TEMP/renders/"
+          # The phone idiom, as an iPhone-only app gets it: a Form in a NavigationStack
+          # presented as a sheet took the host down, and a Stepper screen falls back.
+          simless render EditProfileView.Sheet --idiom phone | tee sheet.txt
+          grep -q "idiom phone" sheet.txt && rm sheet.txt
+          simless render all --idiom phone
           # Interaction: a switch flips, a text field takes focus and typing.
           simless act Settings tap "Push notifications" | tee act.txt
           grep -q '"Push notifications" = "0"' act.txt
