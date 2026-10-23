@@ -3,6 +3,13 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Forms and Lists don't crash the host under the phone idiom.** In our pipeline, a habit tracker's `AddEditHabitView` (a Form in a NavigationStack) failed both its previews with "unknown user interface idiom (UIUserInterfaceIdiom(rawValue: -1))". The crash was in the iPad-idiom check for a `Stepper` that runs before a phone render, and the retry used the iPad idiom too, so the screen failed. Two causes, both fixed in SimlessRuntime, so no `simless init` is needed:
+  - **A window that takes its idiom from the screen.** The render window has no scene, so when the Mac's screen reports no idiom, every List under it traps in UIKit. Simulating that screen reproduces the message word for word on 4 of 4 Form and List screens of a repro app, and all 4 render after the fix. Windows in render and unit test hosts now get the device's idiom themselves. Why the pipeline's Macs report no idiom is still open.
+  - **A NavigationStack in a sheet.** Under the phone idiom, SwiftUI gave the sheet's NavigationStack the Mac's iPad idiom and UIKit threw ("Cannot override interface idiom to UIUserInterfaceIdiomPad when original interface idiom is UIUserInterfaceIdiomPhone"), every time. Now the sheet keeps its parent's idiom. The demo app has the screen (`EditProfileView.Sheet`), and CI renders it and every other demo fixture with `--idiom phone`.
+- **A crash in the iPad-idiom check renders the screen with the phone idiom**, and says so, instead of retrying with the iPad idiom that just crashed. With the window fix turned off, the habit tracker's List renders this way instead of failing.
+
 ## 0.7.1 (2026-10-22)
 
 Fixes from putting simless in our pipeline as the compile-and-check step: a reload after a failed build now shows the fix and `--json` says which code the host runs, and long labels no longer blow up the tree.
