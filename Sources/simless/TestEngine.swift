@@ -475,17 +475,10 @@ enum TestEngine {
     static func appTestTargets(_ ws: Workspace) throws -> [String] {
         // A scheme without tests builds no .xctestrun: the app has no test targets.
         if ws.appXCTestRun == nil, ws.config.testTarget.isEmpty, exists(ws.settingsPath) { return [] }
-        guard let file = ws.appXCTestRun,
-              let data = FileManager.default.contents(atPath: file),
-              let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+        guard let file = ws.appXCTestRun, exists(file) else {
             throw SimlessError("not built yet; run `simless up`")
         }
-        var targets: [[String: Any]] = []
-        if let configs = plist["TestConfigurations"] as? [[String: Any]] {
-            targets = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-        } else {
-            targets = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
-        }
+        let targets = Workspace.testTargets(inXCTestRun: file)
         // Only bundles the build actually put in the app.
         let app = try? ws.settings().wrapperName
         return Array(Set(targets.filter { $0["IsUITestBundle"] as? Bool != true && $0["TestHostPath"] != nil }

@@ -155,18 +155,36 @@ struct Workspace {
     /// write their own next to it, so it's picked by the scheme it's for
     /// (Xcode names it `<Scheme>_<TestPlan>_<platform>.xctestrun`), or else by
     /// holding the app's unit-test target, never by which sorts first.
-    var appXCTestRun: String? {
+    var appXCTestRun: String? { appXCTestRun(ui: false) }
+
+    /// The app scheme's .xctestrun for its unit tests, or for its UI tests. A
+    /// scheme with several test plans gets one per plan, written in the same
+    /// second, so the one picked is the newest that holds the kind of target
+    /// asked for, and the newest of the scheme's only when none does.
+    func appXCTestRun(ui: Bool) -> String? {
         let files = ((try? FileManager.default.contentsOfDirectory(atPath: products)) ?? []).filter { $0.hasSuffix(".xctestrun") }
-        if let named = files.filter({ $0.hasPrefix("\(config.scheme)_") }).max(by: { mtime("\(products)/\($0)") < mtime("\(products)/\($1)") }) {
-            return "\(products)/\(named)"
+        let named = files.filter { $0.hasPrefix("\(config.scheme)_") }.map { "\(products)/\($0)" }
+        let holding = named.filter { path in
+            Self.testTargets(inXCTestRun: path).contains { t in
+                ui ? t["IsUITestBundle"] as? Bool == true
+                   : t["IsUITestBundle"] as? Bool != true
+                     && (t["TestHostPath"] != nil || (!config.testTarget.isEmpty && t["BlueprintName"] as? String == config.testTarget))
+            }
         }
+        if let newest = (holding.isEmpty ? named : holding).max(by: { mtime($0) < mtime($1) }) { return newest }
         return files.map { "\(products)/\($0)" }.first { path in
-            guard let data = FileManager.default.contents(atPath: path),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return false }
-            let entries = (plist["TestConfigurations"] as? [[String: Any]])?.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-                ?? plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
-            return entries.contains { $0["BlueprintName"] as? String == config.testTarget }
+            Self.testTargets(inXCTestRun: path).contains { $0["BlueprintName"] as? String == config.testTarget }
         }
+    }
+
+    /// The test targets of an .xctestrun, in either format: v2
+    /// (`TestConfigurations[].TestTargets[]`, schemes with a test plan) or v1
+    /// (test targets as top-level keys).
+    static func testTargets(inXCTestRun path: String) -> [[String: Any]] {
+        guard let data = FileManager.default.contents(atPath: path),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return [] }
+        return (plist["TestConfigurations"] as? [[String: Any]])?.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
+            ?? plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
     }
     var buildLog: String { "\(work)/build.log" }
     var settingsPath: String { "\(work)/settings.json" }
