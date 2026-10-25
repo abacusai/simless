@@ -102,6 +102,17 @@ public func simlessRuntimeUI(_ json: UnsafePointer<CChar>, _ window: UnsafeMutab
     UIAutomation.handle(cmd, req) { send($0) }
 }
 
+/// SimlessKit's render window on the Mac, a window with no scene, returned
+/// retained. `UIWindow(frame:)` is deprecated since iOS 26 and no other
+/// initializer makes a window without a scene, so the kit, which is part of the
+/// app's build, leaves it to the runtime, which isn't.
+@_cdecl("simless_runtime_window")
+public func simlessRuntimeWindow(_ width: Double, _ height: Double) -> UnsafeMutableRawPointer {
+    MainActor.assumeIsolated {
+        Unmanaged.passRetained(UIWindow(frame: CGRect(x: 0, y: 0, width: width, height: height))).toOpaque()
+    }
+}
+
 /// An app started with `open` may keep 256 files open, and a test run with
 /// hundreds of tests in parallel (each with its own store) needs more.
 func raiseOpenFileLimit() {
