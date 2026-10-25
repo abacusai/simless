@@ -108,9 +108,28 @@ enum Native {
         try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
         try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
+        try stageTestFrameworks(slot)
         try makeHome(slot)
         fm.createFile(atPath: marker(slot), contents: nil)
         Log.step("slot \(slot.slotID) prepared in \(secs(t))")
+    }
+
+    /// Test frameworks the slot's test hosts find before Xcode's (first on
+    /// DYLD_FRAMEWORK_PATH, ahead of RuntimeBuild.testFrameworkEnv's). Swift
+    /// Testing's UIKit overlay, which a test that attaches a UIImage loads:
+    /// Xcode's macOS `_Testing_UIKit` is a stub without the UIKit API and there's
+    /// no Mac Catalyst one, so the slot gets iPhoneOS's, retagged like the app.
+    static func testFrameworks(_ slot: SlotRecord) -> String { "\(slot.dir)/TestFrameworks" }
+
+    private static func stageTestFrameworks(_ slot: SlotRecord) throws {
+        let dir = testFrameworks(slot)
+        try? FileManager.default.removeItem(atPath: dir)
+        let iOS = "\(RuntimeBuild.developerDir)/Platforms/iPhoneOS.platform/Developer/Library/Frameworks"
+        for name in ["_Testing_UIKit.framework"] where exists("\(iOS)/\(name)") {
+            try mkdirp(dir)
+            try cloneWritable("\(iOS)/\(name)", to: "\(dir)/\(name)", what: "stage \(name)")
+            try adopt(["\(dir)/\(name)"])
+        }
     }
 
     private static func editInfo(_ path: String, _ edit: (inout [String: Any]) -> Void) throws {
