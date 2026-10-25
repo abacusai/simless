@@ -227,7 +227,10 @@ enum SimlessHost {
         }
 
         private func send(_ response: Response, _ after: (@Sendable () -> Void)?) {
-            var out = (try? JSONEncoder().encode(response)) ?? Data("{\"ok\":false}".utf8)
+            var out: Data
+            do { out = try JSONEncoder().encode(response) } catch {
+                out = (try? JSONEncoder().encode(Response(ok: false, error: "the host couldn't send its reply: \(error)"))) ?? Data("{\"ok\":false}".utf8)
+            }
             out.append(0x0A)
             conn.send(content: out, completion: .contentProcessed { _ in after?() })
         }
@@ -485,6 +488,9 @@ enum SimlessHost {
                 // partly off screen when the sidebar is hidden. Not app content.
                 if cls.contains("SplitViewController"), cls.contains("Separator") { return }
                 let a = obj.accessibilityFrame
+                // No frame, so not on screen: SwiftUI leaves such an element for
+                // a `.safeAreaBar` whose content has none.
+                if a.isNull || ![a.minX, a.minY, a.width, a.height].allSatisfy({ $0.isFinite }) { return }
                 let id = obj.responds(to: NSSelectorFromString("accessibilityIdentifier"))
                     ? obj.value(forKey: "accessibilityIdentifier") as? String : nil
                 let traits = obj.accessibilityTraits

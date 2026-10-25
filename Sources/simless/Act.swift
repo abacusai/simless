@@ -84,10 +84,7 @@ enum Act {
         var render = Render.request(fixture: fixture, dark: options.dark, canvas: c, image: false,
                                     textSize: options.textSize, idiom: options.idiom, settle: options.settle)
         let mounted = try client.call(render)
-        guard mounted["ok"] as? Bool == true else {
-            let known = (mounted["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
-            throw SimlessError("\(mounted["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))
-        }
+        guard mounted["ok"] as? Bool == true else { throw Render.failure(mounted) }
         var failed: String?
         var lines = ["\(fixture) · act"]
         for step in steps {
