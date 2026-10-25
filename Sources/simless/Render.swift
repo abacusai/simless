@@ -176,13 +176,20 @@ enum Render {
         let description: String
     }
 
+    /// A failed render's error. A kit older than 7 answers a bare `{"ok":false}`
+    /// when it can't encode its reply, which an element with no frame (an empty
+    /// `.safeAreaBar`'s) caused.
+    static func failure(_ r: [String: Any]) -> SimlessError {
+        let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
+        let error = r["error"] as? String
+            ?? "render failed: the host couldn't send the screen, most likely because an element on it has no frame (an empty .safeAreaBar, say); `simless init` updates SimlessKit, which leaves those out"
+        return SimlessError(error + (known.isEmpty ? "" : "; fixtures: \(known)"))
+    }
+
     /// A render's answer as the tree, the PNG it asked for and the issues.
     static func format(_ r: [String: Any], fixture: String, options: Options, canvas c: Canvas) throws -> (text: String, issues: Int) {
         let (w, h) = (c.width, c.height)
-        guard r["ok"] as? Bool == true else {
-            let known = (r["fixtures"] as? [String])?.joined(separator: ", ") ?? ""
-            throw SimlessError("\(r["error"] as? String ?? "render failed")" + (known.isEmpty ? "" : "; fixtures: \(known)"))
-        }
+        guard r["ok"] as? Bool == true else { throw failure(r) }
         if let path = options.pngPath, let b64 = r["png"] as? String, let data = Data(base64Encoded: b64) {
             try data.write(to: URL(fileURLWithPath: path))
         }

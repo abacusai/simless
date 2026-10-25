@@ -106,6 +106,10 @@ jobs:
           grep -q '"Someone followed you"' inbox.txt && grep -q "changed after the first read" inbox.txt
           simless render InboxView.Loaded --settle 300 | tee inbox.txt
           grep -q '"Someone followed you"' inbox.txt && rm inbox.txt
+          # Actions in a .safeAreaBar move inline at accessibility sizes, which
+          # leaves the bar empty: the screen still renders.
+          simless render CheckoutView.Inline | tee checkout.txt
+          grep -q '"Place order"' checkout.txt && rm checkout.txt
           # Interaction: a switch flips, a text field takes focus and typing.
           simless act Settings tap "Push notifications" | tee act.txt
           grep -q '"Push notifications" = "0"' act.txt
