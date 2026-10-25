@@ -64,21 +64,42 @@ enum UITestEngine {
     }
 
     /// Test methods per class, from the sources (XCTestCase subclasses).
-    static func tests(in target: UITarget) -> [TestID] {
-        var out: [TestID] = []
+    static func tests(in target: UITarget) -> [TestID] { discover(target).tests }
+
+    /// Test methods of the classes whose superclass chain reaches XCTestCase in
+    /// the target's sources, as Xcode finds them, so a shared base class
+    /// (`class BaseUITestCase: XCTestCase`) counts. `skipped` names classes with
+    /// `test…` methods whose chain doesn't get there (a base class from another
+    /// module, say).
+    static func discover(_ target: UITarget) -> (tests: [TestID], skipped: [String]) {
+        var supers: [String: String] = [:]
+        var found: [(cls: String, method: String)] = []
         for file in target.sources {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
             var cls: String?
             // Only what an iPhone simulator run would compile (see PlatformConditions).
             for line in PlatformConditions.activeLines(text) {
-                if let m = line.firstMatch(of: #/^(?:final\s+)?(?:@\w+\s+)*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b/#) { cls = String(m.1) }
-                else if line.firstMatch(of: #/^(?:final\s+)?(?:public\s+)?(?:struct|class|enum|extension)\s/#) != nil { cls = nil }
+                if let m = line.firstMatch(of: #/^(?:(?:final|open|public|internal|fileprivate|private)\s+|@\w+\s+)*class\s+(\w+)\s*:\s*(?:XCTest\.)?(\w+)\b/#) {
+                    cls = String(m.1)
+                    supers[String(m.1)] = String(m.2)
+                } else if line.firstMatch(of: #/^(?:(?:final|open|public|internal|fileprivate|private)\s+|@\w+\s+)*(?:struct|class|actor|enum|extension)\s/#) != nil {
+                    cls = nil
+                }
                 if let c = cls, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
-                    out.append(TestID(target: target.name, cls: c, method: String(m.1)))
+                    found.append((c, String(m.1)))
                 }
             }
         }
-        return out
+        func isTestCase(_ cls: String) -> Bool {
+            var c = cls, seen = Set<String>()
+            while let s = supers[c], seen.insert(c).inserted {
+                if s == "XCTestCase" { return true }
+                c = s
+            }
+            return false
+        }
+        return (found.filter { isTestCase($0.cls) }.map { TestID(target: target.name, cls: $0.cls, method: $0.method) },
+                Set(found.map(\.cls).filter { !isTestCase($0) }).sorted())
     }
 
     // MARK: - Build
@@ -253,7 +274,11 @@ enum UITestEngine {
         for target in all {
             let wanted = filters.isEmpty || filters.contains { $0 == target.name || $0.hasPrefix(target.name + "/") }
             if !wanted { continue }
-            let asked = tests(in: target).filter { id in
+            let (found, unreached) = discover(target)
+            if !unreached.isEmpty {
+                Log.info("note: \(target.name): the test methods of \(unreached.joined(separator: ", ")) don't run: no XCTestCase superclass found in the target's sources")
+            }
+            let asked = found.filter { id in
                 filters.isEmpty || filters.contains { f in id.user == f || id.user.hasPrefix(f + "/") || f == target.name
                     || id.user == f.replacingOccurrences(of: "()", with: "") }
             }
