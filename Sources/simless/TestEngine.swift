@@ -754,6 +754,9 @@ final class Session {
 
     private func environment() -> [String: String] {
         var env = RuntimeBuild.testFrameworkEnv
+        if Native.isNative(slot), exists(Native.testFrameworks(slot)) {
+            env["DYLD_FRAMEWORK_PATH"] = [Native.testFrameworks(slot), env["DYLD_FRAMEWORK_PATH"]].compactMap { $0 }.joined(separator: ":")
+        }
         var dirs = [ws.root, ws.work]
         for p in ws.packages {
             let dir = URL(fileURLWithPath: "\(ws.root)/\(p)").standardizedFileURL.path
