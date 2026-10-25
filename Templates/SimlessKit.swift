@@ -54,7 +54,7 @@ enum SimlessHost {
     }
     /// Bumped when the CLI needs something new from the kit; `simless up` asks
     /// for a `simless init` when the app's copy is older.
-    static let kitVersion = 6
+    static let kitVersion = 7
 
     /// Call once from `App.init()`. No-op unless launched by `simless`.
     static func startIfRequested() {
@@ -270,14 +270,20 @@ enum SimlessHost {
     // MARK: - Rendering
 
     /// The window fixtures render into, created on first use. On the Mac it's a
-    /// standalone hidden window. In a simulator (`simless calibrate`) it belongs
-    /// to the app's scene so the device's own safe areas and traits apply; the
-    /// scene may connect after the host starts, hence the lazy creation.
+    /// standalone hidden window, which SimlessRuntime makes: a window with no
+    /// scene needs `UIWindow(frame:)`, deprecated since iOS 26, and this file is
+    /// part of the app's build, which may allow no warnings. In a simulator
+    /// (`simless calibrate`) it belongs to the app's scene so the device's own
+    /// safe areas and traits apply; the scene may connect after the host starts,
+    /// hence the lazy creation.
     private static func renderWindow() -> UIWindow? {
         if let window { return window }
         let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
         if ProcessInfo.processInfo.isiOSAppOnMac {
-            let w = UIWindow(frame: frame)
+            typealias MakeWindow = @convention(c) (Double, Double) -> UnsafeMutableRawPointer
+            guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "simless_runtime_window") else { return nil }
+            let w = Unmanaged<UIWindow>.fromOpaque(unsafeBitCast(sym, to: MakeWindow.self)(Double(frame.width), Double(frame.height)))
+                .takeRetainedValue()
             w.isHidden = false
             window = w
         } else if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
@@ -378,7 +384,9 @@ enum SimlessHost {
             return .failure(Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names))
         }
         guard let window = renderWindow() else {
-            return .failure(Response(ok: false, error: "no window to render into yet (the app's scene hasn't connected)"))
+            return .failure(Response(ok: false, error: ProcessInfo.processInfo.isiOSAppOnMac
+                ? "no window to render into: this host's SimlessRuntime is older than its SimlessKit; update simless, then `simless up`"
+                : "no window to render into yet (the app's scene hasn't connected)"))
         }
         let start = CFAbsoluteTimeGetCurrent()
         let rect = CGRect(x: 0, y: 0, width: req.width ?? 402, height: req.height ?? 874)
