@@ -33,16 +33,9 @@ enum UITestEngine {
     /// their sources (synchronized folders, or a folder named like the target).
     static func targets(_ ws: Workspace, includingUnbuilt: Bool = false) -> [UITarget] {
         var names = Set<String>()
-        if let file = ws.appXCTestRun,
-           let data = FileManager.default.contents(atPath: file),
-           let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-            var entries: [[String: Any]] = []
-            if let configs = plist["TestConfigurations"] as? [[String: Any]] {
-                entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-            } else {
-                entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
-            }
-            names = Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
+        if let file = ws.appXCTestRun(ui: true) {
+            names = Set(Workspace.testTargets(inXCTestRun: file)
+                .filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
         }
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
         let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
