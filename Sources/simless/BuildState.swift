@@ -90,4 +90,30 @@ enum BuildState {
         guard let built = load(ws) else { return ["(no record of what the last build was built from)"] }
         return changed(from: built, to: current(ws, previous: built))
     }
+
+    /// Changed files a hot-reload patch can't carry: everything but Swift
+    /// sources (asset catalogs, string catalogs, plists, a package manifest).
+    /// Only a full build puts them in the app, where `Bundle.module` and
+    /// `Bundle.main` look first. Empty when there's no record of the last build.
+    static func changedResources(_ ws: Workspace) -> [String] {
+        guard let built = load(ws) else { return [] }
+        return resources(changed(from: built, to: current(ws, previous: built)))
+    }
+
+    /// The files of a change list that aren't Swift code: the manifest counts
+    /// as a resource, since it can add or drop resources.
+    static func resources(_ changed: [String]) -> [String] {
+        changed.filter { !$0.hasSuffix(".swift") || ($0 as NSString).lastPathComponent == "Package.swift" }
+    }
+
+    /// Whether a package test run can skip the app's build: every changed file
+    /// is Swift code in a local package, which the package's test build
+    /// compiles from current sources. A changed resource can't be skipped: the
+    /// tests run in the app, and a package's `Bundle.module` finds the app's
+    /// copy of its resource bundle (from the last full build) before the one
+    /// next to the test bundle.
+    static func onlyPackageCode(_ changed: [String], packageDirs: [String]) -> Bool {
+        let dirs = packageDirs.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        return resources(changed).isEmpty && changed.allSatisfy { f in dirs.contains { f.hasPrefix($0) } }
+    }
 }

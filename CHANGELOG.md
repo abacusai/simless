@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **A new image set in a package's asset catalog reaches the tests and renders.** After adding image sets to a local package's `Icons.xcassets`, `simless test DesignSystemTests/...` failed with `UIImage(named:in: .module)` returning nil until `simless clean`, and renders drew the image empty. A run of package tests after package-only edits skipped the app build, but the tests run in the slot app, and `Bundle.module` finds the app's copy of the package's resource bundle (from the last full build) before the fresh one in the test bundle. Now only Swift edits skip it: any other changed file in a package (asset catalogs, string catalogs, plists, `Package.swift`) builds the app first. `simless reload` does a full build when a resource changed, since a patch carries Swift only, and `simless render` says when the host's resources are older than the disk's.
+
 ## 0.7.2 (2026-10-23)
 
 Fixes from running simless as the screen checker on customer apps in our pipeline: Form and List screens no longer crash the host under the phone idiom, `act` taps a button inside a card, and a List that loads after the first frame is read. All of it is in SimlessRuntime and the CLI, so no `simless init`.

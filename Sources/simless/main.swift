@@ -529,6 +529,10 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     if !args.flags.contains("--json"), let shown = slot.sources ?? slot.build, shown != ws.currentSourcesID() {
         print("note: the host shows the code as of the last build or patch that worked, not the edits on disk since; `simless reload` (or `simless up`) brings it up to date")
     }
+    if !args.flags.contains("--json"), case let resources = BuildState.changedResources(ws), !resources.isEmpty {
+        let shown = resources.prefix(3).map { $0.hasPrefix(ws.root + "/") ? String($0.dropFirst(ws.root.count + 1)) : $0 }
+        print("note: \(resources.count) resource file(s) changed since the last build (\(shown.joined(separator: ", "))\(resources.count > 3 ? ", ..." : "")); the host still has the last build's, so images and strings can be missing or old; `simless reload` (or `simless up`) brings them in")
+    }
     let variants: [(dark: Bool, device: String)] = args.flags.contains("--matrix")
         ? [false, true].flatMap { d in ["iphone", "iphone-small", "ipad"].map { (d, $0) } }
         : [(args.flags.contains("--dark"), args.values["--device"] ?? ws.config.device)]
@@ -615,7 +619,15 @@ func cmdReload(_ args: Args) throws {
         ? ws.changedSources()
         : args.positional.map { $0.hasPrefix("/") ? $0 : "\(FileManager.default.currentDirectoryPath)/\($0)" }
     let kit = "\(ws.root)/\(ws.config.kitFile)"
-    if files.isEmpty && slot.patch > 0 {
+    // A patch carries Swift code only: an added image set, a string catalog
+    // or a plist edit reaches the host through a full build.
+    let resources = args.positional.isEmpty ? BuildState.changedResources(ws) : []
+    if !resources.isEmpty {
+        let shown = resources.prefix(3).map { $0.hasPrefix(ws.root + "/") ? String($0.dropFirst(ws.root.count + 1)) : $0 }
+        Log.step("\(resources.count) resource file(s) changed since the last build (\(shown.joined(separator: ", "))\(resources.count > 3 ? ", ..." : "")): a patch can't carry them; full rebuild")
+        try cmdUp(args)
+        slot = try currentSlot(ws)
+    } else if files.isEmpty && slot.patch > 0 {
         // The edits were undone: the host still runs the last patch, so start it
         // again from the build, which is what the sources say now.
         Slots.stop(slot)

@@ -44,4 +44,32 @@ final class BuildStateTests: XCTestCase {
         try sync(["A.swift": "struct B {}\n"])   // same size, modification time put back
         XCTAssertEqual(BuildState.changed(from: built, to: BuildState.entries(files, previous: built)), files)
     }
+
+    /// A new image set in a package's asset catalog is a change, and one a
+    /// package test run can't skip the app build for: the tests find the app's
+    /// copy of the resource bundle first.
+    func testAnAddedImageSetIsAResourceChange() throws {
+        let catalog = "\(dir!)/src/Sources/Icons.xcassets"
+        try FileManager.default.createDirectory(atPath: catalog, withIntermediateDirectories: true)
+        try "struct A {}\n".write(toFile: "\(dir!)/src/Sources/A.swift", atomically: true, encoding: .utf8)
+        try "{}\n".write(toFile: "\(catalog)/Contents.json", atomically: true, encoding: .utf8)
+        let before = ["\(dir!)/src/Sources/A.swift", "\(catalog)/Contents.json"]
+        let built = BuildState.entries(before)
+        let set = "\(catalog)/map.imageset"
+        try FileManager.default.createDirectory(atPath: set, withIntermediateDirectories: true)
+        try "{}\n".write(toFile: "\(set)/Contents.json", atomically: true, encoding: .utf8)
+        try "<svg/>\n".write(toFile: "\(set)/map.svg", atomically: true, encoding: .utf8)
+        let changed = BuildState.changed(from: built, to: BuildState.entries(before + ["\(set)/Contents.json", "\(set)/map.svg"], previous: built))
+        XCTAssertEqual(changed, ["\(set)/Contents.json", "\(set)/map.svg"])
+        XCTAssertEqual(BuildState.resources(changed), changed)
+        XCTAssertFalse(BuildState.onlyPackageCode(changed, packageDirs: ["\(dir!)/src"]))
+    }
+
+    func testOnlyPackageSwiftEditsSkipTheAppBuild() {
+        let pkg = "/w/Packages/Kit"
+        XCTAssertTrue(BuildState.onlyPackageCode(["\(pkg)/Sources/A/A.swift"], packageDirs: [pkg]))
+        XCTAssertFalse(BuildState.onlyPackageCode(["\(pkg)/Package.swift"], packageDirs: [pkg]))
+        XCTAssertFalse(BuildState.onlyPackageCode(["\(pkg)/Sources/A/Localizable.xcstrings"], packageDirs: [pkg + "/"]))
+        XCTAssertFalse(BuildState.onlyPackageCode(["/w/App/App.swift"], packageDirs: [pkg]))
+    }
 }

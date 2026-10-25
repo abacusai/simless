@@ -96,13 +96,15 @@ enum TestEngine {
     /// Tests never run against a build older than the files on disk: the app
     /// and its hosted test targets come from the last full build, so when a
     /// file it was built from changed, `simless up` runs first. (A run of
-    /// package test targets alone after package edits doesn't need it: those
-    /// build from current sources every run.) If that build fails, nothing runs.
+    /// package test targets alone after package code edits doesn't need it:
+    /// those build from current sources every run. A package resource edit
+    /// does: the tests find the app's copy of the resource bundle first.) If
+    /// that build fails, nothing runs.
     static func ensureCurrentBuild(_ ws: Workspace, unitPart: [String]?, ui: Bool) throws {
         let changed = BuildState.changed(ws)
         if changed.isEmpty { return }
         let packageDirs = ws.packages.map { URL(fileURLWithPath: "\(ws.root)/\($0)").standardizedFileURL.path + "/" }
-        let packageOnly = changed.allSatisfy { f in packageDirs.contains { f.hasPrefix($0) } }
+        let packageOnly = BuildState.onlyPackageCode(changed, packageDirs: packageDirs)
         let packageTargets = Set(Packages.testTargets(ws: ws).flatMap(\.targets))
         let onlyPackageTests = !ui && (unitPart ?? []).count > 0
             && unitPart!.allSatisfy { packageTargets.contains(String($0.split(separator: "/").first ?? "")) }
