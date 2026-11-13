@@ -129,12 +129,19 @@ struct Workspace {
 
     static func localPackages(root: String, project: String) -> [String] {
         let projectDir = (project as NSString).deletingLastPathComponent
-        let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
-        // `relativePath` of XCLocalSwiftPackageReference entries, relative to the project's directory.
-        guard let re = try? NSRegularExpression(pattern: #"isa = XCLocalSwiftPackageReference;\s*relativePath = "?([^";]+)"?;"#) else { return [] }
-        return re.matches(in: pbx, range: NSRange(pbx.startIndex..., in: pbx)).compactMap {
-            Range($0.range(at: 1), in: pbx).map { String(pbx[$0]) }
+        // Paths relative to the project's directory: the JSON project's local
+        // packages, or `relativePath` of XCLocalSwiftPackageReference entries.
+        let paths: [String]
+        if let json = XCProject.load("\(root)/\(project)") {
+            paths = json.packages
+        } else {
+            let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
+            guard let re = try? NSRegularExpression(pattern: #"isa = XCLocalSwiftPackageReference;\s*relativePath = "?([^";]+)"?;"#) else { return [] }
+            paths = re.matches(in: pbx, range: NSRange(pbx.startIndex..., in: pbx)).compactMap {
+                Range($0.range(at: 1), in: pbx).map { String(pbx[$0]) }
+            }
         }
+        return paths
         .map { projectDir.isEmpty ? $0 : "\(projectDir)/\($0)" }
         // Standardize both sides: it also drops /private from /private/tmp paths.
         .map { URL(fileURLWithPath: "\(root)/\($0)").standardizedFileURL.path
@@ -198,6 +205,9 @@ struct Workspace {
     /// because the project's file references are relative to its directory.
     /// The directory containing the .xcodeproj. Scheme containers and test-plan
     /// references are relative to it, not to the repository root.
+    /// The project's JSON file (`project.xcproj`, Xcode 27), or nil for a project.pbxproj.
+    var xcproject: XCProject? { XCProject.load("\(root)/\(config.project)") }
+
     var projectDir: String {
         let dir = (config.project as NSString).deletingLastPathComponent
         return dir.isEmpty ? root : "\(root)/\(dir)"
@@ -207,6 +217,9 @@ struct Workspace {
     func buildProject() throws -> String {
         let original = "\(root)/\(config.project)"
         if native { return original }
+        guard exists("\(original)/project.pbxproj") else {
+            throw SimlessError("\(config.project) is in Xcode's JSON project format, which works in the default native mode only. Remove \"mode\": \"dfi\" from \(Self.configName) or SIMLESS_MODE=dfi from the environment")
+        }
         let name = projectBase
         let variant = "\(projectDir)/\(name).simless.xcodeproj"
         let pbx = try String(contentsOfFile: "\(original)/project.pbxproj", encoding: .utf8)
