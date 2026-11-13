@@ -38,12 +38,16 @@ enum SimulatorLane {
     /// A target's platform from its SDKROOT in the project (iOS when it isn't a
     /// project target, like a local package's tests).
     static func platform(_ target: String, ws: Workspace) -> String {
+        if let json = ws.xcproject { return platform(sdk: json.targets[target]?.sdkroot ?? "iphoneos") }
         guard let pbx = try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8),
               let list = firstMatch(pbx, #"/\* \#(NSRegularExpression.escapedPattern(for: target)) \*/ = \{\s*isa = PBXNativeTarget;\s*buildConfigurationList = ([0-9A-F]+)"#),
               let configs = firstMatch(pbx, #"\#(list)[^=]*= \{\s*isa = XCConfigurationList;\s*buildConfigurations = \(([^)]*)\)"#),
               let config = matches(configs, #"([0-9A-F]{24})"#).first,
               let settings = firstMatch(pbx, #"\#(config)[^=]*= \{\s*isa = XCBuildConfiguration;\s*buildSettings = \{([\s\S]*?)\};\s*name"#) else { return "iOS" }
-        let sdk = firstMatch(settings, #"SDKROOT = ([a-z]+);"#) ?? "iphoneos"
+        return platform(sdk: firstMatch(settings, #"SDKROOT = ([a-z]+);"#) ?? "iphoneos")
+    }
+
+    static func platform(sdk: String) -> String {
         switch sdk {
         case "watchos": return "watchOS"
         case "appletvos": return "tvOS"

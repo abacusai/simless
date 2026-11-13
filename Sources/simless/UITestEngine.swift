@@ -37,10 +37,12 @@ enum UITestEngine {
             names = Set(Workspace.testTargets(inXCTestRun: file)
                 .filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
         }
-        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
-        let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
+        let json = ws.xcproject
+        let pbx = json != nil ? "" : (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        let unbuilt = includingUnbuilt ? uiTestTargets(ws).subtracting(names) : []
         return (names.union(unbuilt)).sorted().compactMap { name in
-            let dirs = PBX.synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
+            let synchronized = json.map { $0.targets[name]?.folders ?? [] } ?? PBX.synchronizedFolders(target: name, pbx: pbx)
+            let dirs = synchronized.map { "\(ws.projectDir)/\($0)" }
                 + (ws.config.tests?.uiSources?[name].map { ["\(ws.root)/\($0)"] } ?? [])
             let folders = dirs.isEmpty ? ["\(ws.projectDir)/\(name)"].filter { exists($0) } : dirs
             let sources = folders.flatMap { dir -> [String] in
@@ -52,6 +54,11 @@ enum UITestEngine {
     }
 
     /// Every UI test target in the project, built or not.
+    static func uiTestTargets(_ ws: Workspace) -> Set<String> {
+        if let json = ws.xcproject { return Set(json.targets.values.filter(\.isUITests).map(\.name)) }
+        return uiTestTargets(pbx: (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? "")
+    }
+
     static func uiTestTargets(pbx: String) -> Set<String> {
         var out = Set<String>()
         for block in pbx.components(separatedBy: "isa = PBXNativeTarget;").dropFirst() {

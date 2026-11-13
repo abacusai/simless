@@ -598,9 +598,11 @@ enum TestEngine {
     /// (test plans included) and every local package's.
     static func expectedTargets(_ ws: Workspace, packageTargets: [String]) -> [String] {
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
-        let ui = UITestEngine.uiTestTargets(pbx: pbx)
+        let json = ws.xcproject
+        let ui = UITestEngine.uiTestTargets(ws)
         // Only targets that exist: a scheme can still list one that was removed.
-        let projectTargets = Set(pbx.matches(of: #/\/\* ([^*]+) \*\/ = \{\s*isa = PBXNativeTarget;/#).map { String($0.1) })
+        let projectTargets = json.map { Set($0.targets.keys) }
+            ?? Set(pbx.matches(of: #/\/\* ([^*]+) \*\/ = \{\s*isa = PBXNativeTarget;/#).map { String($0.1) })
         let scheme = SimulatorLane.schemes(ws).filter { $0.value == ws.config.scheme }.keys
             .filter { projectTargets.contains($0) && !ui.contains($0) && SimulatorLane.platform($0, ws: ws) == "iOS" }
         return Array(Set(scheme).union(packageTargets)).sorted()

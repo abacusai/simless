@@ -84,7 +84,8 @@ func cmdInit(_ args: Args) throws {
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? cwd
     let fm = FileManager.default
     let project = try args.values["--project"] ?? findProject(in: root)
-    guard exists("\(root)/\(project)/project.pbxproj") else { throw SimlessError("\(project) is not an Xcode project") }
+    let jsonProject = XCProject.load("\(root)/\(project)")
+    guard jsonProject != nil || exists("\(root)/\(project)/project.pbxproj") else { throw SimlessError("\(project) is not an Xcode project") }
     let projectDir = (project as NSString).deletingLastPathComponent        // "" or e.g. "ios"
     let base = ((project as NSString).lastPathComponent as NSString).deletingPathExtension
     func inProjectDir(_ p: String) -> String { projectDir.isEmpty ? p : "\(projectDir)/\(p)" }
@@ -116,7 +117,7 @@ func cmdInit(_ args: Args) throws {
     // the target's (checked for the folder it goes into, since a classic group
     // can hold synchronized subfolders), or else added to the target by hand.
     let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
-    let synchronized = PBX.synchronizedFolders(target: appTarget, pbx: pbx).map(inProjectDir)
+    let synchronized = (jsonProject.map { $0.targets[appTarget]?.folders ?? [] } ?? PBX.synchronizedFolders(target: appTarget, pbx: pbx)).map(inProjectDir)
     func isSynchronized(_ dir: String) -> Bool { synchronized.contains { dir == $0 || dir.hasPrefix($0 + "/") || $0 == "." } }
     var kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
     if args.values["--kit-dir"] == nil, !isSynchronized(kitDir) {

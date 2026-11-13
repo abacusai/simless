@@ -136,7 +136,7 @@ Mostly. Here are screens from the [demo app](Examples/SimlessDemo), rendered by 
 ## Requirements
 
 - An Apple Silicon Mac with Xcode 26 or later. A VM works too, and so does a GitHub-hosted macOS runner. The iOS SDK that ships with Xcode is enough, no simulator runtime is needed.
-- A SwiftUI iOS app in an `.xcodeproj`, at the repository root or in a subfolder such as `ios/`. Views can live in the app target or in local Swift packages, and both hot-reload. Swift 5 and Swift 6 language modes are supported, with or without MainActor default isolation. A unit-test target is optional: `simless test` runs it when there is one.
+- A SwiftUI iOS app in an `.xcodeproj`, at the repository root or in a subfolder such as `ios/`. Both project formats work: the classic `project.pbxproj` and Xcode 27's JSON `project.xcproj` (the JSON one in the default native mode only). Views can live in the app target or in local Swift packages, and both hot-reload. Swift 5 and Swift 6 language modes are supported, with or without MainActor default isolation. A unit-test target is optional: `simless test` runs it when there is one.
 
 That's all. Older versions ran the app as a signed "Designed for iPad" install, which needed an Apple Development certificate and a wildcard profile that includes the Mac. That mode is still there (`"mode": "dfi"`, see [Options](#options-in-simlessjson)), but nothing needs it.
 
