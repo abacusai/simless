@@ -3,6 +3,12 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## 0.7.4 (2026-11-13)
+
+Support for Xcode 27's JSON project format, reported on GitHub. It's all in the CLI, so no `simless init` is needed for existing projects.
+
+- **Projects in Xcode's JSON format work** ([#37](https://github.com/abacusai/simless/issues/37)). A project converted to `project.xcproj` has no `project.pbxproj`, so `simless init` stopped with "is not an Xcode project", and test discovery couldn't see its targets. simless now reads the JSON file for what it read from the pbxproj: targets, UI test targets, each target's SDK, synchronized folders and local packages. Xcode builds the project as it is, simless never converts it. On the demo app converted with `xcodebuild -convert-project xcproj`, init, `render all` (16 screens), `test all` (10 passed) and `test ui` (19 passed, 1 skipped) give the same results as on the pbxproj version. The JSON format works in the default native mode only, `"mode": "dfi"` rewrites the pbxproj and stops with an error that says so.
+
 ## 0.7.3 (2026-10-25)
 
 Fixes for the five issues reported on GitHub after 0.7.1: schemes with several test plans, UI tests on a shared base class, Swift Testing image attachments, a deprecation warning the kit put in every Debug build, and screens with an empty `.safeAreaBar`. Run `simless init` once to get kit 7, which the last two need.
